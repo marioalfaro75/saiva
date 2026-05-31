@@ -438,7 +438,7 @@ Because this is a self‑hosted family tool (not a growth product), success = re
 ---
 
 ## 18. Open questions
-1. **Tech stack:** OK with **Python/FastAPI + React** (and **Caddy** for TLS), or do you prefer an all‑TypeScript stack / another DB?
+1. ~~**Tech stack:** OK with **Python/FastAPI + React** (and **Caddy** for TLS)?~~ ✅ **Resolved — confirmed Python/FastAPI + React/TypeScript + PostgreSQL + Caddy.** (Alternative all‑TypeScript stack declined.)
 2. **Budgeting philosophy:** flexible category tracking (default), or also offer **envelope/zero‑based** budgeting (YNAB/Goodbudget style) as an option in P2?
 3. **Net worth depth:** simple manual asset/liability tracking, or do you want property value / super / investment tracking emphasised?
 4. **Pay‑cycle:** should periods centre on a **pay cycle** (e.g., fortnightly) as much as calendar months? What's your household's cycle?
