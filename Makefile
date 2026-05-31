@@ -7,8 +7,8 @@ help: ## Show available targets
 	@grep -E '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) \
 		| awk 'BEGIN{FS=":.*?## "}{printf "  \033[36m%-10s\033[0m %s\n", $$1, $$2}'
 
-deploy: ## Bootstrap .env, build, start, wait for health (SEED=1 to add demo data)
-	@./scripts/deploy.sh $(if $(filter 1,$(SEED)),--seed,)
+deploy: ## Deploy (SEED=1 add demo · LAN=1 expose on LAN over https · SITE=<addr> custom address)
+	@./scripts/deploy.sh $(if $(filter 1,$(SEED)),--seed,) $(if $(filter 1,$(LAN)),--lan,) $(if $(SITE),--site $(SITE),)
 
 seed: ## Load demo data into a running stack
 	$(COMPOSE) exec -T api python -m app.services.seed

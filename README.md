@@ -49,16 +49,53 @@ make down                              # stop, keep data   |   make destroy = st
 
 Run `make help` for all targets (`deploy seed up down destroy restart logs ps`).
 
-**Custom hostname / real certificate.** For a public domain, set
+**Reach it from other devices (LAN over HTTPS).** By default Saiva listens on
+`https://localhost` (this machine only). To expose it to your home network over HTTPS:
+
+```bash
+make deploy LAN=1                      # auto-detects this host's LAN IP
+make deploy SITE=https://192.168.1.50  # …or pin a specific address
+# (equivalently: ./scripts/deploy.sh --lan   or   --site https://192.168.1.50)
+```
+
+That sets `SAIVA_SITE_ADDRESS` so Caddy serves HTTPS at that address; for a LAN IP it uses
+its **internal CA** automatically. Open `https://<host-ip>` from any device on the
+network — you'll get a one‑time certificate warning until you trust that CA (next
+paragraph), since the cert isn't from a public authority.
+
+**Custom hostname / trusted certificate.** For a public domain, set
 `SAIVA_SITE_ADDRESS=finance.example.com` and `ACME_EMAIL=you@example.com` in `.env` and
-Caddy auto‑provisions a Let's Encrypt cert; for a LAN IP, see the `tls internal` note in
-[`infra/Caddyfile`](infra/Caddyfile). To remove the local‑cert warning instead, trust
-Caddy's root CA:
+Caddy auto‑provisions a trusted Let's Encrypt cert (no warnings, on any device). To clear
+the warning for a LAN/internal setup instead, trust Caddy's root CA:
 
 ```bash
 docker compose cp caddy:/data/caddy/pki/authorities/local/root.crt ./caddy-root.crt
 # then import caddy-root.crt into your OS / browser trust store
 ```
+
+### Running on Proxmox LXC
+
+Saiva runs as Docker containers, so on Proxmox you first need an LXC that *can* run
+Docker (or use a VM, which needs no special setup). For an LXC:
+
+1. Use a **Debian/Ubuntu** container — an *unprivileged* one is fine.
+2. **Enable nesting** (required for Docker), plus `keyctl`. From the Proxmox host shell:
+   ```bash
+   pct set <ctid> --features nesting=1,keyctl=1
+   ```
+   (or *Container → Options → Features → Nesting* in the web UI), then start the container.
+3. **Install Docker Engine + the Compose plugin** inside the container.
+4. Clone the repo and run `make deploy` exactly as above.
+
+Notes:
+- **Storage driver:** Docker's `overlay2` works with nesting on modern kernels; on
+  ZFS‑backed containers you may need `fuse-overlayfs` if Docker complains on first start.
+- **Access / TLS:** `https://localhost` only works from *inside* the container. From your
+  LAN, use the container's IP and set `SAIVA_SITE_ADDRESS=<lxc-ip>` with `tls internal`
+  (see [`infra/Caddyfile`](infra/Caddyfile)), or point a domain at it with `ACME_EMAIL`
+  for a trusted certificate.
+- **Easiest alternative:** run Docker in a Proxmox **VM** instead — the steps above then
+  work verbatim, with no nesting or storage tweaks.
 
 ## Local development
 
