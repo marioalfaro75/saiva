@@ -50,6 +50,7 @@ It runs as a container, on the home network behind HTTPS, with the option to exp
 | AI advisor | **Bring‑your‑own** cloud API key (Anthropic / OpenAI / Gemini) **or** a **local model** (Ollama). User chooses; privacy‑preserving by default. |
 | Peer benchmarking | **ABS public data** (Household Expenditure Survey + Monthly Household Spending Indicator). Community‑pooled benchmarks deferred. |
 | Transport security | **HTTPS only**, automatic TLS. |
+| Tech stack | **Python/FastAPI + React/TypeScript + PostgreSQL + Caddy** (auto‑HTTPS). |
 
 ---
 
