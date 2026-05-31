@@ -9,20 +9,56 @@ BYO‑key or a local model) grounded in their own data. Runs in a container, HTT
 > (CSV/OFX/QFX) with de‑duplication, rule + ML categorisation, transfer
 > detection, and an overview dashboard. See the [PRD](docs/PRD.md) for the full plan.
 
-## Quick start (Docker)
+## Run it in a container
+
+**Prerequisites:** Docker Engine + the Docker Compose plugin, and ports **80** and
+**443** free on the host.
+
+**1. Start it — one command.** Generates `.env` (with a secure random `SECRET_KEY`
+and DB password), builds the images, starts the stack, and waits until it's healthy:
+
+```bash
+make deploy            # equivalently: ./scripts/deploy.sh
+make deploy SEED=1     # also load demo data (login: demo@saiva.app / demodemodemo)
+```
+
+<details>
+<summary>Prefer to run Compose by hand?</summary>
 
 ```bash
 cp .env.example .env
-# edit .env: set SECRET_KEY (e.g. `openssl rand -hex 32`) and a DB password
+# edit .env: set SECRET_KEY (e.g. `openssl rand -hex 32`) and POSTGRES_PASSWORD
 docker compose up -d --build
 ```
+</details>
 
-Then open **https://localhost** (Caddy issues a locally‑trusted certificate for dev).
-On first visit you'll create your household and owner login. To explore with realistic
-sample data, go to **Settings → Load demo data**.
+**2. Open it.** Browse to **https://localhost**. Caddy serves HTTPS using its own
+internal CA; because that CA lives inside the container your browser won't recognise
+it, so accept the one‑time certificate warning (**Advanced → Proceed** — it's your own
+machine). On first visit you create your household and owner login; for sample data use
+**Settings → Load demo data** (or `make deploy SEED=1`).
 
-For a LAN address or a public domain, set `SAIVA_SITE_ADDRESS` (and `ACME_EMAIL` for a
-real domain) in `.env` — see [`infra/Caddyfile`](infra/Caddyfile).
+**3. Verify & manage.**
+
+```bash
+docker compose ps                      # all services up; db shows "healthy"
+curl -k https://localhost/api/health   # -> {"status":"ok"}   (-k accepts the local cert)
+make logs                              # follow API logs
+make down                              # stop, keep data   |   make destroy = stop + wipe DB
+```
+
+Run `make help` for all targets (`deploy seed up down destroy restart logs ps`).
+
+**Custom hostname / real certificate.** For a public domain, set
+`SAIVA_SITE_ADDRESS=finance.example.com` and `ACME_EMAIL=you@example.com` in `.env` and
+Caddy auto‑provisions a Let's Encrypt cert; for a LAN IP, see the `tls internal` note in
+[`infra/Caddyfile`](infra/Caddyfile). To remove the local‑cert warning instead, trust
+Caddy's root CA:
+
+```bash
+docker compose cp caddy:/data/caddy/pki/authorities/local/root.crt ./caddy-root.crt
+# then import caddy-root.crt into your OS / browser trust store
+```
 
 ## Local development
 
