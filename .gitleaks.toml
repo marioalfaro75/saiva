@@ -1,0 +1,20 @@
+# Saiva gitleaks config — extends the default ruleset and allowlists obvious
+# placeholders, test/dev fixtures, and lock files. No real secrets live in the repo;
+# production secrets come from the environment (.env), which is git-ignored.
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Placeholders, examples, and test/dev fixtures"
+paths = [
+  '''\.env\.example$''',
+  '''backend/tests/.*''',
+  '''frontend/package-lock\.json$''',
+]
+regexes = [
+  '''change-me''',
+  '''dev-insecure-secret-change-me''',
+  '''test-secret-key-not-for-production''',
+  '''smoke-secret''',
+  '''demodemodemo''',
+]

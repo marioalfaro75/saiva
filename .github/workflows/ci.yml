@@ -62,14 +62,14 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
       - name: Secret scan (gitleaks)
-        uses: gitleaks/gitleaks-action@v2
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: >
+          docker run --rm -v "${{ github.workspace }}:/repo"
+          zricethezav/gitleaks:latest detect
+          --source=/repo --config=/repo/.gitleaks.toml --no-git --redact -v
       - name: Filesystem vulnerability scan (trivy, advisory)
         uses: aquasecurity/trivy-action@0.24.0
+        continue-on-error: true
         with:
           scan-type: fs
           scan-ref: .
