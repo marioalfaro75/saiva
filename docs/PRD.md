@@ -1,13 +1,13 @@
 # Product Requirements Document — Household Finance & Insights App
 
-**Working title:** Tally _(placeholder — name candidates in Appendix E)_
-**Version:** 0.1 — Draft for review
+**Name:** Saiva _(confirmed — see Appendix E)_
+**Version:** 0.2 — All open questions resolved
 **Date:** 31 May 2026
 **Author:** Mario Alfaro
-**Status:** 🟡 Draft / awaiting review & refinement
+**Status:** 🟢 Draft — open questions resolved; ready to plan the build
 **Primary market:** Australia (en‑AU, AUD)
 
-> This is a first‑pass PRD intended as a starting point for discussion. Sections marked **[Decision]** capture choices already made; sections marked **[Open]** still need input. Please mark up anything you want to change, add, or cut.
+> This is a first‑pass PRD intended as a starting point for discussion. Sections marked **[Decision]** capture choices already made. As of v0.2, **all items in [§18](#18-open-questions) have been resolved** and folded into the relevant sections. Please mark up anything you want to change, add, or cut.
 
 ---
 
@@ -36,9 +36,9 @@
 
 ## 1. Summary
 
-**Tally** is a self‑hosted web application that helps an Australian family understand their income and spending, and take action to manage money better. A user uploads bank/credit‑card export files; the app automatically sorts transactions into a small set of meaningful home‑budget categories, then surfaces the family's financial picture through rich, interactive visuals — from a one‑glance overview down to individual transactions.
+**Saiva** is a self‑hosted web application that helps an Australian family understand their income and spending, and take action to manage money better. A user uploads bank/credit‑card export files; the app automatically sorts transactions into a small set of meaningful home‑budget categories, then surfaces the family's financial picture through rich, interactive visuals — from a one‑glance overview down to individual transactions.
 
-Beyond tracking, Tally is **insight‑first**: it proactively highlights where money is going, flags categories where the household spends more than comparable Australian families (using Australian Bureau of Statistics data), detects recurring subscriptions and bills, tracks net worth and savings goals, and forecasts cashflow. Users can connect an LLM of their choice — a cloud provider via their own API key, or a fully local model — to receive tailored, plain‑English advice grounded in the app's own insights and their data.
+Beyond tracking, Saiva is **insight‑first**: it proactively highlights where money is going, flags categories where the household spends more than comparable Australian families (using Australian Bureau of Statistics data), detects recurring subscriptions and bills, tracks net worth and savings goals, and forecasts cashflow. Users can connect an LLM of their choice — a cloud provider via their own API key, or a fully local model — to receive tailored, plain‑English advice grounded in the app's own insights and their data.
 
 It runs as a container, on the home network behind HTTPS, with the option to expose it to the internet later. **Ease of use is a first‑class requirement**: a family should get genuine insight within minutes of their first upload, with minimal manual bookkeeping.
 
@@ -51,6 +51,14 @@ It runs as a container, on the home network behind HTTPS, with the option to exp
 | Peer benchmarking | **ABS public data** (Household Expenditure Survey + Monthly Household Spending Indicator). Community‑pooled benchmarks deferred. |
 | Transport security | **HTTPS only**, automatic TLS. |
 | Tech stack | **Python/FastAPI + React/TypeScript + PostgreSQL + Caddy** (auto‑HTTPS). |
+| Name | **Saiva** (confirmed). |
+| Budgeting | **Flexible category tracking by default**, with **optional envelope/rollover** budgets per category (P2). |
+| Net worth | **Simple manual assets & liabilities** over time; detailed property/super/investment valuation out of scope for v1. |
+| Pay‑cycle | **Configurable**: align periods to a **weekly / fortnightly / monthly** pay cycle, **or** keep to **calendar months over the financial year**. |
+| Notifications | **In‑app + email (SMTP)** for the first alerts/digests release; **PWA/web push deferred** to a later phase. |
+| AI hosting default | Both supported; **cloud BYO‑key is the practical default**, with **local (Ollama) fully supported** on capable hardware. Privacy‑preserving defaults retained. |
+| Pilot scope | Beyond the author's household, **a few friendly families** pilot it — each a separate single‑household deployment — to generalise bank formats & benchmarks. |
+| Historical data | **Start fresh** — no bulk migration of legacy spreadsheets at launch (historical bank exports can still be imported through the normal pipeline). |
 
 ---
 
@@ -67,9 +75,9 @@ It runs as a container, on the home network behind HTTPS, with the option to exp
 
 ### 2.2 Non‑goals (for now) **[Decision]**
 - Not a multi‑tenant SaaS (single household per deployment).
-- Not a bank, broker, or payment system — Tally never moves money.
+- Not a bank, broker, or payment system — Saiva never moves money.
 - Not a tax‑return product (though category data should be export‑friendly for an accountant).
-- Not a provider of **personal financial product advice** under an AFSL — Tally gives general, factual budgeting information and the user's own AI does the rest (see [§17](#17-risks--mitigations)).
+- Not a provider of **personal financial product advice** under an AFSL — Saiva gives general, factual budgeting information and the user's own AI does the rest (see [§17](#17-risks--mitigations)).
 - Not investment portfolio management / trading (basic asset tracking for net worth only).
 - No native iOS/Android apps in v1 — responsive web + installable PWA instead.
 
@@ -180,10 +188,10 @@ The smallest thing that delivers the core promise.
 **Exit criteria:** a new user imports a real CBA/Westpac/NAB/ANZ export and gets an accurate, useful overview in under 5 minutes, with ≥85% of transactions auto‑categorised.
 
 ### Phase 2 — "Understand & improve"
-- **Budgets** per category (monthly/fortnightly/annual; optional rollover/envelope).
+- **Budgets** per category — **flexible tracking by default**; period monthly/fortnightly/annual; **optional rollover/envelope** behaviour.
 - **Insights & recommendations engine** (rule‑based): top movers, creeping categories, savings opportunities, fee/interest detection, duplicate subscriptions.
 - **Recurring & subscription detection**; **upcoming bills** view.
-- **Net worth** (assets/liabilities incl. mortgage/offset) over time.
+- **Net worth** — **simple manual assets & liabilities** (incl. mortgage/offset) over time; detailed investment/property valuation out of scope for v1.
 - **Savings goals** with progress + suggested contributions.
 - **ABS peer benchmarking**: "Compared to similar AU households you spend X% more on Y."
 - Richer visuals (Sankey of money flow, heatmaps, calendar).
@@ -191,13 +199,13 @@ The smallest thing that delivers the core promise.
 ### Phase 3 — "Advice & foresight"
 - **AI advisor** (BYO cloud key + local Ollama) with structured access to the user's insights/data and privacy controls.
 - **Cashflow forecasting** (project balances forward; "what‑if" scenarios).
-- **Anomaly/alert notifications** (email/push/PWA).
+- **Anomaly/alert notifications** — **in‑app + email** for this release (**PWA/web push deferred to Phase 4**).
 - Scheduled **email digests** (weekly/monthly summary).
 - Annual **financial‑year report** export (PDF/CSV) for the accountant.
 
 ### Phase 4 — "Automate & extend" (later)
 - **Open Banking / CDR feeds** via an accredited aggregator (e.g., Basiq) so transactions flow in automatically — architected for since v1.
-- Receipt capture / OCR; rules marketplace; public REST API; optional **anonymised community benchmarks**.
+- **PWA/web push notifications**; receipt capture / OCR; rules marketplace; public REST API; optional **anonymised community benchmarks**.
 
 ---
 
@@ -206,7 +214,7 @@ The smallest thing that delivers the core promise.
 > Notation: **R#** requirement; **(MVP)** = Phase 1; **(P2/P3/P4)** = later phase.
 
 ### 8.1 Onboarding & setup
-- **R1 (MVP)** First‑run wizard: create household, set country=Australia, currency=AUD, locale=en‑AU, state/territory, financial‑year start (default 1 July), household size & composition (adults/children) and income band (used for benchmarking; optional, skippable).
+- **R1 (MVP)** First‑run wizard: create household, set country=Australia, currency=AUD, locale=en‑AU, state/territory, financial‑year start (default 1 July), **budget‑period basis (calendar months over the FY, or a weekly/fortnightly/monthly pay‑cycle alignment)**, household size & composition (adults/children) and income band (used for benchmarking; optional, skippable).
 - **R2 (MVP)** Add accounts manually (name, institution, type: everyday/savings/credit card/home loan/offset/personal loan/cash/investment, opening balance).
 - **R3 (MVP)** Invite/create additional family‑member logins with roles: **Owner** (full control), **Adult** (full data, no destructive admin), **Viewer** (read‑only). Optional **kid/teen view** later.
 
@@ -228,16 +236,16 @@ The smallest thing that delivers the core promise.
 - **R16 (P2)** **Recurring detection**: identify subscriptions/bills by cadence + stable merchant/amount; group them.
 
 ### 8.4 Dashboard & visuals (high level → detail)
-- **R17 (MVP)** **Overview dashboard** with period selector (this month / pay cycle / FY / custom): total **income**, total **expenses**, **net cashflow**, **savings rate**, top categories, and trend sparkals.
+- **R17 (MVP)** **Overview dashboard** with a period selector honouring the household's configured **period basis** (this month / pay cycle / FY / custom): total **income**, total **expenses**, **net cashflow**, **savings rate**, top categories, and trend sparkals.
 - **R18 (MVP)** **Spend‑by‑category** breakdown (donut/bar) → click a category → subcategory → transaction list.
 - **R19 (MVP)** **Trends over time** (stacked area/line) by category and total.
 - **R20 (MVP)** **Transaction explorer**: fast search, filter (date/account/category/amount/merchant/tag), inline edit, bulk actions.
 - **R21 (P2)** **Money‑flow Sankey** (income → categories → savings), **calendar heatmap** of daily spend, **merchant leaderboard**.
-- **R22 (P2)** **Net‑worth** chart (assets − liabilities) over time.
+- **R22 (P2)** **Net‑worth** chart (assets − liabilities) over time, built from **simple manual asset/liability entries** (detailed investment/property valuation out of scope for v1).
 - **R23 (MVP)** Every chart element is drill‑through and every figure has a visible definition/tooltip.
 
 ### 8.5 Budgets, goals & bills
-- **R24 (P2)** Create **budgets** per category (monthly/fortnightly/annual), with progress bars, projected end‑of‑period, and over/under alerts; optional **rollover (envelope)** behaviour.
+- **R24 (P2)** Create **budgets** per category — **flexible tracking by default** (monthly/fortnightly/annual) — with progress bars, projected end‑of‑period, and over/under alerts; **optional rollover (envelope)** behaviour for households who prefer zero‑based budgeting.
 - **R25 (P2)** **Savings goals** (target amount + date, linked account), progress, and suggested per‑pay contribution.
 - **R26 (P2)** **Upcoming bills / recurring** calendar; **reminders** ahead of due dates.
 - **R27 (P3)** **Cashflow forecast**: project account balances forward from recurring items + budgets; simple **what‑if** (e.g., "cut dining 20%").
@@ -258,7 +266,7 @@ The smallest thing that delivers the core promise.
 - **R34 (P3)** Scheduled **email digest** (weekly/monthly).
 
 ### 8.8 Notifications
-- **R35 (P3)** Channels: in‑app, **email (SMTP)**, and **PWA/web push**. Events: budget thresholds, unusual spend, upcoming bills, large transactions, low projected balance. All opt‑in and quiet by default.
+- **R35 (P3)** Channels for the first alerts release: **in‑app** and **email (SMTP)**; **(P4)** add **PWA/web push**. Events: budget thresholds, unusual spend, upcoming bills, large transactions, low projected balance. All opt‑in and quiet by default.
 
 ### 8.9 Administration
 - **R36 (MVP)** **Backup/restore** (one‑click DB export + scheduled dumps), **audit log** of logins and destructive actions, settings for locale/security/AI/SMTP.
@@ -270,6 +278,7 @@ The smallest thing that delivers the core promise.
 - **Currency:** AUD, format `$1,234.56`; thousands/decimal per en‑AU. Multi‑currency accounts are out of scope for v1 (single‑currency household assumed).
 - **Dates:** DD/MM/YYYY display; importer defaults to AU date parsing.
 - **Financial year:** default **1 July – 30 June**; period selectors and FY reports respect it.
+- **Pay‑cycle alignment:** budgets and period views can centre on a **weekly, fortnightly, or monthly** pay cycle, **or** stay on **calendar months within the financial year** — configurable per household, defaulting to calendar months + FY.
 - **Location:** state/territory (NSW/VIC/QLD/SA/WA/TAS/NT/ACT) captured for benchmarking and (later) public‑holiday/bill‑timing context.
 - **Domain awareness:** recognise common AU constructs — **BPAY**, **PayID/Osko**, **EFTPOS**, **direct debit**, **BNPL** (Afterpay/Zip/Humm), **Medicare/private health**, **childcare/CCS**, **strata**, **rego**, **offset accounts**, super contributions, HECS/HELP — in merchant rules and the category taxonomy.
 - **Banks:** first‑class CSV/OFX mapping profiles for CBA, Westpac, NAB, ANZ, ING, Macquarie, Bendigo, UP, Bankwest, Suncorp.
@@ -277,12 +286,12 @@ The smallest thing that delivers the core promise.
 
 ---
 
-## 10. AI advisor **[Decision: BYO cloud key + local]**
+## 10. AI advisor **[Decision: cloud BYO‑key default; local supported]**
 
-A user can connect an LLM to get tailored, conversational advice grounded in their own data and Tally's insights.
+A user can connect an LLM to get tailored, conversational advice grounded in their own data and Saiva's insights.
 
 ### 10.1 Capabilities
-- **R37 (P3)** **Provider‑agnostic** connection: Anthropic (Claude), OpenAI, Google Gemini, or **local via Ollama** (or any OpenAI‑compatible endpoint). User supplies endpoint/model/API key; keys stored encrypted.
+- **R37 (P3)** **Provider‑agnostic** connection: Anthropic (Claude), OpenAI, Google Gemini, or **local via Ollama** (or any OpenAI‑compatible endpoint). User supplies endpoint/model/API key; keys stored encrypted. **Cloud BYO‑key is the practical default for most households; local (Ollama) is fully supported where hardware allows.**
 - **R38 (P3)** **Ask‑your‑data chat**: "Where can we realistically save $400/month?", "Why was March so expensive?", "Are our utilities high for a family of four in QLD?" The model answers using structured tools.
 - **R39 (P3)** **Tool/function calling** over a safe, read‑only data API: `get_summary(period)`, `spend_by_category(period)`, `compare_to_benchmark(category)`, `list_subscriptions()`, `list_recurring_bills()`, `get_goals()`, `find_fees(period)`, `forecast_balance(...)`. The model requests aggregates rather than dumping raw ledgers.
 - **R40 (P3)** **Proactive narratives**: optionally let the model turn the insight feed and FY report into a plain‑English summary with prioritised actions.
@@ -313,7 +322,7 @@ A user can connect an LLM to get tailored, conversational advice grounded in the
 
 ## 12. Proposed technical architecture
 
-> Proposal for discussion — open to your stack preferences ([§18](#18-open-questions)).
+> Stack **confirmed** (Python/FastAPI + React/TypeScript + PostgreSQL + Caddy); see [§18 Q1](#18-open-questions). The component view below is the implementation starting point.
 
 ### 12.1 Components (single‑host Docker Compose)
 ```
@@ -353,7 +362,7 @@ A user can connect an LLM to get tailored, conversational advice grounded in the
 | **Auth** | App‑native accounts, Argon2id hashing, session or JWT, optional **TOTP 2FA** | Simple, self‑contained, no external IdP required. |
 | **Packaging** | Docker images + `docker compose` (+ optional Ollama profile) | One‑command deploy; clean upgrades. |
 
-> **Alternative considered:** a single‑language TypeScript stack (Node/NestJS) to simplify contribution. Python is proposed because data wrangling + ML + LLM tooling are central. Happy to switch — flag in §18.
+> **Alternative considered:** a single‑language TypeScript stack (Node/NestJS) to simplify contribution — **weighed and declined**. Python stands because data wrangling + ML + LLM tooling are central.
 
 ### 12.3 Deployment & HTTPS
 - **LAN‑only:** Caddy issues a certificate from an internal CA (or self‑signed) for a `.local`/chosen hostname; documented trust step. HTTP always redirects to HTTPS.
@@ -419,7 +428,7 @@ Because this is a self‑hosted family tool (not a growth product), success = re
 | Trust | Imports completed without a support workaround | ≥ 90% of supported banks |
 | Reliability | Failed/duplicated imports | < 1% |
 
-(For a self‑hosted build, these are validated with a small pilot group / dogfooding rather than fleet analytics.)
+(For a self‑hosted build, these are validated by **dogfooding plus a small pilot of a few friendly families** — each running their own deployment — rather than fleet analytics. The pilot deliberately spans several banks to stress‑test import mapping and benchmarking.)
 
 ---
 
@@ -438,15 +447,18 @@ Because this is a self‑hosted family tool (not a growth product), success = re
 ---
 
 ## 18. Open questions
-1. ~~**Tech stack:** OK with **Python/FastAPI + React** (and **Caddy** for TLS)?~~ ✅ **Resolved — confirmed Python/FastAPI + React/TypeScript + PostgreSQL + Caddy.** (Alternative all‑TypeScript stack declined.)
-2. **Budgeting philosophy:** flexible category tracking (default), or also offer **envelope/zero‑based** budgeting (YNAB/Goodbudget style) as an option in P2?
-3. **Net worth depth:** simple manual asset/liability tracking, or do you want property value / super / investment tracking emphasised?
-4. **Pay‑cycle:** should periods centre on a **pay cycle** (e.g., fortnightly) as much as calendar months? What's your household's cycle?
-5. **Notifications:** is **email (SMTP)** enough for v1‑of‑alerts, or is PWA push important early?
-6. **Local LLM hardware:** do you have a machine that can run Ollama (GPU/RAM), or should cloud BYO‑key be the practical default initially?
-7. **Name:** keep **"Tally,"** or pick from [Appendix E](#appendix-e--name-ideas)?
-8. **Pilot scope:** is this just your household, or do you want a couple of friendly families to pilot it (affects how we generalise bank formats/benchmarks)?
-9. **Existing data:** any historical data (old spreadsheets/exports) you want migrated in at launch?
+
+> **All resolved as of v0.2** (31 May 2026). Each decision below is folded into the section noted.
+
+1. ~~**Tech stack:** OK with **Python/FastAPI + React** (and **Caddy** for TLS)?~~ ✅ **Resolved — Python/FastAPI + React/TypeScript + PostgreSQL + Caddy** (alternative all‑TypeScript stack declined). → [§12](#12-proposed-technical-architecture)
+2. ~~**Budgeting philosophy:** flexible tracking, or also envelope/zero‑based?~~ ✅ **Resolved — flexible category tracking is the default, with optional envelope/rollover budgets per category in P2.** → [§7](#7-scope--phased-delivery) (P2), R24
+3. ~~**Net worth depth:** simple, or property/super/investment‑heavy?~~ ✅ **Resolved — simple manual assets & liabilities over time; detailed property/super/investment valuation out of scope for v1.** → R22, R25, [§13](#13-data-model-high-level)
+4. ~~**Pay‑cycle:** centre on a pay cycle, or calendar months?~~ ✅ **Resolved — configurable: align to a weekly/fortnightly/monthly pay cycle, _or_ keep to calendar months over the FY. Set per household at onboarding; default is calendar months + FY.** → R1, R17, [§9](#9-australian-localisation)
+5. ~~**Notifications:** is email enough for v1, or is PWA push important early?~~ ✅ **Resolved — in‑app + email (SMTP) for the first alerts/digests release; PWA/web push deferred to a later phase.** → R34, R35, [§8.8](#88-notifications)
+6. ~~**Local LLM hardware:** can you run Ollama, or is cloud BYO‑key the practical default?~~ ✅ **Resolved — both supported; cloud BYO‑key is the practical default, with local (Ollama) fully supported on capable hardware.** → [§10](#10-ai-advisor)
+7. ~~**Name:** keep "Tally," or pick another?~~ ✅ **Resolved — the app is named _Saiva_.** → title, [Appendix E](#appendix-e--name-ideas)
+8. ~~**Pilot scope:** just your household, or a few friendly families?~~ ✅ **Resolved — a few friendly families will pilot it, each on a separate single‑household deployment; this informs how we generalise bank formats and benchmarks.** → [§16](#16-success-metrics)
+9. ~~**Existing data:** migrate old spreadsheets/exports at launch?~~ ✅ **Resolved — start fresh; no bulk legacy‑spreadsheet migration at launch (historical bank export files can still be imported through the normal pipeline).** → R4, R33
 
 ---
 
@@ -490,7 +502,7 @@ Target first‑class CSV/OFX mapping profiles: **CBA, Westpac, NAB, ANZ, ING, Ma
 ### Appendix C — ABS benchmarking approach
 - **Category structure & cross‑tabs:** ABS **Household Expenditure Survey (HES)** provides average weekly spend across 600+ items, cross‑classified by **income**, **household composition**, **net worth**, and **broad geography** — the backbone for "similar households" comparisons. (Latest detailed HES vintage is 2015‑16.)
 - **Currency/recency adjustment:** scale/contextualise with the ABS **Monthly Household Spending Indicator** (category‑level, updated monthly) and CPI so figures aren't a decade stale.
-- **Mapping:** maintain a mapping from Tally's category taxonomy ([Appendix A](#appendix-a--default-category-taxonomy)) to ABS categories; pick the comparison cohort from the household's size/composition + income band + state.
+- **Mapping:** maintain a mapping from Saiva's category taxonomy ([Appendix A](#appendix-a--default-category-taxonomy)) to ABS categories; pick the comparison cohort from the household's size/composition + income band + state.
 - **Presentation:** "You vs. similar AU households" per category, with a confidence/caveat note. **Always a guide, never a verdict.**
 - **Later:** optional **anonymised community benchmarks** once there's a user base and explicit consent (deferred per [Decision]).
 
@@ -506,7 +518,7 @@ Target first‑class CSV/OFX mapping profiles: **CBA, Westpac, NAB, ANZ, ING, Ma
 9. Seed/demo dataset + onboarding wizard.
 
 ### Appendix E — Name ideas
-Tally (working) · Nestworth · Cobber · Kanga · Ledgerly · Pennan · Households · Tucker · Brolly · Nestegg · Moolah · Worth.
+**Chosen name: _Saiva_.** Other candidates considered: Tally · Nestworth · Cobber · Kanga · Ledgerly · Pennan · Households · Tucker · Brolly · Nestegg · Moolah · Worth.
 
 ### Appendix F — Sources
 Competitive & domain research consulted for this PRD:
