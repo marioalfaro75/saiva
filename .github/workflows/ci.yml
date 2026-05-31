@@ -58,21 +58,13 @@ jobs:
         run: npm run test
 
   security:
-    name: Security scans
+    name: Secret scan
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Secret scan (gitleaks)
-        run: >
-          docker run --rm -v "${{ github.workspace }}:/repo"
-          zricethezav/gitleaks:latest detect
-          --source=/repo --config=/repo/.gitleaks.toml --no-git --redact -v
-      - name: Filesystem vulnerability scan (trivy, advisory)
-        uses: aquasecurity/trivy-action@0.24.0
-        continue-on-error: true
         with:
-          scan-type: fs
-          scan-ref: .
-          severity: HIGH,CRITICAL
-          ignore-unfixed: true
-          exit-code: "0"
+          fetch-depth: 0
+      - name: gitleaks
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
