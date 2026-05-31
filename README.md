@@ -60,6 +60,30 @@ docker compose cp caddy:/data/caddy/pki/authorities/local/root.crt ./caddy-root.
 # then import caddy-root.crt into your OS / browser trust store
 ```
 
+### Running on Proxmox LXC
+
+Saiva runs as Docker containers, so on Proxmox you first need an LXC that *can* run
+Docker (or use a VM, which needs no special setup). For an LXC:
+
+1. Use a **Debian/Ubuntu** container — an *unprivileged* one is fine.
+2. **Enable nesting** (required for Docker), plus `keyctl`. From the Proxmox host shell:
+   ```bash
+   pct set <ctid> --features nesting=1,keyctl=1
+   ```
+   (or *Container → Options → Features → Nesting* in the web UI), then start the container.
+3. **Install Docker Engine + the Compose plugin** inside the container.
+4. Clone the repo and run `make deploy` exactly as above.
+
+Notes:
+- **Storage driver:** Docker's `overlay2` works with nesting on modern kernels; on
+  ZFS‑backed containers you may need `fuse-overlayfs` if Docker complains on first start.
+- **Access / TLS:** `https://localhost` only works from *inside* the container. From your
+  LAN, use the container's IP and set `SAIVA_SITE_ADDRESS=<lxc-ip>` with `tls internal`
+  (see [`infra/Caddyfile`](infra/Caddyfile)), or point a domain at it with `ACME_EMAIL`
+  for a trusted certificate.
+- **Easiest alternative:** run Docker in a Proxmox **VM** instead — the steps above then
+  work verbatim, with no nesting or storage tweaks.
+
 ## Local development
 
 **Backend** (FastAPI, Python 3.11):
