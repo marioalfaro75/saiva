@@ -1,0 +1,33 @@
+# Edge reverse proxy with automatic HTTPS.
+#   - SAIVA_SITE_ADDRESS=localhost            -> locally-trusted cert (dev)
+#   - SAIVA_SITE_ADDRESS=finance.example.com  -> automatic Let's Encrypt (needs ACME_EMAIL)
+#   - SAIVA_SITE_ADDRESS=https://192.168.1.50 -> uncomment `tls internal` below for a LAN IP
+{
+	email {$ACME_EMAIL}
+}
+
+{$SAIVA_SITE_ADDRESS:localhost} {
+	encode gzip
+
+	# For LAN-only IP/hostnames without public DNS, issue from Caddy's internal CA:
+	# tls internal
+
+	# API
+	handle /api/* {
+		reverse_proxy api:8000
+	}
+
+	# Single-page app (static, with client-side routing fallback handled by the web service)
+	handle {
+		reverse_proxy web:8080
+	}
+
+	# Defense-in-depth headers (Caddy adds these at the edge; the API sets its own too)
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Content-Type-Options "nosniff"
+		X-Frame-Options "DENY"
+		Referrer-Policy "strict-origin-when-cross-origin"
+		-Server
+	}
+}
