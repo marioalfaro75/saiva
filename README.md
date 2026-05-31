@@ -11,11 +11,26 @@ BYO‑key or a local model) grounded in their own data. Runs in a container, HTT
 
 ## Quick start (Docker)
 
+One command — generates `.env` (with a secure random `SECRET_KEY` and DB password),
+builds the images, starts the stack, and waits until it's healthy:
+
+```bash
+make deploy            # equivalently: ./scripts/deploy.sh
+make deploy SEED=1     # also load demo data (login: demo@saiva.app / demodemodemo)
+```
+
+Other handy targets: `make logs`, `make ps`, `make down` (keep data), `make destroy`
+(wipe data). Run `make help` for the full list.
+
+<details>
+<summary>Prefer to do it by hand?</summary>
+
 ```bash
 cp .env.example .env
 # edit .env: set SECRET_KEY (e.g. `openssl rand -hex 32`) and a DB password
 docker compose up -d --build
 ```
+</details>
 
 Then open **https://localhost** (Caddy issues a locally‑trusted certificate for dev).
 On first visit you'll create your household and owner login. To explore with realistic
