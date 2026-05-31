@@ -30,3 +30,6 @@ coverage/
 .idea/
 .vscode/
 *.swp
+
+# TS build info
+*.tsbuildinfo
