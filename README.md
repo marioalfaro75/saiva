@@ -5,12 +5,12 @@ spending, get actionable insights and savings recommendations, benchmark against
 similar households (ABS data), and — optionally — chat with an AI advisor (cloud
 BYO‑key or a local model) grounded in their own data. Runs in a container, HTTPS‑only.
 
-> **Status:** Planning (PRD **v0.2** — all open questions resolved). No application code
+> **Status:** Planning (PRD **v0.3** — all open questions resolved; security & testing strategy added). No application code
 > yet — this repo currently contains the product definition.
 
 ## 📄 Product Requirements Document
 
-The full PRD (v0.2 — open questions resolved) lives here:
+The full PRD (v0.3 — open questions resolved; security & testing strategy) lives here:
 
 ➡️ **[`docs/PRD.md`](docs/PRD.md)**
 
@@ -26,5 +26,7 @@ The full PRD (v0.2 — open questions resolved) lives here:
 - **Alerts:** in‑app + email for v1; PWA/web push later.
 - **Benchmarks:** Australian Bureau of Statistics public data.
 - **HTTPS only.**
+- **Security:** secure‑by‑design (OWASP ASVS L2 target) — defense in depth, least privilege, privacy by default.
+- **Testing:** full test pyramid (unit → integration → e2e) + security scanning, enforced by CI quality gates.
 
-All [open questions](docs/PRD.md#18-open-questions) are now resolved (PRD **v0.2**).
+All [open questions](docs/PRD.md#18-open-questions) are now resolved (PRD **v0.3**).
