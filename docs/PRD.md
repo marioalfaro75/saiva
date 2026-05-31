@@ -1,7 +1,7 @@
 # Product Requirements Document — Household Finance & Insights App
 
 **Name:** Saiva _(confirmed — see Appendix E)_
-**Version:** 0.2 — All open questions resolved
+**Version:** 0.3 — Adds secure‑development principles & testing strategy
 **Date:** 31 May 2026
 **Author:** Mario Alfaro
 **Status:** 🟢 Draft — open questions resolved; ready to plan the build
@@ -171,7 +171,7 @@ Research across Australian and global apps, plus the self‑hosted ecosystem (so
 A phased plan that gets to value fast, then layers on intelligence. (Estimates are relative sizing, not commitments.)
 
 ### Phase 0 — Foundations
-Containerised app skeleton, HTTPS via reverse proxy, household + user accounts, secure login, settings (locale/currency/financial year), backup/restore.
+Containerised app skeleton, HTTPS via reverse proxy, household + user accounts, secure login, settings (locale/currency/financial year), backup/restore. **CI pipeline from day one**: automated tests (unit/integration) plus security scanning (lint, type‑check, SAST, dependency/secret/container scans), test‑data fixtures, and a seedable demo dataset — so quality and security gates exist before feature work begins (§11.1, §15.1).
 
 ### Phase 1 — MVP: "See where the money goes" 🎯
 The smallest thing that delivers the core promise.
@@ -317,6 +317,31 @@ A user can connect an LLM to get tailored, conversational advice grounded in the
 - **NFR8 — Internationalisation‑ready:** en‑AU first, but strings externalised and locale/currency pluggable for future markets.
 - **NFR9 — Maintainability:** documented REST API, automated tests, seedable demo dataset for evaluation.
 - **NFR10 — Resource footprint:** sensible defaults to run on ~2 vCPU / 2–4 GB RAM (excluding any local LLM, which is heavier and optional).
+- **NFR11 — Tested & verifiable:** an automated test suite across the testing pyramid, enforced by CI quality gates; see §11.1.
+
+### 11.1 Testing & quality strategy **[Decision]**
+Trustworthy numbers are the whole product, so testing is built in from Phase 0, not bolted on. We follow a **test pyramid** — many fast unit tests, fewer integration tests, a thin layer of end‑to‑end journeys — plus targeted suites for the money‑critical paths.
+
+**Test types**
+- **Unit** — domain logic: categorisation rules, transfer/dedup detection, merchant normalisation, budget/period maths (incl. pay‑cycle vs. calendar‑month logic), net‑worth and savings‑rate calculations, currency/date formatting.
+- **Integration** — API ↔ PostgreSQL, the full import pipeline (parse → dedup → categorise → persist), auth/RBAC, and the AI orchestration layer (privacy modes, redaction, read‑only tool calls) against a mocked provider.
+- **Contract** — the OpenAPI schema and the AI's read‑only data‑API tools, so the frontend and the model can rely on stable shapes.
+- **End‑to‑end** — key journeys in a real browser (Playwright): first‑run wizard, import‑and‑review, drill‑down, correct‑a‑category, set a budget, run a backup/restore.
+- **Importer/parser fixtures** — a corpus of **anonymised, real‑world** CBA/Westpac/NAB/ANZ/ING/etc. CSV/OFX/QFX samples, each with expected parsed output; every new bank format adds a fixture, guarding against the silent format‑drift risk in §17.
+- **Categorisation‑accuracy harness** — a labelled transaction dataset with a regression evaluation that asserts the **≥ 85% first‑pass accuracy** target (§16) and fails CI if a change regresses it.
+- **Security tests** — automated SAST, dependency (SCA), secret, and container‑image scanning in CI; tests for authz boundaries, CSRF/security headers/CSP, rate limiting, and that AI privacy modes never leak raw PII (see §15.1).
+- **Migration & data‑safety tests** — every DB migration is tested forward (and, where feasible, backward); a periodic **restore drill** proves backups are actually usable.
+- **Performance & accessibility** — load tests against the NFR3 budgets on a ~5‑year dataset; automated a11y checks (e.g. axe) toward the WCAG 2.1 AA target (NFR7).
+
+**Quality gates (CI)**
+- Every pull request runs lint, type‑check, unit + integration tests, and the security scans; **a red gate blocks merge**.
+- Coverage targets: **≥ 85%** on backend domain/business logic and the import/categorisation pipeline; meaningful (not vanity) coverage elsewhere.
+- End‑to‑end and performance suites run on merge to `main` and nightly.
+- **Definition of Done** for any feature includes tests at the appropriate level and updated fixtures.
+
+**Test data & environments**
+- A **seedable demo dataset** (also used for onboarding/empty states, §14) and factory helpers keep tests deterministic and let a contributor spin up a realistic instance instantly.
+- **No real personal or financial data in tests or CI** — fixtures are synthetic or anonymised, consistent with the privacy principles in §15.
 
 ---
 
@@ -403,6 +428,22 @@ Core entities (indicative, not final schema):
 ---
 
 ## 15. Security & privacy
+
+### 15.1 Secure‑development principles **[Decision]**
+Because Saiva holds a household's complete financial picture, security is a first‑class engineering constraint, not a later add‑on. Every contributor builds against these principles, and the app targets **OWASP ASVS Level 2**, defending against the **OWASP Top 10** (web), the **OWASP API Security Top 10**, and the **OWASP Top 10 for LLM Applications**, following the **NIST Secure Software Development Framework (SSDF)** and tracking maturity with **OWASP SAMM**.
+
+1. **Secure & private by default.** A fresh install is safe with zero hardening: HTTPS‑only, no telemetry/phone‑home, 2FA available, and the AI advisor defaulting to local or aggregates‑only (§10.2). Security never depends on the user finding a setting.
+2. **Defense in depth.** No single control is load‑bearing — TLS, app hardening, encryption at rest, strong auth, and network‑exposure guidance are layered so one failure isn't a breach.
+3. **Least privilege.** Role‑based access (owner/adult/viewer); the AI advisor gets only a **read‑only, aggregate‑first** data API (§10.1) and can never mutate data; containers and the database run as non‑root with the narrowest grants; secrets are scoped to the component that needs them.
+4. **Minimise attack surface & data.** Ship only the features, ports, and dependencies actually needed; collect the minimum PII; mask/redact account numbers and names before anything leaves the box.
+5. **Never trust input — or model output.** Treat uploaded bank files, CSV/OFX content, API requests, and **LLM responses and tool‑call arguments** as untrusted: validate, normalise, and bound everything; parameterised queries only; output‑encode to prevent XSS; mitigate prompt‑injection by enforcing data‑scope and read‑only tools **server‑side** rather than trusting the model to behave.
+6. **Fail securely.** Deny by default; errors never leak stack traces, secrets, or PII; imports are transactional (all‑or‑nothing per batch) so a failure can't leave corrupt financial data.
+7. **Protect secrets & data at rest.** Field‑level encryption for AI keys and SMTP credentials; encrypted database volume; secrets come from env/secret store and never appear in VCS, images, logs, or error messages.
+8. **Shift security left.** Threat‑model new features; run dependency (SCA), secret, static‑analysis (SAST), and container‑image scans in CI; keep security tests first‑class (see §11.1). A red security gate blocks merge.
+9. **Keep dependencies current & verifiable.** Pin dependencies, patch known CVEs promptly, produce an SBOM, and prefer reproducible builds so the supply chain stays auditable.
+10. **Auditable & transparent.** Log security‑relevant events (logins, destructive actions, AI calls with their data scope); always show the user exactly what will leave their network before it does.
+
+### 15.2 Security controls
 - **Transport:** HTTPS‑only, HSTS, modern TLS (NFR1).
 - **At rest:** encrypted database volume; **field‑level encryption** for secrets (AI keys, SMTP creds) and sensitive PII.
 - **AuthN/Z:** Argon2id password hashing, optional **TOTP 2FA**, session timeout, lockout/back‑off on brute force, role‑based access (owner/adult/viewer).
@@ -516,6 +557,7 @@ Target first‑class CSV/OFX mapping profiles: **CBA, Westpac, NAB, ANZ, ING, Ma
 7. Overview dashboard + category drill‑down + transaction explorer.
 8. Settings (locale/currency/FY) + backup/restore + data export.
 9. Seed/demo dataset + onboarding wizard.
+10. Test & CI/security scaffolding: unit/integration harness, e2e (Playwright), anonymised bank‑file fixtures, categorisation‑accuracy eval, SAST/SCA/secret/container scans, coverage gates.
 
 ### Appendix E — Name ideas
 **Chosen name: _Saiva_.** Other candidates considered: Tally · Nestworth · Cobber · Kanga · Ledgerly · Pennan · Households · Tucker · Brolly · Nestegg · Moolah · Worth.
@@ -535,7 +577,8 @@ Competitive & domain research consulted for this PRD:
 - Finder — Australian household spending statistics: https://www.finder.com.au/insights/australian-household-spending-statistics
 - Bank file formats (CSV/OFX/QIF) & AU exports: https://learn.pocketsmith.com/article/145-preparing-your-bank-files-accepted-file-types · https://www.macquarie.com.au/help/business/manage-your-accounts/statements-and-transactions/export-transactions-as-csv-or-qif-files.html · https://www.easybankconvert.com/articles/qif-ofx-csv-comparison
 - Australia CDR / Open Banking & Basiq: https://www.accc.gov.au/by-industry/banking-and-finance/the-consumer-data-right · https://www.cdr.gov.au/for-providers/become-accredited-data-recipient · https://api.basiq.io/docs/cdr-compliance
+- Security & testing standards referenced: OWASP ASVS https://owasp.org/www-project-application-security-verification-standard/ · OWASP Top 10 https://owasp.org/www-project-top-ten/ · OWASP API Security Top 10 https://owasp.org/API-Security/ · OWASP Top 10 for LLM Applications https://genai.owasp.org/ · OWASP SAMM https://owaspsamm.org/ · NIST Secure Software Development Framework (SSDF) https://csrc.nist.gov/Projects/ssdf · WCAG 2.1 https://www.w3.org/TR/WCAG21/ · Practical Test Pyramid (Fowler) https://martinfowler.com/articles/practical-test-pyramid.html
 
 ---
 
-_End of draft v0.1 — please review and refine. Comments and changes welcome inline._
+_End of draft v0.3 — please review and refine. Comments and changes welcome inline._
