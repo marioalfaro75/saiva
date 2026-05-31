@@ -1,0 +1,14 @@
+# Static SPA server (behind the edge Caddy). Client-side routing falls back to index.html.
+:8080 {
+	root * /srv
+	encode gzip
+	try_files {path} /index.html
+	file_server
+
+	header {
+		X-Content-Type-Options "nosniff"
+		X-Frame-Options "DENY"
+		Referrer-Policy "strict-origin-when-cross-origin"
+		Content-Security-Policy "default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; connect-src 'self'; base-uri 'none'; frame-ancestors 'none'"
+	}
+}
