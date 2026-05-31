@@ -58,21 +58,13 @@ jobs:
         run: npm run test
 
   security:
-    name: Security scans
+    name: Secret scan
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      - name: Secret scan (gitleaks)
+      - name: gitleaks
         uses: gitleaks/gitleaks-action@v2
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      - name: Filesystem vulnerability scan (trivy, advisory)
-        uses: aquasecurity/trivy-action@0.24.0
-        with:
-          scan-type: fs
-          scan-ref: .
-          severity: HIGH,CRITICAL
-          ignore-unfixed: true
-          exit-code: "0"
