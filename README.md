@@ -64,9 +64,9 @@ network — you'll get a one‑time certificate warning until you trust that CA 
 paragraph), since the cert isn't from a public authority.
 
 **Custom hostname / trusted certificate.** For a public domain, set
-`SAIVA_SITE_ADDRESS=finance.example.com` and `ACME_EMAIL=you@example.com` in `.env` and
-Caddy auto‑provisions a trusted Let's Encrypt cert (no warnings, on any device). To clear
-the warning for a LAN/internal setup instead, trust Caddy's root CA:
+`SAIVA_SITE_ADDRESS=finance.example.com` in `.env` and Caddy auto‑provisions a trusted
+Let's Encrypt cert (no warnings, on any device). To clear the warning for a LAN/internal
+setup instead, trust Caddy's root CA:
 
 ```bash
 docker compose cp caddy:/data/caddy/pki/authorities/local/root.crt ./caddy-root.crt
@@ -91,9 +91,9 @@ Notes:
 - **Storage driver:** Docker's `overlay2` works with nesting on modern kernels; on
   ZFS‑backed containers you may need `fuse-overlayfs` if Docker complains on first start.
 - **Access / TLS:** `https://localhost` only works from *inside* the container. From your
-  LAN, use the container's IP and set `SAIVA_SITE_ADDRESS=<lxc-ip>` with `tls internal`
-  (see [`infra/Caddyfile`](infra/Caddyfile)), or point a domain at it with `ACME_EMAIL`
-  for a trusted certificate.
+  LAN, reach it at the container's IP — `make deploy LAN=1` sets `SAIVA_SITE_ADDRESS` to
+  that IP and Caddy serves HTTPS with its internal CA automatically. Point a domain at it
+  (`SAIVA_SITE_ADDRESS=yourdomain`) for a trusted Let's Encrypt certificate.
 - **Easiest alternative:** run Docker in a Proxmox **VM** instead — the steps above then
   work verbatim, with no nesting or storage tweaks.
 

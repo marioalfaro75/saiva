@@ -1,11 +1,10 @@
 # Edge reverse proxy with automatic HTTPS.
 #   - SAIVA_SITE_ADDRESS=localhost            -> locally-trusted cert (dev)
-#   - SAIVA_SITE_ADDRESS=finance.example.com  -> automatic Let's Encrypt (needs ACME_EMAIL)
+#   - SAIVA_SITE_ADDRESS=finance.example.com  -> automatic Let's Encrypt certificate
 #   - SAIVA_SITE_ADDRESS=https://192.168.1.50 -> LAN access; internal CA used automatically
-{
-	email {$ACME_EMAIL}
-}
-
+#
+# (Optional) for Let's Encrypt expiry-notice emails, add a global block above the site:
+#   { email you@example.com }
 {$SAIVA_SITE_ADDRESS:localhost} {
 	encode gzip
 

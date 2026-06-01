@@ -49,7 +49,6 @@ services:
       - web
     environment:
       SAIVA_SITE_ADDRESS: ${SAIVA_SITE_ADDRESS:-localhost}
-      ACME_EMAIL: ${ACME_EMAIL:-}
     ports:
       - "80:80"
       - "443:443"
