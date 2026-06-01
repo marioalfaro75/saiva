@@ -111,6 +111,8 @@ if [ "$LAN" -eq 1 ] && [ -z "$SITE" ]; then
 fi
 if [ -n "$SITE" ]; then
   set_env_var SAIVA_SITE_ADDRESS "$SITE"
+  host="${SITE#http://}"; host="${host#https://}"; host="${host%%/*}"
+  set_env_var SAIVA_SITE_HOST "$host"
   echo "  → serving at ${SITE}"
 fi
 
