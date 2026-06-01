@@ -58,15 +58,15 @@ make deploy SITE=https://192.168.1.50  # …or pin a specific address
 # (equivalently: ./scripts/deploy.sh --lan   or   --site https://192.168.1.50)
 ```
 
-That sets `SAIVA_SITE_ADDRESS` so Caddy serves HTTPS at that address; for a LAN IP it uses
-its **internal CA** automatically. Open `https://<host-ip>` from any device on the
-network — you'll get a one‑time certificate warning until you trust that CA (next
-paragraph), since the cert isn't from a public authority.
+That sets `SAIVA_SITE_ADDRESS` (and `SAIVA_SITE_HOST`, used as the TLS SNI default so
+serving by raw IP works) and Caddy issues a cert from its **internal CA**. Open
+`https://<host-ip>` from any device — you'll get a one‑time "not private" warning
+(**Advanced → Proceed**) because the cert isn't from a public authority.
 
 **Custom hostname / trusted certificate.** For a public domain, set
-`SAIVA_SITE_ADDRESS=finance.example.com` in `.env` and Caddy auto‑provisions a trusted
-Let's Encrypt cert (no warnings, on any device). To clear the warning for a LAN/internal
-setup instead, trust Caddy's root CA:
+`SAIVA_SITE_ADDRESS=finance.example.com` and `SAIVA_TLS=you@example.com` in `.env` — Caddy
+then provisions a trusted Let's Encrypt cert (no warnings, on any device). To clear the
+warning for a LAN/internal setup instead, trust Caddy's root CA:
 
 ```bash
 docker compose cp caddy:/data/caddy/pki/authorities/local/root.crt ./caddy-root.crt

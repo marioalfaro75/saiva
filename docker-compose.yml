@@ -49,6 +49,8 @@ services:
       - web
     environment:
       SAIVA_SITE_ADDRESS: ${SAIVA_SITE_ADDRESS:-localhost}
+      SAIVA_SITE_HOST: ${SAIVA_SITE_HOST:-localhost}
+      SAIVA_TLS: ${SAIVA_TLS:-internal}
     ports:
       - "80:80"
       - "443:443"

@@ -1,16 +1,21 @@
-# Edge reverse proxy with automatic HTTPS.
-#   - SAIVA_SITE_ADDRESS=localhost            -> locally-trusted cert (dev)
-#   - SAIVA_SITE_ADDRESS=finance.example.com  -> automatic Let's Encrypt certificate
-#   - SAIVA_SITE_ADDRESS=https://192.168.1.50 -> LAN access; internal CA used automatically
+# Edge reverse proxy.
+#   SAIVA_SITE_ADDRESS=localhost              -> HTTPS on this machine (internal CA)
+#   SAIVA_SITE_ADDRESS=https://192.168.1.50   -> LAN access (internal CA); `make deploy LAN=1`
+#   SAIVA_SITE_ADDRESS=finance.example.com    -> public domain; set SAIVA_TLS=you@email.com
 #
-# (Optional) for Let's Encrypt expiry-notice emails, add a global block above the site:
-#   { email you@example.com }
+# SAIVA_SITE_HOST is the bare host (no scheme), used as `default_sni` so TLS still works when
+# a client connects by IP — IP literals carry no SNI, so without this Caddy can't pick a cert.
+# SAIVA_TLS is `internal` (Caddy's local CA, for localhost/LAN) or an email (Let's Encrypt).
+{
+	default_sni {$SAIVA_SITE_HOST:localhost}
+	servers {
+		protocols h1 h2
+	}
+}
+
 {$SAIVA_SITE_ADDRESS:localhost} {
 	encode gzip
-
-	# Caddy uses its internal CA automatically for localhost and IP addresses. To force the
-	# internal CA for a hostname without public DNS too, uncomment:
-	# tls internal
+	tls {$SAIVA_TLS:internal}
 
 	# API
 	handle /api/* {
@@ -22,9 +27,9 @@
 		reverse_proxy web:8080
 	}
 
-	# Defense-in-depth headers (Caddy adds these at the edge; the API sets its own too)
+	# Defense-in-depth headers (the API sets its own too). No HSTS here on purpose: with the
+	# internal CA it would block the browser's "proceed" on the untrusted-cert warning.
 	header {
-		Strict-Transport-Security "max-age=31536000; includeSubDomains"
 		X-Content-Type-Options "nosniff"
 		X-Frame-Options "DENY"
 		Referrer-Policy "strict-origin-when-cross-origin"
