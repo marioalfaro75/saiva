@@ -8,6 +8,7 @@
 #   ./scripts/deploy.sh                Build + start on https://localhost (this machine)
 #   ./scripts/deploy.sh --lan          ... reachable over your LAN at https://<auto-detected-ip>
 #   ./scripts/deploy.sh --site <addr>  ... at a specific address (https://192.168.1.50 or a domain)
+#   ./scripts/deploy.sh --pull         ... using prebuilt GHCR images (no local build)
 #   ./scripts/deploy.sh --seed         ... and load demo data
 #   ./scripts/deploy.sh --down         Stop the stack (database preserved)
 #   ./scripts/deploy.sh --destroy      Stop and wipe the database volume
@@ -20,12 +21,14 @@ cd "$ROOT"
 
 SEED=0
 LAN=0
+PULL=0
 SITE=""
 ACTION="up"
 while [ $# -gt 0 ]; do
   case "$1" in
     --seed|--demo) SEED=1 ;;
     --lan) LAN=1 ;;
+    --pull) PULL=1 ;;
     --site) shift; SITE="${1:-}"; [ -n "$SITE" ] || { echo "--site needs a value, e.g. https://192.168.1.50" >&2; exit 2; } ;;
     --site=*) SITE="${1#*=}" ;;
     --down) ACTION="down" ;;
@@ -37,7 +40,7 @@ while [ $# -gt 0 ]; do
 done
 
 if [ "$ACTION" = "help" ]; then
-  sed -n '2,14p' "$0" | sed 's/^# \{0,1\}//'
+  sed -n '2,15p' "$0" | sed 's/^# \{0,1\}//'
   exit 0
 fi
 
@@ -54,6 +57,11 @@ fi
 if ! docker info >/dev/null 2>&1; then
   echo "ERROR: the Docker daemon isn't running. Start Docker and retry." >&2
   exit 1
+fi
+
+# Pull mode uses prebuilt GHCR images via the production compose file.
+if [ "$PULL" -eq 1 ]; then
+  COMPOSE="$COMPOSE -f docker-compose.prod.yml"
 fi
 
 if [ "$ACTION" = "down" ]; then
@@ -116,9 +124,15 @@ if [ -n "$SITE" ]; then
   echo "  → serving at ${SITE}"
 fi
 
-# 3. Build and start.
-echo "Building images and starting the stack…"
-$COMPOSE up -d --build
+# 3. Build (or pull) and start.
+if [ "$PULL" -eq 1 ]; then
+  echo "Pulling prebuilt images from GHCR and starting…"
+  $COMPOSE pull
+  $COMPOSE up -d
+else
+  echo "Building images and starting the stack…"
+  $COMPOSE up -d --build
+fi
 
 # 4. Wait until the API reports healthy (checked inside the container, so this is
 #    independent of the configured hostname / TLS).

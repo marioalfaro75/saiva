@@ -1,0 +1,69 @@
+# Saiva — production deploy using prebuilt images from GHCR (no local build).
+#   cp .env.example .env  &&  edit .env
+#   docker compose -f docker-compose.prod.yml pull
+#   docker compose -f docker-compose.prod.yml up -d
+#   (or simply: make pull)
+#
+# Pin a version with SAIVA_VERSION (default: latest). Forks can repoint the images
+# with SAIVA_REGISTRY (default: ghcr.io/marioalfaro75).
+name: saiva
+
+services:
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-saiva}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-saiva}
+      POSTGRES_DB: ${POSTGRES_DB:-saiva}
+    volumes:
+      - db_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-saiva} -d ${POSTGRES_DB:-saiva}"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+
+  api:
+    image: ${SAIVA_REGISTRY:-ghcr.io/marioalfaro75}/saiva-api:${SAIVA_VERSION:-latest}
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-saiva}:${POSTGRES_PASSWORD:-saiva}@db:5432/${POSTGRES_DB:-saiva}
+      SECRET_KEY: ${SECRET_KEY:?set SECRET_KEY in .env}
+      ENVIRONMENT: ${ENVIRONMENT:-production}
+      COOKIE_SECURE: ${COOKIE_SECURE:-true}
+      CORS_ORIGINS: ${CORS_ORIGINS:-}
+    depends_on:
+      db:
+        condition: service_healthy
+    expose:
+      - "8000"
+
+  web:
+    image: ${SAIVA_REGISTRY:-ghcr.io/marioalfaro75}/saiva-web:${SAIVA_VERSION:-latest}
+    restart: unless-stopped
+    expose:
+      - "8080"
+
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    depends_on:
+      - api
+      - web
+    environment:
+      SAIVA_SITE_ADDRESS: ${SAIVA_SITE_ADDRESS:-localhost}
+      SAIVA_SITE_HOST: ${SAIVA_SITE_HOST:-localhost}
+      SAIVA_TLS: ${SAIVA_TLS:-internal}
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./infra/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+
+volumes:
+  db_data:
+  caddy_data:
+  caddy_config:
