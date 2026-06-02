@@ -73,6 +73,24 @@ docker compose cp caddy:/data/caddy/pki/authorities/local/root.crt ./caddy-root.
 # then import caddy-root.crt into your OS / browser trust store
 ```
 
+### Deploy from prebuilt images (GHCR)
+
+Instead of building locally, you can run images published to GitHub Container Registry —
+faster, reproducible, and easy on a low‑powered host (it doesn't compile the frontend):
+
+```bash
+make pull                       # pull ghcr.io/marioalfaro75/saiva-{api,web}:latest and start
+make pull SAIVA_VERSION=v0.4.0  # pin a specific release;  make pull LAN=1 also works
+# (equivalently: ./scripts/deploy.sh --pull)
+```
+
+Upgrades are then `make pull` (re‑pull + restart); the API self‑migrates the database on
+start. **Publishing** images: push a tag — `git tag v0.4.0 && git push origin v0.4.0` —
+and the [`Release`](.github/workflows/release.yml) workflow builds and pushes multi‑arch
+(amd64 + arm64) `saiva-api`/`saiva-web` images. After the first publish, set those GHCR
+packages to **public** (GitHub → your profile → Packages) if you want to pull without
+`docker login`; otherwise `docker login ghcr.io` with a token first.
+
 ### Running on Proxmox LXC
 
 Saiva runs as Docker containers, so on Proxmox you first need an LXC that *can* run

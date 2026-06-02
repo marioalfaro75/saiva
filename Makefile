@@ -1,7 +1,7 @@
 # Saiva — common container operations. Run `make help` for the list.
 COMPOSE ?= docker compose
 
-.PHONY: help deploy seed up down destroy restart logs ps
+.PHONY: help deploy pull seed up down destroy restart logs ps
 
 help: ## Show available targets
 	@grep -E '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) \
@@ -9,6 +9,9 @@ help: ## Show available targets
 
 deploy: ## Deploy (SEED=1 add demo · LAN=1 expose on LAN over https · SITE=<addr> custom address)
 	@./scripts/deploy.sh $(if $(filter 1,$(SEED)),--seed,) $(if $(filter 1,$(LAN)),--lan,) $(if $(SITE),--site $(SITE),)
+
+pull: ## Deploy from prebuilt GHCR images — no local build (same SEED/LAN/SITE flags)
+	@./scripts/deploy.sh --pull $(if $(filter 1,$(SEED)),--seed,) $(if $(filter 1,$(LAN)),--lan,) $(if $(SITE),--site $(SITE),)
 
 seed: ## Load demo data into a running stack
 	$(COMPOSE) exec -T api python -m app.services.seed
