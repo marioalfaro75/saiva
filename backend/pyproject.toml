@@ -19,6 +19,7 @@ dependencies = [
   "pyjwt>=2.9",
   "python-multipart>=0.0.12",
   "python-dateutil>=2.9",
+  "alembic>=1.13",
 ]
 
 [project.optional-dependencies]
@@ -39,6 +40,7 @@ include = ["app*"]
 [tool.ruff]
 line-length = 100
 target-version = "py311"
+extend-exclude = ["migrations"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "B", "UP", "C4", "SIM"]

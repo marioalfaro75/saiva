@@ -36,6 +36,40 @@ jobs:
       - name: Dependency audit (pip-audit, advisory)
         run: pip-audit || true
 
+  migrations:
+    name: Migrations (Postgres)
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: saiva
+          POSTGRES_PASSWORD: saiva
+          POSTGRES_DB: saiva
+        ports:
+          - "5432:5432"
+        options: >-
+          --health-cmd "pg_isready -U saiva"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    defaults:
+      run:
+        working-directory: backend
+    env:
+      DATABASE_URL: postgresql+psycopg://saiva:saiva@localhost:5432/saiva
+      SECRET_KEY: ci-not-secret
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install -e ".[dev]"
+      - name: Apply migrations (must succeed on Postgres)
+        run: alembic upgrade head
+      - name: Check migrations match models (no drift)
+        run: alembic check
+
   frontend:
     name: Frontend (lint, build, tests)
     runs-on: ubuntu-latest
