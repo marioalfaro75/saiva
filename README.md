@@ -131,8 +131,25 @@ cd backend && ruff check . && mypy app && pytest --cov=app
 cd frontend && npm run lint && npm run build && npm run test
 ```
 
-CI ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)) runs the same gates plus
-security scans (bandit SAST, pip‑audit, gitleaks secret scan, trivy) on every push/PR.
+CI ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)) runs the same gates plus a
+Postgres migration check (`alembic upgrade head` + `alembic check`) and security scans
+(bandit SAST, pip‑audit, gitleaks secret scan) on every push/PR.
+
+## Database migrations
+
+Schema changes are versioned with **Alembic**. The API container runs `alembic upgrade
+head` on start (a legacy `create_all` database is adopted automatically), so deploying a
+newer image migrates the database with no manual step and no data loss.
+
+After changing a model, generate a migration, review it, and commit it:
+
+```bash
+cd backend
+alembic revision --autogenerate -m "describe the change"   # review migrations/versions/*.py
+alembic upgrade head                                         # apply locally
+```
+
+CI fails if a model change ships without a matching migration (`alembic check`).
 
 ## Project structure
 
