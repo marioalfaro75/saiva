@@ -5,6 +5,7 @@ import type {
   CategoryBreakdown,
   ImportCommit,
   ImportPreview,
+  Insights,
   Me,
   NetWorth,
   SavingsGoal,
@@ -104,6 +105,8 @@ export const api = {
     request<Account>("/accounts", { method: "POST", body: JSON.stringify(body) }),
 
   categories: () => request<Category[]>("/categories"),
+
+  insights: () => request<Insights>("/insights"),
 
   transactions: (params: Record<string, string | number | boolean | undefined>) =>
     request<TransactionList>(`/transactions${qs(params)}`),

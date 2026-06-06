@@ -6,6 +6,7 @@ import { Accounts } from "./pages/Accounts";
 import { Budgets } from "./pages/Budgets";
 import { Goals } from "./pages/Goals";
 import { ImportPage } from "./pages/Import";
+import { Insights } from "./pages/Insights";
 import { Login } from "./pages/Login";
 import { NetWorth } from "./pages/NetWorth";
 import { Overview } from "./pages/Overview";
@@ -26,6 +27,7 @@ export default function App() {
     <Layout>
       <Routes>
         <Route path="/" element={<Overview />} />
+        <Route path="/insights" element={<Insights />} />
         <Route path="/transactions" element={<Transactions />} />
         <Route path="/accounts" element={<Accounts />} />
         <Route path="/budgets" element={<Budgets />} />
