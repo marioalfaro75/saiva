@@ -156,6 +156,24 @@ export interface NetWorth {
   history: NetWorthPoint[];
 }
 
+export interface BenchmarkItem {
+  category: string;
+  your_weekly_cents: number;
+  typical_weekly_cents: number;
+  diff_cents: number;
+  pct_of_typical: number;
+}
+
+export interface Benchmark {
+  basis: string;
+  adults: number;
+  children: number;
+  note: string;
+  your_total_weekly_cents: number;
+  typical_total_weekly_cents: number;
+  items: BenchmarkItem[];
+}
+
 export interface Insight {
   key: string;
   type: string;

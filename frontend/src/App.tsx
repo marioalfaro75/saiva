@@ -3,6 +3,7 @@ import { Navigate, Route, Routes } from "react-router-dom";
 import { useAuth } from "./auth/AuthContext";
 import { Layout } from "./components/Layout";
 import { Accounts } from "./pages/Accounts";
+import { Benchmarks } from "./pages/Benchmarks";
 import { Budgets } from "./pages/Budgets";
 import { Goals } from "./pages/Goals";
 import { ImportPage } from "./pages/Import";
@@ -33,6 +34,7 @@ export default function App() {
         <Route path="/budgets" element={<Budgets />} />
         <Route path="/net-worth" element={<NetWorth />} />
         <Route path="/goals" element={<Goals />} />
+        <Route path="/benchmarks" element={<Benchmarks />} />
         <Route path="/import" element={<ImportPage />} />
         <Route path="/settings" element={<Settings />} />
         <Route path="*" element={<Navigate to="/" replace />} />
