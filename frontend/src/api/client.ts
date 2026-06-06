@@ -1,5 +1,6 @@
 import type {
   Account,
+  Budget,
   Category,
   CategoryBreakdown,
   ImportCommit,
@@ -146,6 +147,13 @@ export const api = {
   summary: (p: PeriodParams) => request<Summary>(`/dashboard/summary${qs({ ...p })}`),
   breakdown: (p: PeriodParams) => request<CategoryBreakdown>(`/dashboard/categories${qs({ ...p })}`),
   trends: (p: PeriodParams) => request<Trend>(`/dashboard/trends${qs({ ...p })}`),
+
+  budgets: () => request<Budget[]>("/budgets"),
+  createBudget: (body: { category_id: string; period: string; limit_cents: number }) =>
+    request<Budget>("/budgets", { method: "POST", body: JSON.stringify(body) }),
+  updateBudget: (id: string, patch: { period?: string; limit_cents?: number }) =>
+    request<Budget>(`/budgets/${id}`, { method: "PATCH", body: JSON.stringify(patch) }),
+  deleteBudget: (id: string) => request<void>(`/budgets/${id}`, { method: "DELETE" }),
 
   seedDemo: () => request<{ message: string; transactions: number }>("/admin/seed-demo", {
     method: "POST",

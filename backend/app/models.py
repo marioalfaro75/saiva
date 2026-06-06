@@ -17,6 +17,7 @@ from sqlalchemy import (
     Integer,
     String,
     Text,
+    UniqueConstraint,
 )
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -162,6 +163,22 @@ class Transaction(Base, TimestampMixin):
     __table_args__ = (
         Index("ix_txn_account_dedup", "account_id", "dedup_hash"),
         Index("ix_txn_household_date", "household_id", "txn_date"),
+    )
+
+
+class Budget(Base, TimestampMixin):
+    """A flexible per-category spending limit for a recurring period (PRD R24)."""
+
+    __tablename__ = "budgets"
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_uuid)
+    household_id: Mapped[str] = mapped_column(ForeignKey("households.id"), index=True)
+    category_id: Mapped[str] = mapped_column(ForeignKey("categories.id"), nullable=False)
+    period: Mapped[str] = mapped_column(String(12), default="monthly")  # see BUDGET_PERIODS
+    limit_cents: Mapped[int] = mapped_column(Integer, nullable=False)
+
+    __table_args__ = (
+        UniqueConstraint("household_id", "category_id", name="uq_budget_household_category"),
     )
 
 

@@ -10,6 +10,7 @@ const NAV = [
   { to: "/", label: "Overview", end: true },
   { to: "/transactions", label: "Transactions", end: false },
   { to: "/accounts", label: "Accounts", end: false },
+  { to: "/budgets", label: "Budgets", end: false },
   { to: "/import", label: "Import", end: false },
   { to: "/settings", label: "Settings", end: false },
 ];

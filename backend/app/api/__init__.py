@@ -6,6 +6,7 @@ from . import (
     accounts,
     admin,
     auth,
+    budgets,
     categories,
     dashboard,
     households,
@@ -23,4 +24,5 @@ api_router.include_router(categories.router)
 api_router.include_router(imports.router)
 api_router.include_router(transactions.router)
 api_router.include_router(dashboard.router)
+api_router.include_router(budgets.router)
 api_router.include_router(admin.router)

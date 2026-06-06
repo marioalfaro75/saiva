@@ -85,6 +85,30 @@ def _add_txn(
     return 1
 
 
+def create_demo_budgets(db: Session, household: models.Household) -> None:
+    """A few realistic monthly budgets so the Budgets page isn't empty in the demo."""
+    cats = {
+        c.name: c.id
+        for c in db.execute(
+            select(models.Category).where(models.Category.household_id == household.id)
+        )
+        .scalars()
+        .all()
+    }
+    for name, limit in [("Supermarkets", 90000), ("Takeaway", 30000), ("Coffee", 8000)]:
+        category_id = cats.get(name)
+        if category_id:
+            db.add(
+                models.Budget(
+                    household_id=household.id,
+                    category_id=category_id,
+                    period="monthly",
+                    limit_cents=limit,
+                )
+            )
+    db.commit()
+
+
 def create_demo_data(db: Session, household: models.Household, months: int = 6) -> int:
     everyday = models.Account(
         household_id=household.id, name="Everyday", type="everyday",
@@ -161,6 +185,7 @@ def create_demo_data(db: Session, household: models.Household, months: int = 6) 
 
     db.commit()
     detect_transfers(db, household.id)
+    create_demo_budgets(db, household)
     return count
 
 

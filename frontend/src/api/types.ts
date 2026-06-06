@@ -117,6 +117,23 @@ export interface Trend {
   points: TrendPoint[];
 }
 
+export interface Budget {
+  id: string;
+  category_id: string;
+  category_name: string;
+  parent_name: string | null;
+  period: string;
+  period_label: string;
+  period_start: string;
+  period_end: string;
+  limit_cents: number;
+  actual_cents: number;
+  remaining_cents: number;
+  pct_used: number;
+  projected_cents: number;
+  status: string;
+}
+
 export interface CsvMapping {
   has_header: boolean;
   date_col: number;
