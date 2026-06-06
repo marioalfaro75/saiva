@@ -6,6 +6,7 @@ import type {
   ImportCommit,
   ImportPreview,
   Me,
+  NetWorth,
   SetupBody,
   SniffResult,
   Summary,
@@ -154,6 +155,15 @@ export const api = {
   updateBudget: (id: string, patch: { period?: string; limit_cents?: number }) =>
     request<Budget>(`/budgets/${id}`, { method: "PATCH", body: JSON.stringify(patch) }),
   deleteBudget: (id: string) => request<void>(`/budgets/${id}`, { method: "DELETE" }),
+
+  netWorth: () => request<NetWorth>("/net-worth"),
+  createNetWorthItem: (body: { name: string; kind: string; value_cents: number }) =>
+    request<NetWorth>("/net-worth/items", { method: "POST", body: JSON.stringify(body) }),
+  updateNetWorthItem: (id: string, patch: { name?: string; value_cents?: number }) =>
+    request<NetWorth>(`/net-worth/items/${id}`, { method: "PATCH", body: JSON.stringify(patch) }),
+  deleteNetWorthItem: (id: string) =>
+    request<NetWorth>(`/net-worth/items/${id}`, { method: "DELETE" }),
+  recordNetWorthSnapshot: () => request<NetWorth>("/net-worth/snapshot", { method: "POST" }),
 
   seedDemo: () => request<{ message: string; transactions: number }>("/admin/seed-demo", {
     method: "POST",

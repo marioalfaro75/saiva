@@ -134,6 +134,28 @@ export interface Budget {
   status: string;
 }
 
+export interface NetWorthItem {
+  id: string;
+  name: string;
+  kind: string;
+  value_cents: number;
+}
+
+export interface NetWorthPoint {
+  as_of: string;
+  assets_cents: number;
+  liabilities_cents: number;
+  net_cents: number;
+}
+
+export interface NetWorth {
+  assets_cents: number;
+  liabilities_cents: number;
+  net_cents: number;
+  items: NetWorthItem[];
+  history: NetWorthPoint[];
+}
+
 export interface CsvMapping {
   has_header: boolean;
   date_col: number;

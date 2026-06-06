@@ -12,6 +12,7 @@ from . import (
     households,
     imports,
     meta,
+    networth,
     transactions,
 )
 
@@ -25,4 +26,5 @@ api_router.include_router(imports.router)
 api_router.include_router(transactions.router)
 api_router.include_router(dashboard.router)
 api_router.include_router(budgets.router)
+api_router.include_router(networth.router)
 api_router.include_router(admin.router)
