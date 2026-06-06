@@ -350,6 +350,43 @@ class BudgetOut(BaseModel):
     status: str  # ok | warning | over
 
 
+# ----------------------------------------------------------------------- net worth
+
+
+class NetWorthItemCreate(BaseModel):
+    name: str = Field(min_length=1, max_length=120)
+    kind: Literal["asset", "liability"]
+    value_cents: int = Field(ge=0)
+
+
+class NetWorthItemUpdate(BaseModel):
+    name: str | None = Field(default=None, min_length=1, max_length=120)
+    value_cents: int | None = Field(default=None, ge=0)
+
+
+class NetWorthItemOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: str
+    name: str
+    kind: str
+    value_cents: int
+
+
+class NetWorthPoint(BaseModel):
+    as_of: dt.date
+    assets_cents: int
+    liabilities_cents: int
+    net_cents: int
+
+
+class NetWorthOut(BaseModel):
+    assets_cents: int
+    liabilities_cents: int
+    net_cents: int
+    items: list[NetWorthItemOut]
+    history: list[NetWorthPoint]
+
+
 class MessageOut(BaseModel):
     message: str
 

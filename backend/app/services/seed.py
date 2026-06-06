@@ -109,6 +109,37 @@ def create_demo_budgets(db: Session, household: models.Household) -> None:
     db.commit()
 
 
+def create_demo_net_worth(db: Session, household: models.Household) -> None:
+    """A demo balance sheet plus six monthly snapshots so the trend isn't flat."""
+    items = [
+        ("Family home", "asset", 85000000),
+        ("Superannuation", "asset", 19500000),
+        ("Car", "asset", 2800000),
+        ("Mortgage", "liability", 52000000),
+        ("Car loan", "liability", 1400000),
+    ]
+    for sort, (name, kind, value) in enumerate(items):
+        db.add(
+            models.NetWorthItem(
+                household_id=household.id, name=name, kind=kind, value_cents=value, sort=sort
+            )
+        )
+    assets = sum(v for _, k, v in items if k == "asset")
+    liabilities = sum(v for _, k, v in items if k == "liability")
+    first_of_month = dt.date.today().replace(day=1)
+    for n in range(5, -1, -1):  # six months up to now, trending upward
+        as_of = first_of_month - relativedelta(months=n)
+        a = assets - n * 600000
+        liabs = liabilities + n * 50000
+        db.add(
+            models.NetWorthSnapshot(
+                household_id=household.id, as_of=as_of,
+                assets_cents=a, liabilities_cents=liabs, net_cents=a - liabs,
+            )
+        )
+    db.commit()
+
+
 def create_demo_data(db: Session, household: models.Household, months: int = 6) -> int:
     everyday = models.Account(
         household_id=household.id, name="Everyday", type="everyday",
@@ -186,6 +217,7 @@ def create_demo_data(db: Session, household: models.Household, months: int = 6) 
     db.commit()
     detect_transfers(db, household.id)
     create_demo_budgets(db, household)
+    create_demo_net_worth(db, household)
     return count
 
 

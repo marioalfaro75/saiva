@@ -182,6 +182,36 @@ class Budget(Base, TimestampMixin):
     )
 
 
+class NetWorthItem(Base, TimestampMixin):
+    """A manually tracked asset or liability (PRD net worth, Phase 2)."""
+
+    __tablename__ = "net_worth_items"
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_uuid)
+    household_id: Mapped[str] = mapped_column(ForeignKey("households.id"), index=True)
+    name: Mapped[str] = mapped_column(String(120), nullable=False)
+    kind: Mapped[str] = mapped_column(String(12), default="asset")  # asset | liability
+    value_cents: Mapped[int] = mapped_column(Integer, default=0)
+    sort: Mapped[int] = mapped_column(Integer, default=0)
+
+
+class NetWorthSnapshot(Base, TimestampMixin):
+    """A point-in-time net-worth total for the trend chart (one row per day)."""
+
+    __tablename__ = "net_worth_snapshots"
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_uuid)
+    household_id: Mapped[str] = mapped_column(ForeignKey("households.id"), index=True)
+    as_of: Mapped[dt.date] = mapped_column(Date, nullable=False, index=True)
+    assets_cents: Mapped[int] = mapped_column(Integer, default=0)
+    liabilities_cents: Mapped[int] = mapped_column(Integer, default=0)
+    net_cents: Mapped[int] = mapped_column(Integer, default=0)
+
+    __table_args__ = (
+        UniqueConstraint("household_id", "as_of", name="uq_networth_snapshot_day"),
+    )
+
+
 class AuditLog(Base):
     __tablename__ = "audit_logs"
 
