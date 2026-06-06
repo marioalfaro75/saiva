@@ -6,6 +6,7 @@ from . import (
     accounts,
     admin,
     auth,
+    benchmarks,
     budgets,
     categories,
     dashboard,
@@ -31,4 +32,5 @@ api_router.include_router(budgets.router)
 api_router.include_router(networth.router)
 api_router.include_router(goals.router)
 api_router.include_router(insights.router)
+api_router.include_router(benchmarks.router)
 api_router.include_router(admin.router)

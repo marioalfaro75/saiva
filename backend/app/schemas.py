@@ -440,6 +440,27 @@ class InsightsOut(BaseModel):
     insights: list[Insight]
 
 
+# --------------------------------------------------------------------- benchmarks
+
+
+class BenchmarkItem(BaseModel):
+    category: str
+    your_weekly_cents: int
+    typical_weekly_cents: int
+    diff_cents: int  # your - typical; positive means you spend more
+    pct_of_typical: float  # 1.0 = same as typical
+
+
+class BenchmarkOut(BaseModel):
+    basis: str
+    adults: int
+    children: int
+    note: str
+    your_total_weekly_cents: int
+    typical_total_weekly_cents: int
+    items: list[BenchmarkItem]
+
+
 class MessageOut(BaseModel):
     message: str
 

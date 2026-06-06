@@ -1,5 +1,6 @@
 import type {
   Account,
+  Benchmark,
   Budget,
   Category,
   CategoryBreakdown,
@@ -107,6 +108,8 @@ export const api = {
   categories: () => request<Category[]>("/categories"),
 
   insights: () => request<Insights>("/insights"),
+
+  benchmarks: () => request<Benchmark>("/benchmarks"),
 
   transactions: (params: Record<string, string | number | boolean | undefined>) =>
     request<TransactionList>(`/transactions${qs(params)}`),
