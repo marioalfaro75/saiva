@@ -64,11 +64,49 @@ export interface Transaction {
   category_name: string | null;
   is_transfer: boolean;
   is_recurring: boolean;
+  category_locked: boolean;
   confidence: number | null;
   source: string;
   notes: string | null;
   tags: string[];
   split_parent_id: string | null;
+}
+
+export type MatchType = "contains" | "starts_with" | "regex" | "merchant" | "equals";
+export type RecategoriseScope = "none" | "merchant" | "exact" | "contains";
+
+export interface RecategoriseResult {
+  transaction: Transaction;
+  updated_count: number;
+}
+
+export interface Rule {
+  id: string;
+  match_type: string;
+  pattern: string;
+  category_id: string;
+  priority: number;
+  source: string;
+  is_active: boolean;
+}
+
+export interface RulePreview {
+  matched: number;
+  fillable: number;
+  samples: string[];
+}
+
+export interface TxnGroup {
+  key: string;
+  sample_id: string;
+  sample_description: string;
+  count: number;
+  total_cents: number;
+}
+
+export interface TxnGroups {
+  by: string;
+  groups: TxnGroup[];
 }
 
 export interface TransactionList {

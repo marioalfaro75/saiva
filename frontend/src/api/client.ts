@@ -7,14 +7,20 @@ import type {
   ImportCommit,
   ImportPreview,
   Insights,
+  MatchType,
   Me,
   NetWorth,
+  RecategoriseResult,
+  RecategoriseScope,
+  Rule,
+  RulePreview,
   SavingsGoal,
   SetupBody,
   SniffResult,
   Summary,
   Transaction,
   TransactionList,
+  TxnGroups,
   Trend,
   UpdateStatus,
 } from "./types";
@@ -107,21 +113,69 @@ export const api = {
 
   categories: () => request<Category[]>("/categories"),
 
+  rules: () => request<Rule[]>("/rules"),
+  createRule: (body: {
+    match_type: MatchType;
+    pattern: string;
+    category_id: string;
+    priority?: number;
+  }) => request<Rule>("/rules", { method: "POST", body: JSON.stringify(body) }),
+  updateRule: (
+    id: string,
+    patch: {
+      match_type?: MatchType;
+      pattern?: string;
+      category_id?: string;
+      priority?: number;
+      is_active?: boolean;
+    },
+  ) => request<Rule>(`/rules/${id}`, { method: "PATCH", body: JSON.stringify(patch) }),
+  deleteRule: (id: string) => request<void>(`/rules/${id}`, { method: "DELETE" }),
+  applyRule: (id: string) =>
+    request<{ updated: number }>(`/rules/${id}/apply`, { method: "POST" }),
+  previewRule: (body: { match_type: MatchType; pattern: string }) =>
+    request<RulePreview>("/rules/preview", { method: "POST", body: JSON.stringify(body) }),
+
   insights: () => request<Insights>("/insights"),
 
   benchmarks: () => request<Benchmark>("/benchmarks"),
 
   transactions: (params: Record<string, string | number | boolean | undefined>) =>
     request<TransactionList>(`/transactions${qs(params)}`),
-  recategorise: (id: string, categoryId: string | null, applyToSimilar: boolean, makeRule: boolean) =>
-    request<Transaction>(`/transactions/${id}/recategorise`, {
+  recategorise: (
+    id: string,
+    body: {
+      category_id: string | null;
+      scope?: RecategoriseScope;
+      pattern?: string | null;
+      make_rule?: boolean;
+      lock?: boolean;
+    },
+  ) =>
+    request<RecategoriseResult>(`/transactions/${id}/recategorise`, {
       method: "POST",
-      body: JSON.stringify({
-        category_id: categoryId,
-        apply_to_similar: applyToSimilar,
-        make_rule: makeRule,
-      }),
+      body: JSON.stringify(body),
     }),
+  bulkCategorise: (ids: string[], categoryId: string | null) =>
+    request<{ updated: number }>("/transactions/bulk-categorise", {
+      method: "POST",
+      body: JSON.stringify({ ids, category_id: categoryId, set_category: true }),
+    }),
+  bulkLock: (ids: string[], locked: boolean) =>
+    request<{ updated: number }>("/transactions/bulk-categorise", {
+      method: "POST",
+      body: JSON.stringify({ ids, set_category: false, lock: locked }),
+    }),
+  updateTransaction: (
+    id: string,
+    patch: { category_locked?: boolean; is_transfer?: boolean; notes?: string | null },
+  ) =>
+    request<Transaction>(`/transactions/${id}`, {
+      method: "PATCH",
+      body: JSON.stringify(patch),
+    }),
+  transactionGroups: (by: "merchant" | "description", uncategorised = true) =>
+    request<TxnGroups>(`/transactions/groups${qs({ by, uncategorised })}`),
   createManual: (body: {
     account_id: string;
     txn_date: string;

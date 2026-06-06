@@ -95,6 +95,23 @@ def test_bulk_categorise_selected(auth_client: TestClient) -> None:
     assert all(i["category_name"] == "Coffee" for i in items if i["id"] in {a["id"], b["id"]})
 
 
+def test_bulk_lock_only_keeps_category(auth_client: TestClient) -> None:
+    account = create_account(auth_client)
+    a = _add(auth_client, account["id"], "KEEP ME")
+    coffee = _cat(auth_client, "Coffee")
+    auth_client.post(
+        "/api/transactions/bulk-categorise", json={"ids": [a["id"]], "category_id": coffee}
+    )
+    locked = auth_client.post(
+        "/api/transactions/bulk-categorise",
+        json={"ids": [a["id"]], "set_category": False, "lock": True},
+    )
+    assert locked.json()["updated"] == 1
+    item = _items_by_id(auth_client, "KEEP")[a["id"]]
+    assert item["category_name"] == "Coffee"  # category untouched
+    assert item["category_locked"] is True
+
+
 def test_groups_endpoint_groups_uncategorised(auth_client: TestClient) -> None:
     account = create_account(auth_client)
     for _ in range(3):
@@ -105,6 +122,7 @@ def test_groups_endpoint_groups_uncategorised(auth_client: TestClient) -> None:
     assert groups["by"] == "merchant"
     top = max(groups["groups"], key=lambda g: g["count"])
     assert top["count"] == 3
+    assert top["sample_id"]  # representative txn to drive a group apply
 
 
 def test_rule_preview_and_apply_backfill(auth_client: TestClient) -> None:

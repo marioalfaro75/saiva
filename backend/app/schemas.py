@@ -293,6 +293,7 @@ class RecategoriseOut(BaseModel):
 class BulkCategoriseRequest(BaseModel):
     ids: list[str] = Field(min_length=1, max_length=1000)
     category_id: str | None = None
+    set_category: bool = True  # when False, only the lock is changed (category untouched)
     lock: bool | None = None  # set/clear the auto-categorisation lock if provided
 
 
@@ -302,6 +303,7 @@ class CountOut(BaseModel):
 
 class TxnGroup(BaseModel):
     key: str  # merchant or raw description, depending on `by`
+    sample_id: str  # a representative transaction id (to drive scope-based apply)
     sample_description: str
     count: int
     total_cents: int

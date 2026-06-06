@@ -267,8 +267,9 @@ def bulk_categorise(
         .all()
     )
     for t in rows:
-        t.category_id = payload.category_id
-        t.confidence = 1.0 if payload.category_id else None
+        if payload.set_category:
+            t.category_id = payload.category_id
+            t.confidence = 1.0 if payload.category_id else None
         if payload.lock is not None:
             t.category_locked = payload.lock
     db.commit()
@@ -298,6 +299,7 @@ def transaction_groups(
             func.count(models.Transaction.id),
             func.sum(models.Transaction.amount_cents),
             func.min(models.Transaction.raw_description),
+            func.min(models.Transaction.id),
         )
         .where(*conditions)
         .group_by(column)
@@ -307,11 +309,12 @@ def transaction_groups(
     groups = [
         schemas.TxnGroup(
             key=key or "",
+            sample_id=sample_id,
             sample_description=sample or (key or ""),
             count=int(count),
             total_cents=int(total or 0),
         )
-        for key, count, total, sample in rows
+        for key, count, total, sample, sample_id in rows
         if key
     ]
     return schemas.TxnGroupsOut(by=by, groups=groups)
