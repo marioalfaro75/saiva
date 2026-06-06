@@ -1,7 +1,10 @@
+import { useQuery } from "@tanstack/react-query";
 import type { ReactNode } from "react";
 import { NavLink } from "react-router-dom";
 
+import { api } from "../api/client";
 import { useAuth } from "../auth/AuthContext";
+import { SPA_VERSION } from "../version";
 
 const NAV = [
   { to: "/", label: "Overview", end: true },
@@ -13,6 +16,24 @@ const NAV = [
 
 export function Layout({ children }: { children: ReactNode }) {
   const { me, logout } = useAuth();
+  const isOwner = me?.user.role === "owner";
+
+  // Server version (polled) drives the "reload to update" nudge (Layer 3).
+  const meta = useQuery({
+    queryKey: ["meta"],
+    queryFn: api.meta,
+    refetchInterval: 300_000,
+    refetchOnWindowFocus: true,
+  });
+  // Owner-only check against GitHub for a newer release (Layer 1).
+  const update = useQuery({
+    queryKey: ["update-check"],
+    queryFn: () => api.updateCheck(),
+    enabled: isOwner,
+  });
+
+  const reloadNeeded = !!meta.data && meta.data.version !== SPA_VERSION;
+  const updateAvailable = !!update.data?.update_available;
 
   return (
     <div className="app">
@@ -24,6 +45,9 @@ export function Layout({ children }: { children: ReactNode }) {
           {NAV.map((item) => (
             <NavLink key={item.to} to={item.to} end={item.end} className="nav-link">
               {item.label}
+              {item.to === "/settings" && updateAvailable && (
+                <span className="dot" title="Update available" />
+              )}
             </NavLink>
           ))}
         </nav>
@@ -34,6 +58,16 @@ export function Layout({ children }: { children: ReactNode }) {
           </button>
         </div>
       </header>
+
+      {reloadNeeded && (
+        <div className="update-bar">
+          A new version of Saiva is ready.
+          <button className="btn btn-primary" onClick={() => window.location.reload()}>
+            Reload
+          </button>
+        </div>
+      )}
+
       <main className="content">{children}</main>
     </div>
   );

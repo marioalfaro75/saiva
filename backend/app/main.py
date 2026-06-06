@@ -17,7 +17,7 @@ SAFE_METHODS = {"GET", "HEAD", "OPTIONS"}
 
 app = FastAPI(
     title="Saiva API",
-    version="0.1.0",
+    version=settings.saiva_version,
     docs_url=None if settings.is_production else "/api/docs",
     redoc_url=None,
     openapi_url=None if settings.is_production else "/api/openapi.json",

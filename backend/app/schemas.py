@@ -321,3 +321,21 @@ class TrendOut(BaseModel):
 
 class MessageOut(BaseModel):
     message: str
+
+
+# ------------------------------------------------------------------------- updates
+
+
+class MetaOut(BaseModel):
+    version: str
+
+
+class UpdateStatus(BaseModel):
+    current_version: str
+    latest_version: str | None
+    update_available: bool
+    apply_available: bool  # in-app "Update now" works (Watchtower configured)
+    check_enabled: bool
+    release_url: str | None = None
+    release_notes: str | None = None
+    published_at: str | None = None

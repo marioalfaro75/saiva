@@ -174,3 +174,14 @@ export interface SetupBody {
   state?: string | null;
   period_basis?: "calendar" | "weekly" | "fortnightly" | "monthly";
 }
+
+export interface UpdateStatus {
+  current_version: string;
+  latest_version: string | null;
+  update_available: boolean;
+  apply_available: boolean;
+  check_enabled: boolean;
+  release_url: string | null;
+  release_notes: string | null;
+  published_at: string | null;
+}

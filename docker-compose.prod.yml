@@ -27,12 +27,17 @@ services:
   api:
     image: ${SAIVA_REGISTRY:-ghcr.io/marioalfaro75}/saiva-api:${SAIVA_VERSION:-latest}
     restart: unless-stopped
+    labels:
+      com.centurylinklabs.watchtower.enable: "true"
     environment:
       DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-saiva}:${POSTGRES_PASSWORD:-saiva}@db:5432/${POSTGRES_DB:-saiva}
       SECRET_KEY: ${SECRET_KEY:?set SECRET_KEY in .env}
       ENVIRONMENT: ${ENVIRONMENT:-production}
       COOKIE_SECURE: ${COOKIE_SECURE:-true}
       CORS_ORIGINS: ${CORS_ORIGINS:-}
+      # Lets the in-app "Update now" button ask Watchtower to pull + recreate.
+      WATCHTOWER_URL: http://watchtower:8080
+      WATCHTOWER_TOKEN: ${WATCHTOWER_TOKEN:-}
     depends_on:
       db:
         condition: service_healthy
@@ -42,6 +47,8 @@ services:
   web:
     image: ${SAIVA_REGISTRY:-ghcr.io/marioalfaro75}/saiva-web:${SAIVA_VERSION:-latest}
     restart: unless-stopped
+    labels:
+      com.centurylinklabs.watchtower.enable: "true"
     expose:
       - "8080"
 
@@ -62,6 +69,19 @@ services:
       - ./infra/Caddyfile:/etc/caddy/Caddyfile:ro
       - caddy_data:/data
       - caddy_config:/config
+
+  # In-app updater. Only watches containers labelled watchtower.enable (api + web),
+  # updates on demand via its token-protected HTTP API (no public port, no schedule).
+  watchtower:
+    image: containrrr/watchtower
+    restart: unless-stopped
+    environment:
+      WATCHTOWER_HTTP_API_UPDATE: "true"
+      WATCHTOWER_HTTP_API_TOKEN: ${WATCHTOWER_TOKEN:?set WATCHTOWER_TOKEN in .env}
+      WATCHTOWER_LABEL_ENABLE: "true"
+      WATCHTOWER_CLEANUP: "true"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
 
 volumes:
   db_data:
