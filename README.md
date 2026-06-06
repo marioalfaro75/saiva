@@ -91,6 +91,12 @@ and the [`Release`](.github/workflows/release.yml) workflow builds and pushes mu
 packages to **public** (GitHub → your profile → Packages) if you want to pull without
 `docker login`; otherwise `docker login ghcr.io` with a token first.
 
+**In‑app updates.** On a pull‑based deploy, the app checks GitHub for newer releases and
+shows the owner an **Update available** badge; **Settings → Software updates → Update now**
+pulls and restarts via a token‑protected Watchtower sidecar (the API never touches the
+Docker socket). After an update, open tabs get a one‑click **Reload** prompt. The update
+check is a public, data‑free request and can be turned off with `UPDATE_CHECK_ENABLED=false`.
+
 ### Running on Proxmox LXC
 
 Saiva runs as Docker containers, so on Proxmox you first need an LXC that *can* run

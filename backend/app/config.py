@@ -30,6 +30,13 @@ class Settings(BaseSettings):
     default_currency: str = "AUD"
     default_locale: str = "en-AU"
 
+    # Software updates
+    saiva_version: str = "dev"  # baked into the image at build time (SAIVA_VERSION)
+    update_check_enabled: bool = True
+    update_repo: str = "marioalfaro75/saiva"
+    watchtower_url: str = ""  # e.g. http://watchtower:8080 (empty = in-app apply disabled)
+    watchtower_token: str = ""
+
     @property
     def is_sqlite(self) -> bool:
         return self.database_url.startswith("sqlite")

@@ -11,6 +11,7 @@ import type {
   Transaction,
   TransactionList,
   Trend,
+  UpdateStatus,
 } from "./types";
 
 export class ApiError extends Error {
@@ -149,4 +150,9 @@ export const api = {
   seedDemo: () => request<{ message: string; transactions: number }>("/admin/seed-demo", {
     method: "POST",
   }),
+
+  meta: () => request<{ version: string }>("/meta"),
+  updateCheck: (force = false) =>
+    request<UpdateStatus>(`/admin/update-check${force ? "?force=true" : ""}`),
+  runUpdate: () => request<{ status: string }>("/admin/update", { method: "POST" }),
 };

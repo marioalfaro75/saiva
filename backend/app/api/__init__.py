@@ -10,11 +10,13 @@ from . import (
     dashboard,
     households,
     imports,
+    meta,
     transactions,
 )
 
 api_router = APIRouter()
 api_router.include_router(auth.router)
+api_router.include_router(meta.router)
 api_router.include_router(households.router)
 api_router.include_router(accounts.router)
 api_router.include_router(categories.router)

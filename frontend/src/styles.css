@@ -308,3 +308,27 @@ th.num {
     flex-wrap: wrap;
   }
 }
+
+/* ---- Update affordances ---- */
+.update-bar {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  padding: 10px 20px;
+  background: var(--accent-strong);
+  color: #fff;
+  font-size: 14px;
+}
+.update-bar .btn {
+  padding: 4px 12px;
+}
+.dot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  margin-left: 6px;
+  border-radius: 50%;
+  background: var(--accent);
+  vertical-align: middle;
+}

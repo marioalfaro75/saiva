@@ -106,7 +106,8 @@ if [ ! -f .env ]; then
   cp .env.example .env
   set_env_var SECRET_KEY "$(gen_secret)"
   set_env_var POSTGRES_PASSWORD "$(gen_secret | cut -c1-24)"
-  echo "  → generated a random SECRET_KEY and POSTGRES_PASSWORD"
+  set_env_var WATCHTOWER_TOKEN "$(gen_secret)"
+  echo "  → generated a random SECRET_KEY, POSTGRES_PASSWORD and WATCHTOWER_TOKEN"
 else
   echo ".env already exists — leaving its secrets untouched."
 fi

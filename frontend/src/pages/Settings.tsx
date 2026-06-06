@@ -2,6 +2,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { type FormEvent, useEffect, useState } from "react";
 
 import { api } from "../api/client";
+import { UpdatesPanel } from "../components/UpdatesPanel";
 
 interface Form {
   state: string;
@@ -141,6 +142,8 @@ export function Settings() {
           )}
           {demo.isError && <div className="error">Demo data is only for an empty household.</div>}
         </div>
+
+        <UpdatesPanel />
       </div>
     </div>
   );
