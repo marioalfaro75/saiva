@@ -7,6 +7,7 @@ import type {
   ImportPreview,
   Me,
   NetWorth,
+  SavingsGoal,
   SetupBody,
   SniffResult,
   Summary,
@@ -164,6 +165,26 @@ export const api = {
   deleteNetWorthItem: (id: string) =>
     request<NetWorth>(`/net-worth/items/${id}`, { method: "DELETE" }),
   recordNetWorthSnapshot: () => request<NetWorth>("/net-worth/snapshot", { method: "POST" }),
+
+  goals: () => request<SavingsGoal[]>("/goals"),
+  createGoal: (body: {
+    name: string;
+    target_cents: number;
+    target_date?: string | null;
+    account_id?: string | null;
+    current_cents?: number;
+  }) => request<SavingsGoal>("/goals", { method: "POST", body: JSON.stringify(body) }),
+  updateGoal: (
+    id: string,
+    patch: {
+      name?: string;
+      target_cents?: number;
+      target_date?: string | null;
+      account_id?: string | null;
+      current_cents?: number;
+    },
+  ) => request<SavingsGoal>(`/goals/${id}`, { method: "PATCH", body: JSON.stringify(patch) }),
+  deleteGoal: (id: string) => request<void>(`/goals/${id}`, { method: "DELETE" }),
 
   seedDemo: () => request<{ message: string; transactions: number }>("/admin/seed-demo", {
     method: "POST",
