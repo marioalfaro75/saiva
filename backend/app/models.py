@@ -148,6 +148,8 @@ class Transaction(Base, TimestampMixin):
     is_transfer: Mapped[bool] = mapped_column(Boolean, default=False)
     transfer_group_id: Mapped[str | None] = mapped_column(String(32), nullable=True, index=True)
     is_recurring: Mapped[bool] = mapped_column(Boolean, default=False)
+    # When set, auto-categorisation (rule backfills, re-runs) leaves this row alone.
+    category_locked: Mapped[bool] = mapped_column(Boolean, default=False)
     confidence: Mapped[float | None] = mapped_column(Float, nullable=True)
     source: Mapped[str] = mapped_column(String(8), default="import")  # import|manual
     dedup_hash: Mapped[str] = mapped_column(String(64), index=True, default="")

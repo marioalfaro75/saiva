@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session
 from .. import models, schemas
 from ..db import get_db
 from ..deps import get_current_user, require_writer
+from ..services.categorise import apply_rule_to_existing, preview_rule
 
 router = APIRouter(tags=["categories"])
 
@@ -79,6 +80,56 @@ def create_rule(
     db.commit()
     db.refresh(rule)
     return rule
+
+
+@router.post("/rules/preview", response_model=schemas.RulePreviewOut)
+def preview_rule_endpoint(
+    payload: schemas.RulePreviewRequest,
+    user: models.User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> schemas.RulePreviewOut:
+    matched, fillable, samples = preview_rule(
+        db, user.household_id, payload.match_type, payload.pattern
+    )
+    return schemas.RulePreviewOut(matched=matched, fillable=fillable, samples=samples)
+
+
+def _owned_rule(db: Session, rule_id: str, household_id: str) -> models.CategorisationRule:
+    rule = db.get(models.CategorisationRule, rule_id)
+    if rule is None or rule.household_id != household_id:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Rule not found")
+    return rule
+
+
+@router.patch("/rules/{rule_id}", response_model=schemas.RuleOut)
+def update_rule(
+    rule_id: str,
+    payload: schemas.RuleUpdate,
+    user: models.User = Depends(require_writer),
+    db: Session = Depends(get_db),
+) -> models.CategorisationRule:
+    rule = _owned_rule(db, rule_id, user.household_id)
+    data = payload.model_dump(exclude_unset=True)
+    if data.get("category_id") is not None:
+        _check_category(db, data["category_id"], user.household_id)
+    for key, value in data.items():
+        setattr(rule, key, value)
+    db.commit()
+    db.refresh(rule)
+    return rule
+
+
+@router.post("/rules/{rule_id}/apply", response_model=schemas.CountOut)
+def apply_rule(
+    rule_id: str,
+    user: models.User = Depends(require_writer),
+    db: Session = Depends(get_db),
+) -> schemas.CountOut:
+    rule = _owned_rule(db, rule_id, user.household_id)
+    updated = apply_rule_to_existing(
+        db, user.household_id, rule.match_type, rule.pattern, rule.category_id
+    )
+    return schemas.CountOut(updated=updated)
 
 
 @router.delete("/rules/{rule_id}", status_code=status.HTTP_204_NO_CONTENT)

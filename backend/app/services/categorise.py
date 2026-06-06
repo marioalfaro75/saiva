@@ -23,15 +23,18 @@ class CategoryResult:
     source: str  # rule | ml | none
 
 
-def _match(match_type: str, pattern: str, text: str) -> bool:
+def _match(match_type: str, pattern: str, description: str, merchant: str | None) -> bool:
     p = pattern.lower()
+    combined = f"{description} {merchant or ''}".lower()
+    if match_type == "equals":
+        return description.lower().strip() == p
     if match_type in ("contains", "merchant"):
-        return p in text
+        return p in combined
     if match_type == "starts_with":
-        return text.lstrip().startswith(p)
+        return combined.lstrip().startswith(p)
     if match_type == "regex":
         try:
-            return re.search(pattern, text, re.IGNORECASE) is not None
+            return re.search(pattern, combined, re.IGNORECASE) is not None
         except re.error:
             return False
     return False
@@ -49,9 +52,8 @@ class Categoriser:
         self.uncategorised_id = uncategorised_id
 
     def categorise(self, description: str, merchant: str | None = None) -> CategoryResult:
-        text = f"{description} {merchant or ''}".lower()
         for match_type, pattern, category_id in self.rules:
-            if _match(match_type, pattern, text):
+            if _match(match_type, pattern, description, merchant):
                 return CategoryResult(category_id, 0.99, "rule")
 
         predicted, confidence = self.ml.predict(f"{description} {merchant or ''}")
@@ -98,3 +100,56 @@ def build_categoriser(db: Session, household_id: str) -> Categoriser:
     ).scalar_one_or_none()
 
     return Categoriser(rule_tuples, ml, uncategorised_id)
+
+
+def matches(match_type: str, pattern: str, txn: models.Transaction) -> bool:
+    return _match(match_type, pattern, txn.raw_description, txn.merchant)
+
+
+def apply_rule_to_existing(
+    db: Session, household_id: str, match_type: str, pattern: str, category_id: str
+) -> int:
+    """Backfill a rule over existing rows: fills only blank, unlocked transactions —
+    never overrides a category the user already set, and skips exempted rows."""
+    candidates = (
+        db.execute(
+            select(models.Transaction).where(
+                models.Transaction.household_id == household_id,
+                models.Transaction.category_id.is_(None),
+                models.Transaction.category_locked.is_(False),
+                models.Transaction.is_transfer.is_(False),
+                models.Transaction.split_parent_id.is_(None),
+            )
+        )
+        .scalars()
+        .all()
+    )
+    updated = 0
+    for t in candidates:
+        if matches(match_type, pattern, t):
+            t.category_id = category_id
+            t.confidence = 0.99
+            updated += 1
+    db.commit()
+    return updated
+
+
+def preview_rule(
+    db: Session, household_id: str, match_type: str, pattern: str, sample_limit: int = 6
+) -> tuple[int, int, list[str]]:
+    """Return (matched, fillable, sample descriptions) for a prospective rule."""
+    rows = (
+        db.execute(
+            select(models.Transaction).where(
+                models.Transaction.household_id == household_id,
+                models.Transaction.is_transfer.is_(False),
+                models.Transaction.split_parent_id.is_(None),
+            )
+        )
+        .scalars()
+        .all()
+    )
+    matched = [t for t in rows if matches(match_type, pattern, t)]
+    fillable = sum(1 for t in matched if t.category_id is None and not t.category_locked)
+    samples = [(t.merchant or t.raw_description) for t in matched[:sample_limit]]
+    return len(matched), fillable, samples
