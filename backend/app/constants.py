@@ -15,7 +15,7 @@ CATEGORY_KINDS = {"income", "expense", "transfer", "savings"}
 PERIOD_BASES = {"calendar", "weekly", "fortnightly", "monthly"}
 BUDGET_PERIODS = {"monthly", "fortnightly", "annual"}
 NET_WORTH_KINDS = {"asset", "liability"}
-MATCH_TYPES = {"contains", "starts_with", "regex", "merchant"}
+MATCH_TYPES = {"contains", "starts_with", "regex", "merchant", "equals"}
 
 # Roles that may perform destructive/admin actions and write data.
 ROLE_RANK = {"viewer": 0, "adult": 1, "owner": 2}

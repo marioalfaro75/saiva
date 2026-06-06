@@ -144,11 +144,33 @@ class CategoryCreate(BaseModel):
 # --------------------------------------------------------------------------- rules
 
 
+_MatchType = Literal["contains", "starts_with", "regex", "merchant", "equals"]
+
+
 class RuleCreate(BaseModel):
-    match_type: Literal["contains", "starts_with", "regex", "merchant"] = "contains"
+    match_type: _MatchType = "contains"
     pattern: str = Field(min_length=1, max_length=200)
     category_id: str
-    priority: int = 100
+    priority: int = 10  # user rules win over system starter rules (priority 50)
+
+
+class RuleUpdate(BaseModel):
+    match_type: _MatchType | None = None
+    pattern: str | None = Field(default=None, min_length=1, max_length=200)
+    category_id: str | None = None
+    priority: int | None = None
+    is_active: bool | None = None
+
+
+class RulePreviewRequest(BaseModel):
+    match_type: _MatchType = "contains"
+    pattern: str = Field(min_length=1, max_length=200)
+
+
+class RulePreviewOut(BaseModel):
+    matched: int  # all transactions the rule matches
+    fillable: int  # of those, how many are blank + unlocked (a backfill would set)
+    samples: list[str]
 
 
 class RuleOut(BaseModel):
@@ -230,6 +252,7 @@ class TransactionOut(BaseModel):
     category_name: str | None = None
     is_transfer: bool
     is_recurring: bool
+    category_locked: bool = False
     confidence: float | None
     source: str
     notes: str | None
@@ -249,12 +272,44 @@ class TransactionUpdate(BaseModel):
     notes: str | None = None
     tags: list[str] | None = None
     is_transfer: bool | None = None
+    category_locked: bool | None = None
 
 
 class RecategoriseRequest(BaseModel):
     category_id: str | None
-    apply_to_similar: bool = False
-    make_rule: bool = False
+    # Apply the same category to look-alikes: by normalised merchant, exact raw
+    # description, or a free-text "contains" match. "none" touches only this row.
+    scope: Literal["none", "merchant", "exact", "contains"] = "none"
+    pattern: str | None = None  # text for scope="contains" (and the rule, if made)
+    make_rule: bool = False  # also persist a rule so future imports auto-apply
+    lock: bool = False  # exempt the affected rows from future auto-categorisation
+
+
+class RecategoriseOut(BaseModel):
+    transaction: TransactionOut
+    updated_count: int  # rows changed, including this one
+
+
+class BulkCategoriseRequest(BaseModel):
+    ids: list[str] = Field(min_length=1, max_length=1000)
+    category_id: str | None = None
+    lock: bool | None = None  # set/clear the auto-categorisation lock if provided
+
+
+class CountOut(BaseModel):
+    updated: int
+
+
+class TxnGroup(BaseModel):
+    key: str  # merchant or raw description, depending on `by`
+    sample_description: str
+    count: int
+    total_cents: int
+
+
+class TxnGroupsOut(BaseModel):
+    by: str
+    groups: list[TxnGroup]
 
 
 class ManualTxnCreate(BaseModel):

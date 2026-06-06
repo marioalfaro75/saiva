@@ -28,10 +28,11 @@ def test_recategorise_learns_rule_and_applies_to_similar(auth_client: TestClient
 
     resp = auth_client.post(
         f"/api/transactions/{first['id']}/recategorise",
-        json={"category_id": coffee_id, "make_rule": True, "apply_to_similar": True},
+        json={"category_id": coffee_id, "make_rule": True, "scope": "merchant"},
     )
     assert resp.status_code == 200
-    assert resp.json()["category_name"] == "Coffee"
+    assert resp.json()["transaction"]["category_name"] == "Coffee"
+    assert resp.json()["updated_count"] == 2  # this row plus the sibling
 
     # The sibling transaction was updated too.
     other = auth_client.get("/api/transactions", params={"q": "mystery"}).json()
