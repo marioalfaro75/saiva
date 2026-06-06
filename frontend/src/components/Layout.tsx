@@ -8,6 +8,7 @@ import { SPA_VERSION } from "../version";
 
 const NAV = [
   { to: "/", label: "Overview", end: true },
+  { to: "/insights", label: "Insights", end: false },
   { to: "/transactions", label: "Transactions", end: false },
   { to: "/accounts", label: "Accounts", end: false },
   { to: "/budgets", label: "Budgets", end: false },

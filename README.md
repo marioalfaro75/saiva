@@ -9,8 +9,8 @@ BYO‑key or a local model) grounded in their own data. Runs in a container, HTT
 > (CSV/OFX/QFX) with de‑duplication, rule + ML categorisation, transfer
 > detection, and an overview dashboard. **Phase 2 in progress:** per‑category
 > **budgets** (progress, projection, over/under), a manual **net‑worth** balance
-> sheet with a trend, and **savings goals** with progress and suggested
-> contributions. See the [PRD](docs/PRD.md) for the full plan.
+> sheet with a trend, **savings goals** with suggested contributions, and a
+> rule‑based **insights feed**. See the [PRD](docs/PRD.md) for the full plan.
 
 ## Run it in a container
 
@@ -182,9 +182,9 @@ CI fails if a model change ships without a matching migration (`alembic check`).
 
 ```
 backend/    FastAPI API — auth, accounts, import pipeline, categorisation, transfers,
-            dashboard, budgets, net worth, savings goals; pytest suite (≈90% coverage)
-frontend/   React + TS SPA (Vite) — dashboard, transactions, accounts, budgets,
-            net worth, goals, import, settings
+            dashboard, budgets, net worth, savings goals, insights; pytest (≈90% coverage)
+frontend/   React + TS SPA (Vite) — dashboard, insights, transactions, accounts,
+            budgets, net worth, goals, import, settings
 infra/      Caddy reverse-proxy config (auto-HTTPS)
 docs/       Product Requirements Document
 docker-compose.yml   one-command deploy (Postgres + API + web + Caddy)

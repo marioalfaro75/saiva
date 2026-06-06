@@ -156,6 +156,22 @@ export interface NetWorth {
   history: NetWorthPoint[];
 }
 
+export interface Insight {
+  key: string;
+  type: string;
+  severity: string;
+  title: string;
+  body: string;
+  action: string | null;
+  amount_cents: number | null;
+  link: string | null;
+}
+
+export interface Insights {
+  generated_for: string;
+  insights: Insight[];
+}
+
 export interface SavingsGoal {
   id: string;
   name: string;

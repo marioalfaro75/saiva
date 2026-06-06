@@ -349,6 +349,24 @@ th.num {
   background: rgba(248, 113, 113, 0.15);
   color: var(--negative);
 }
+.status-pill.info {
+  background: rgba(96, 165, 250, 0.15);
+  color: #60a5fa;
+}
+
+/* ---- Insights ---- */
+.insight {
+  border-left: 3px solid var(--surface-2);
+}
+.insight-alert {
+  border-left-color: var(--negative);
+}
+.insight-warn {
+  border-left-color: #f59e0b;
+}
+.insight-info {
+  border-left-color: #2dd4bf;
+}
 
 /* ---- Update affordances ---- */
 .update-bar {

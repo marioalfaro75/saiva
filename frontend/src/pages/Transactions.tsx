@@ -1,24 +1,28 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
+import { useSearchParams } from "react-router-dom";
 
 import { api } from "../api/client";
 import { formatCents, formatDate } from "../format";
 
 export function Transactions() {
   const qc = useQueryClient();
-  const [q, setQ] = useState("");
-  const [accountId, setAccountId] = useState("");
-  const [uncategorised, setUncategorised] = useState(false);
+  const [searchParams] = useSearchParams();
+  const [q, setQ] = useState(searchParams.get("q") ?? "");
+  const [accountId, setAccountId] = useState(searchParams.get("account_id") ?? "");
+  const [categoryId, setCategoryId] = useState(searchParams.get("category_id") ?? "");
+  const [uncategorised, setUncategorised] = useState(searchParams.get("uncategorised") === "true");
   const [page, setPage] = useState(1);
 
   const accounts = useQuery({ queryKey: ["accounts"], queryFn: api.accounts });
   const categories = useQuery({ queryKey: ["categories"], queryFn: api.categories });
   const txns = useQuery({
-    queryKey: ["txns", q, accountId, uncategorised, page],
+    queryKey: ["txns", q, accountId, categoryId, uncategorised, page],
     queryFn: () =>
       api.transactions({
         q: q || undefined,
         account_id: accountId || undefined,
+        category_id: categoryId || undefined,
         uncategorised: uncategorised || undefined,
         page,
         page_size: 50,
@@ -66,6 +70,21 @@ export function Transactions() {
           {accounts.data?.map((a) => (
             <option key={a.id} value={a.id}>
               {a.name}
+            </option>
+          ))}
+        </select>
+        <select
+          className="pill-select"
+          value={categoryId}
+          onChange={(e) => {
+            setPage(1);
+            setCategoryId(e.target.value);
+          }}
+        >
+          <option value="">All categories</option>
+          {subcategories.map((c) => (
+            <option key={c.id} value={c.id}>
+              {c.name}
             </option>
           ))}
         </select>

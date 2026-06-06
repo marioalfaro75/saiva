@@ -421,6 +421,25 @@ class SavingsGoalOut(BaseModel):
     complete: bool
 
 
+# ------------------------------------------------------------------------ insights
+
+
+class Insight(BaseModel):
+    key: str
+    type: str
+    severity: str  # alert | warn | info
+    title: str
+    body: str
+    action: str | None = None
+    amount_cents: int | None = None
+    link: str | None = None
+
+
+class InsightsOut(BaseModel):
+    generated_for: str
+    insights: list[Insight]
+
+
 class MessageOut(BaseModel):
     message: str
 
