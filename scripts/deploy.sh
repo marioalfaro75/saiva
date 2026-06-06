@@ -106,11 +106,22 @@ if [ ! -f .env ]; then
   cp .env.example .env
   set_env_var SECRET_KEY "$(gen_secret)"
   set_env_var POSTGRES_PASSWORD "$(gen_secret | cut -c1-24)"
-  set_env_var WATCHTOWER_TOKEN "$(gen_secret)"
-  echo "  → generated a random SECRET_KEY, POSTGRES_PASSWORD and WATCHTOWER_TOKEN"
+  echo "  → generated a random SECRET_KEY and POSTGRES_PASSWORD"
 else
   echo ".env already exists — leaving its secrets untouched."
 fi
+
+# Backfill a secret a newer release introduced, so upgrading an older .env needs
+# no manual edit. Only fills a key that's missing or empty — never changes a value.
+ensure_secret() {
+  local cur
+  cur="$(grep "^$1=" .env 2>/dev/null | head -1 | cut -d= -f2- || true)"
+  if [ -z "$cur" ]; then
+    set_env_var "$1" "$(gen_secret)"
+    echo "  → added a generated $1 to .env"
+  fi
+}
+ensure_secret WATCHTOWER_TOKEN
 
 # 2. Resolve the site address (LAN auto-detect / explicit), if requested.
 if [ "$LAN" -eq 1 ] && [ -z "$SITE" ]; then
