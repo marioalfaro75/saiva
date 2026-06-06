@@ -140,6 +140,30 @@ def create_demo_net_worth(db: Session, household: models.Household) -> None:
     db.commit()
 
 
+def create_demo_goals(db: Session, household: models.Household) -> None:
+    """Two demo savings goals: an emergency fund linked to the savings account,
+    and a holiday with a deadline (so a suggested contribution shows)."""
+    savings = db.execute(
+        select(models.Account).where(
+            models.Account.household_id == household.id,
+            models.Account.type == "savings",
+        )
+    ).scalars().first()
+    holiday_date = dt.date.today() + relativedelta(months=8)
+    goals = [
+        ("Emergency fund", 3000000, None, savings.id if savings else None, 0, 0),
+        ("Holiday", 800000, holiday_date, None, 150000, 1),
+    ]
+    for name, target, date, account_id, current, sort in goals:
+        db.add(
+            models.SavingsGoal(
+                household_id=household.id, name=name, target_cents=target, target_date=date,
+                account_id=account_id, current_cents=current, sort=sort,
+            )
+        )
+    db.commit()
+
+
 def create_demo_data(db: Session, household: models.Household, months: int = 6) -> int:
     everyday = models.Account(
         household_id=household.id, name="Everyday", type="everyday",
@@ -218,6 +242,7 @@ def create_demo_data(db: Session, household: models.Household, months: int = 6) 
     detect_transfers(db, household.id)
     create_demo_budgets(db, household)
     create_demo_net_worth(db, household)
+    create_demo_goals(db, household)
     return count
 
 

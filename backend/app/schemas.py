@@ -387,6 +387,40 @@ class NetWorthOut(BaseModel):
     history: list[NetWorthPoint]
 
 
+# -------------------------------------------------------------------- savings goals
+
+
+class SavingsGoalCreate(BaseModel):
+    name: str = Field(min_length=1, max_length=120)
+    target_cents: int = Field(gt=0)
+    target_date: dt.date | None = None
+    account_id: str | None = None
+    current_cents: int = Field(default=0, ge=0)
+
+
+class SavingsGoalUpdate(BaseModel):
+    name: str | None = Field(default=None, min_length=1, max_length=120)
+    target_cents: int | None = Field(default=None, gt=0)
+    target_date: dt.date | None = None
+    account_id: str | None = None
+    current_cents: int | None = Field(default=None, ge=0)
+
+
+class SavingsGoalOut(BaseModel):
+    id: str
+    name: str
+    target_cents: int
+    target_date: dt.date | None
+    account_id: str | None
+    account_name: str | None
+    current_cents: int
+    remaining_cents: int
+    pct_complete: float
+    suggested_per_period_cents: int
+    period_label: str
+    complete: bool
+
+
 class MessageOut(BaseModel):
     message: str
 

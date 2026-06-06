@@ -4,6 +4,7 @@ import { useAuth } from "./auth/AuthContext";
 import { Layout } from "./components/Layout";
 import { Accounts } from "./pages/Accounts";
 import { Budgets } from "./pages/Budgets";
+import { Goals } from "./pages/Goals";
 import { ImportPage } from "./pages/Import";
 import { Login } from "./pages/Login";
 import { NetWorth } from "./pages/NetWorth";
@@ -29,6 +30,7 @@ export default function App() {
         <Route path="/accounts" element={<Accounts />} />
         <Route path="/budgets" element={<Budgets />} />
         <Route path="/net-worth" element={<NetWorth />} />
+        <Route path="/goals" element={<Goals />} />
         <Route path="/import" element={<ImportPage />} />
         <Route path="/settings" element={<Settings />} />
         <Route path="*" element={<Navigate to="/" replace />} />

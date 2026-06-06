@@ -156,6 +156,21 @@ export interface NetWorth {
   history: NetWorthPoint[];
 }
 
+export interface SavingsGoal {
+  id: string;
+  name: string;
+  target_cents: number;
+  target_date: string | null;
+  account_id: string | null;
+  account_name: string | null;
+  current_cents: number;
+  remaining_cents: number;
+  pct_complete: number;
+  suggested_per_period_cents: number;
+  period_label: string;
+  complete: boolean;
+}
+
 export interface CsvMapping {
   has_header: boolean;
   date_col: number;

@@ -212,6 +212,21 @@ class NetWorthSnapshot(Base, TimestampMixin):
     )
 
 
+class SavingsGoal(Base, TimestampMixin):
+    """A savings target with an optional deadline and linked account (PRD R25)."""
+
+    __tablename__ = "savings_goals"
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_uuid)
+    household_id: Mapped[str] = mapped_column(ForeignKey("households.id"), index=True)
+    name: Mapped[str] = mapped_column(String(120), nullable=False)
+    target_cents: Mapped[int] = mapped_column(Integer, nullable=False)
+    target_date: Mapped[dt.date | None] = mapped_column(Date, nullable=True)
+    account_id: Mapped[str | None] = mapped_column(ForeignKey("accounts.id"), nullable=True)
+    current_cents: Mapped[int] = mapped_column(Integer, default=0)
+    sort: Mapped[int] = mapped_column(Integer, default=0)
+
+
 class AuditLog(Base):
     __tablename__ = "audit_logs"
 
