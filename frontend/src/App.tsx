@@ -3,6 +3,7 @@ import { Navigate, Route, Routes } from "react-router-dom";
 import { useAuth } from "./auth/AuthContext";
 import { Layout } from "./components/Layout";
 import { Accounts } from "./pages/Accounts";
+import { Budgets } from "./pages/Budgets";
 import { ImportPage } from "./pages/Import";
 import { Login } from "./pages/Login";
 import { Overview } from "./pages/Overview";
@@ -25,6 +26,7 @@ export default function App() {
         <Route path="/" element={<Overview />} />
         <Route path="/transactions" element={<Transactions />} />
         <Route path="/accounts" element={<Accounts />} />
+        <Route path="/budgets" element={<Budgets />} />
         <Route path="/import" element={<ImportPage />} />
         <Route path="/settings" element={<Settings />} />
         <Route path="*" element={<Navigate to="/" replace />} />

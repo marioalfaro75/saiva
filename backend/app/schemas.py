@@ -319,6 +319,37 @@ class TrendOut(BaseModel):
     points: list[TrendPoint]
 
 
+# ------------------------------------------------------------------------- budgets
+
+
+class BudgetCreate(BaseModel):
+    category_id: str
+    period: Literal["monthly", "fortnightly", "annual"] = "monthly"
+    limit_cents: int = Field(gt=0)
+
+
+class BudgetUpdate(BaseModel):
+    period: Literal["monthly", "fortnightly", "annual"] | None = None
+    limit_cents: int | None = Field(default=None, gt=0)
+
+
+class BudgetOut(BaseModel):
+    id: str
+    category_id: str
+    category_name: str
+    parent_name: str | None
+    period: str
+    period_label: str
+    period_start: dt.date
+    period_end: dt.date
+    limit_cents: int
+    actual_cents: int
+    remaining_cents: int
+    pct_used: float
+    projected_cents: int
+    status: str  # ok | warning | over
+
+
 class MessageOut(BaseModel):
     message: str
 

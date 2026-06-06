@@ -7,7 +7,9 @@ BYO‑key or a local model) grounded in their own data. Runs in a container, HTT
 
 > **Status:** Phase 0 + Phase 1 (MVP) implemented — accounts, file import
 > (CSV/OFX/QFX) with de‑duplication, rule + ML categorisation, transfer
-> detection, and an overview dashboard. See the [PRD](docs/PRD.md) for the full plan.
+> detection, and an overview dashboard. **Phase 2 in progress:** per‑category
+> **budgets** with live progress, end‑of‑period projection and over/under status.
+> See the [PRD](docs/PRD.md) for the full plan.
 
 ## Run it in a container
 
@@ -179,8 +181,8 @@ CI fails if a model change ships without a matching migration (`alembic check`).
 
 ```
 backend/    FastAPI API — auth, accounts, import pipeline, categorisation,
-            transfers, dashboard; pytest suite (≈90% coverage)
-frontend/   React + TS SPA (Vite) — dashboard, transactions, import, settings
+            transfers, dashboard, budgets; pytest suite (≈90% coverage)
+frontend/   React + TS SPA (Vite) — dashboard, transactions, accounts, budgets, import, settings
 infra/      Caddy reverse-proxy config (auto-HTTPS)
 docs/       Product Requirements Document
 docker-compose.yml   one-command deploy (Postgres + API + web + Caddy)
