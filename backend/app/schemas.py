@@ -542,6 +542,37 @@ class UpcomingBillsOut(BaseModel):
     bills: list[UpcomingBillOut]
 
 
+# ----------------------------------------------------------------- forecasting
+
+
+class ForecastPointOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    date: dt.date
+    balance_cents: int
+
+
+class ForecastOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    starting_balance_cents: int
+    end_balance_cents: int
+    low_balance_cents: int
+    low_balance_date: dt.date
+    horizon_days: int
+    monthly_income_cents: int
+    monthly_expense_cents: int
+    points: list[ForecastPointOut]
+
+
+class ForecastAdjustment(BaseModel):
+    category_id: str | None = None
+    pct: float = Field(ge=-100, le=500)  # -100 = cut entirely, +100 = double
+
+
+class ForecastRequest(BaseModel):
+    days: int = Field(default=90, ge=7, le=365)
+    adjustments: list[ForecastAdjustment] = []
+
+
 # --------------------------------------------------------------------- benchmarks
 
 

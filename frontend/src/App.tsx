@@ -6,6 +6,7 @@ import { Accounts } from "./pages/Accounts";
 import { Benchmarks } from "./pages/Benchmarks";
 import { Bills } from "./pages/Bills";
 import { Budgets } from "./pages/Budgets";
+import { Forecast } from "./pages/Forecast";
 import { Goals } from "./pages/Goals";
 import { ImportPage } from "./pages/Import";
 import { Insights } from "./pages/Insights";
@@ -34,6 +35,7 @@ export default function App() {
         <Route path="/accounts" element={<Accounts />} />
         <Route path="/budgets" element={<Budgets />} />
         <Route path="/bills" element={<Bills />} />
+        <Route path="/forecast" element={<Forecast />} />
         <Route path="/net-worth" element={<NetWorth />} />
         <Route path="/goals" element={<Goals />} />
         <Route path="/benchmarks" element={<Benchmarks />} />
