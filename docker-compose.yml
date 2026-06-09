@@ -34,6 +34,8 @@ services:
         condition: service_healthy
     expose:
       - "8000"
+    volumes:
+      - db_backups:/backups
 
   web:
     build: ./frontend
@@ -61,5 +63,6 @@ services:
 
 volumes:
   db_data:
+  db_backups:
   caddy_data:
   caddy_config:
