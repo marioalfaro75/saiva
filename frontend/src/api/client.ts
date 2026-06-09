@@ -6,6 +6,7 @@ import type {
   CategoryBreakdown,
   Forecast,
   ForecastAdjustment,
+  FYReportOption,
   ImportCommit,
   ImportPreview,
   Insights,
@@ -166,6 +167,8 @@ export const api = {
       body: JSON.stringify(patch),
     }),
   sendTestEmail: () => request<{ message: string }>("/notifications/test", { method: "POST" }),
+
+  reportYears: () => request<FYReportOption[]>("/reports/years"),
 
   benchmarks: () => request<Benchmark>("/benchmarks"),
 

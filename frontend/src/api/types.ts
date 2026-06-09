@@ -314,6 +314,13 @@ export interface NotificationSettings {
   smtp_configured: boolean;
 }
 
+export interface FYReportOption {
+  year: number;
+  label: string;
+  start: string;
+  end: string;
+}
+
 export interface SavingsGoal {
   id: string;
   name: string;
