@@ -268,6 +268,27 @@ export interface UpcomingBills {
   bills: UpcomingBill[];
 }
 
+export interface ForecastPoint {
+  date: string;
+  balance_cents: number;
+}
+
+export interface Forecast {
+  starting_balance_cents: number;
+  end_balance_cents: number;
+  low_balance_cents: number;
+  low_balance_date: string;
+  horizon_days: number;
+  monthly_income_cents: number;
+  monthly_expense_cents: number;
+  points: ForecastPoint[];
+}
+
+export interface ForecastAdjustment {
+  category_id: string | null;
+  pct: number;
+}
+
 export interface SavingsGoal {
   id: string;
   name: string;

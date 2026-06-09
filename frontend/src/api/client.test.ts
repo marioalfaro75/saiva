@@ -97,4 +97,25 @@ describe("api client wiring", () => {
     await api.upcomingBills(30);
     expect(lastCall(fn)[0]).toBe("/api/recurring/upcoming?days=30");
   });
+
+  it("forecast posts days and adjustments", async () => {
+    const fn = mockFetch({
+      starting_balance_cents: 0,
+      end_balance_cents: 0,
+      low_balance_cents: 0,
+      low_balance_date: "2026-01-01",
+      horizon_days: 90,
+      monthly_income_cents: 0,
+      monthly_expense_cents: 0,
+      points: [],
+    });
+    await api.forecast(90, [{ category_id: "c1", pct: -20 }]);
+    const [url, opts] = lastCall(fn);
+    expect(url).toBe("/api/forecast");
+    expect(opts.method).toBe("POST");
+    expect(JSON.parse(opts.body as string)).toEqual({
+      days: 90,
+      adjustments: [{ category_id: "c1", pct: -20 }],
+    });
+  });
 });

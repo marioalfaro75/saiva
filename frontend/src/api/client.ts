@@ -4,6 +4,8 @@ import type {
   Budget,
   Category,
   CategoryBreakdown,
+  Forecast,
+  ForecastAdjustment,
   ImportCommit,
   ImportPreview,
   Insights,
@@ -142,6 +144,12 @@ export const api = {
 
   recurring: () => request<RecurringOut>("/recurring"),
   upcomingBills: (days = 60) => request<UpcomingBills>(`/recurring/upcoming${qs({ days })}`),
+
+  forecast: (days = 90, adjustments: ForecastAdjustment[] = []) =>
+    request<Forecast>("/forecast", {
+      method: "POST",
+      body: JSON.stringify({ days, adjustments }),
+    }),
 
   benchmarks: () => request<Benchmark>("/benchmarks"),
 
