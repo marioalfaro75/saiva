@@ -144,4 +144,14 @@ describe("api client wiring", () => {
     expect(r[0].label).toBe("FY2025");
     expect(lastCall(fn)[0]).toBe("/api/reports/years");
   });
+
+  it("aiChat posts the message list", async () => {
+    const fn = mockFetch({ reply: "hello" });
+    const r = await api.aiChat([{ role: "user", content: "hi" }]);
+    expect(r.reply).toBe("hello");
+    const [url, opts] = lastCall(fn);
+    expect(url).toBe("/api/ai/chat");
+    expect(opts.method).toBe("POST");
+    expect(JSON.parse(opts.body as string)).toEqual({ messages: [{ role: "user", content: "hi" }] });
+  });
 });

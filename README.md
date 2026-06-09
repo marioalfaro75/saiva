@@ -120,6 +120,12 @@ Email is opt‑in: set `SMTP_*` in `.env`, enable it on the Alerts page, and hav
 hit the run endpoint to send new alerts and weekly/monthly digests — for example a cron line
 `*/30 * * * * curl -fsS -X POST -H "X-Notify-Token: $NOTIFICATIONS_TOKEN" https://<host>/api/notifications/run`.
 
+**AI advisor (BYO key).** Connect Anthropic (Claude), any OpenAI‑compatible endpoint, or a
+local **Ollama** in **Settings → AI advisor**, then ask questions on the **Advisor** page. Your
+key is stored encrypted (derived from `SECRET_KEY`). A **privacy mode** controls what's shared —
+*local only*, *aggregates only* (default: category totals & summaries, no raw transactions), or
+*full detail*. Every call is recorded in the audit log; answers are general information, not advice.
+
 ### Running on Proxmox LXC
 
 Saiva runs as Docker containers, so on Proxmox you first need an LXC that *can* run
