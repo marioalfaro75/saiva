@@ -79,4 +79,22 @@ describe("api client wiring", () => {
     expect(r.matched).toBe(2);
     expect(lastCall(fn)[0]).toBe("/api/rules/preview");
   });
+
+  it("recurring hits the recurring endpoint", async () => {
+    const fn = mockFetch({
+      series: [],
+      monthly_committed_cents: 0,
+      subscriptions_count: 0,
+      subscriptions_monthly_cents: 0,
+      income_monthly_cents: 0,
+    });
+    await api.recurring();
+    expect(lastCall(fn)[0]).toBe("/api/recurring");
+  });
+
+  it("upcomingBills builds the days query", async () => {
+    const fn = mockFetch({ horizon_days: 30, total_cents: 0, bills: [] });
+    await api.upcomingBills(30);
+    expect(lastCall(fn)[0]).toBe("/api/recurring/upcoming?days=30");
+  });
 });

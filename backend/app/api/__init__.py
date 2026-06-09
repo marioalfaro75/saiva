@@ -16,6 +16,7 @@ from . import (
     insights,
     meta,
     networth,
+    recurring,
     transactions,
 )
 
@@ -33,4 +34,5 @@ api_router.include_router(networth.router)
 api_router.include_router(goals.router)
 api_router.include_router(insights.router)
 api_router.include_router(benchmarks.router)
+api_router.include_router(recurring.router)
 api_router.include_router(admin.router)
