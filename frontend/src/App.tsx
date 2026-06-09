@@ -3,6 +3,7 @@ import { Navigate, Route, Routes } from "react-router-dom";
 import { useAuth } from "./auth/AuthContext";
 import { Layout } from "./components/Layout";
 import { Accounts } from "./pages/Accounts";
+import { Alerts } from "./pages/Alerts";
 import { Benchmarks } from "./pages/Benchmarks";
 import { Bills } from "./pages/Bills";
 import { Budgets } from "./pages/Budgets";
@@ -31,6 +32,7 @@ export default function App() {
       <Routes>
         <Route path="/" element={<Overview />} />
         <Route path="/insights" element={<Insights />} />
+        <Route path="/alerts" element={<Alerts />} />
         <Route path="/transactions" element={<Transactions />} />
         <Route path="/accounts" element={<Accounts />} />
         <Route path="/budgets" element={<Budgets />} />

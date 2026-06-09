@@ -243,3 +243,42 @@ class AuditLog(Base):
     entity_id: Mapped[str | None] = mapped_column(String(32), nullable=True)
     ip: Mapped[str | None] = mapped_column(String(45), nullable=True)
     detail: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+
+
+class Notification(Base):
+    """A generated alert (PRD R35). `key` is a stable dedupe id per household so
+    regenerating never produces duplicates; read_at / emailed_at track delivery."""
+
+    __tablename__ = "notifications"
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_uuid)
+    household_id: Mapped[str] = mapped_column(ForeignKey("households.id"), index=True)
+    key: Mapped[str] = mapped_column(String(200), nullable=False)
+    type: Mapped[str] = mapped_column(String(30), nullable=False)  # budget|bill|large_txn|...
+    severity: Mapped[str] = mapped_column(String(10), default="info")  # alert|warn|info
+    title: Mapped[str] = mapped_column(String(200), nullable=False)
+    body: Mapped[str] = mapped_column(Text, nullable=False)
+    link: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    amount_cents: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    created_at: Mapped[dt.datetime] = mapped_column(
+        DateTime, default=dt.datetime.utcnow, index=True
+    )
+    read_at: Mapped[dt.datetime | None] = mapped_column(DateTime, nullable=True)
+    emailed_at: Mapped[dt.datetime | None] = mapped_column(DateTime, nullable=True)
+
+    __table_args__ = (
+        UniqueConstraint("household_id", "key", name="uq_notification_household_key"),
+    )
+
+
+class NotificationSettings(Base, TimestampMixin):
+    """Per-household notification preferences (one row). Quiet by default (R35)."""
+
+    __tablename__ = "notification_settings"
+
+    household_id: Mapped[str] = mapped_column(ForeignKey("households.id"), primary_key=True)
+    email_enabled: Mapped[bool] = mapped_column(Boolean, default=False)
+    digest: Mapped[str] = mapped_column(String(10), default="off")  # off|weekly|monthly
+    large_txn_threshold_cents: Mapped[int] = mapped_column(Integer, default=50000)
+    low_balance_threshold_cents: Mapped[int] = mapped_column(Integer, default=0)
+    last_digest_at: Mapped[dt.datetime | None] = mapped_column(DateTime, nullable=True)

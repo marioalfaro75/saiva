@@ -118,4 +118,23 @@ describe("api client wiring", () => {
       adjustments: [{ category_id: "c1", pct: -20 }],
     });
   });
+
+  it("notifications GET and settings PATCH", async () => {
+    const list = mockFetch({ items: [], unread: 0 });
+    await api.notifications();
+    expect(lastCall(list)[0]).toBe("/api/notifications");
+
+    const patch = mockFetch({
+      email_enabled: true,
+      digest: "weekly",
+      large_txn_threshold_cents: 100000,
+      low_balance_threshold_cents: 0,
+      smtp_configured: false,
+    });
+    await api.updateNotificationSettings({ digest: "weekly" });
+    const [url, opts] = lastCall(patch);
+    expect(url).toBe("/api/notifications/settings");
+    expect(opts.method).toBe("PATCH");
+    expect(JSON.parse(opts.body as string)).toEqual({ digest: "weekly" });
+  });
 });
