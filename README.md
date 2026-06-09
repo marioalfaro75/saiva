@@ -84,6 +84,8 @@ faster, reproducible, and easy on a low‑powered host (it doesn't compile the f
 ```bash
 make pull                       # pull ghcr.io/marioalfaro75/saiva-{api,web}:latest and start
 make pull SAIVA_VERSION=v0.4.0  # pin a specific release;  make pull LAN=1 also works
+make pull SAIVA_VERSION=edge    # track the latest green build of main (continuous)
+make pull SAIVA_VERSION=sha-1a2b3c4   # pin / roll back to an exact build
 # (equivalently: ./scripts/deploy.sh --pull)
 ```
 
@@ -93,6 +95,18 @@ and the [`Release`](.github/workflows/release.yml) workflow builds and pushes mu
 (amd64 + arm64) `saiva-api`/`saiva-web` images. After the first publish, set those GHCR
 packages to **public** (GitHub → your profile → Packages) if you want to pull without
 `docker login`; otherwise `docker login ghcr.io` with a token first.
+
+**Release channels.** `latest` follows tagged releases (`v*`); `edge` follows every green
+build of `main` — merges auto-publish the changed image(s) as `edge` + `sha-<short>` via the
+[`CI`](.github/workflows/ci.yml) workflow once tests pass; `sha-<short>` is an immutable
+build to pin or roll back to. Pick a channel with `SAIVA_VERSION` in `.env`, then `make pull`.
+
+**Pre-migration backups.** On start the API writes a compressed `pg_dump` to the
+`db_backups` volume *before* applying any schema migration, so an upgrade is always
+reversible (disable with `SAIVA_BACKUP_BEFORE_MIGRATE=0`; the dump lands in
+`SAIVA_BACKUP_DIR`). If the backup fails, the container refuses to migrate. To roll back a
+bad upgrade: `SAIVA_VERSION=sha-<previous>` then `make pull`, and restore the dump if a
+migration had already run.
 
 **In‑app updates.** On a pull‑based deploy, the app checks GitHub for newer releases and
 shows the owner an **Update available** badge; **Settings → Software updates → Update now**
