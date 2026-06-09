@@ -9,6 +9,7 @@ import { SPA_VERSION } from "../version";
 const NAV = [
   { to: "/", label: "Overview", end: true },
   { to: "/insights", label: "Insights", end: false },
+  { to: "/alerts", label: "Alerts", end: false },
   { to: "/transactions", label: "Transactions", end: false },
   { to: "/accounts", label: "Accounts", end: false },
   { to: "/budgets", label: "Budgets", end: false },
@@ -38,9 +39,16 @@ export function Layout({ children }: { children: ReactNode }) {
     queryFn: () => api.updateCheck(),
     enabled: isOwner,
   });
+  // Unread alert count drives a dot on the Alerts nav item.
+  const notifs = useQuery({
+    queryKey: ["notifications"],
+    queryFn: api.notifications,
+    refetchInterval: 300_000,
+  });
 
   const reloadNeeded = !!meta.data && meta.data.version !== SPA_VERSION;
   const updateAvailable = !!update.data?.update_available;
+  const unread = notifs.data?.unread ?? 0;
 
   return (
     <div className="app">
@@ -54,6 +62,9 @@ export function Layout({ children }: { children: ReactNode }) {
               {item.label}
               {item.to === "/settings" && updateAvailable && (
                 <span className="dot" title="Update available" />
+              )}
+              {item.to === "/alerts" && unread > 0 && (
+                <span className="dot" title={`${unread} unread`} />
               )}
             </NavLink>
           ))}

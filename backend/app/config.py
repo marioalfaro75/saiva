@@ -37,6 +37,21 @@ class Settings(BaseSettings):
     watchtower_url: str = ""  # e.g. http://watchtower:8080 (empty = in-app apply disabled)
     watchtower_token: str = ""
 
+    # Email / SMTP for notifications & digests. An empty host disables all email.
+    smtp_host: str = ""
+    smtp_port: int = 587
+    smtp_user: str = ""
+    smtp_password: str = ""
+    smtp_from: str = ""
+    smtp_tls: bool = True  # use STARTTLS (typical on port 587)
+    smtp_ssl: bool = False  # implicit TLS (typical on port 465)
+    # Shared token the cron caller passes to POST /api/notifications/run.
+    notifications_token: str = ""
+
+    @property
+    def smtp_configured(self) -> bool:
+        return bool(self.smtp_host and self.smtp_from)
+
     @property
     def is_sqlite(self) -> bool:
         return self.database_url.startswith("sqlite")

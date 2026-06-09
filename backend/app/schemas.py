@@ -573,6 +573,49 @@ class ForecastRequest(BaseModel):
     adjustments: list[ForecastAdjustment] = []
 
 
+# --------------------------------------------------------------- notifications
+
+
+class NotificationOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: str
+    type: str
+    severity: str
+    title: str
+    body: str
+    link: str | None
+    amount_cents: int | None
+    created_at: dt.datetime
+    read_at: dt.datetime | None
+
+
+class NotificationListOut(BaseModel):
+    items: list[NotificationOut]
+    unread: int
+
+
+class NotificationSettingsOut(BaseModel):
+    email_enabled: bool
+    digest: str
+    large_txn_threshold_cents: int
+    low_balance_threshold_cents: int
+    smtp_configured: bool  # whether SMTP is set up in the environment
+
+
+class NotificationSettingsUpdate(BaseModel):
+    email_enabled: bool | None = None
+    digest: Literal["off", "weekly", "monthly"] | None = None
+    large_txn_threshold_cents: int | None = Field(default=None, ge=0)
+    low_balance_threshold_cents: int | None = None
+
+
+class NotificationRunOut(BaseModel):
+    households: int
+    created: int
+    emailed: int
+    digests: int
+
+
 # --------------------------------------------------------------------- benchmarks
 
 

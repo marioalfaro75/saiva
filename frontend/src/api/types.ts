@@ -289,6 +289,31 @@ export interface ForecastAdjustment {
   pct: number;
 }
 
+export interface Notification {
+  id: string;
+  type: string;
+  severity: string;
+  title: string;
+  body: string;
+  link: string | null;
+  amount_cents: number | null;
+  created_at: string;
+  read_at: string | null;
+}
+
+export interface NotificationList {
+  items: Notification[];
+  unread: number;
+}
+
+export interface NotificationSettings {
+  email_enabled: boolean;
+  digest: "off" | "weekly" | "monthly";
+  large_txn_threshold_cents: number;
+  low_balance_threshold_cents: number;
+  smtp_configured: boolean;
+}
+
 export interface SavingsGoal {
   id: string;
   name: string;

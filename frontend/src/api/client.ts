@@ -12,6 +12,9 @@ import type {
   MatchType,
   Me,
   NetWorth,
+  Notification,
+  NotificationList,
+  NotificationSettings,
   RecategoriseResult,
   RecategoriseScope,
   RecurringOut,
@@ -150,6 +153,19 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ days, adjustments }),
     }),
+
+  notifications: () => request<NotificationList>("/notifications"),
+  markNotificationRead: (id: string) =>
+    request<Notification>(`/notifications/${id}/read`, { method: "POST" }),
+  markAllNotificationsRead: () =>
+    request<{ message: string }>("/notifications/read-all", { method: "POST" }),
+  notificationSettings: () => request<NotificationSettings>("/notifications/settings"),
+  updateNotificationSettings: (patch: Partial<Omit<NotificationSettings, "smtp_configured">>) =>
+    request<NotificationSettings>("/notifications/settings", {
+      method: "PATCH",
+      body: JSON.stringify(patch),
+    }),
+  sendTestEmail: () => request<{ message: string }>("/notifications/test", { method: "POST" }),
 
   benchmarks: () => request<Benchmark>("/benchmarks"),
 

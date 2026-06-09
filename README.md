@@ -114,6 +114,12 @@ pulls and restarts via a token‑protected Watchtower sidecar (the API never tou
 Docker socket). After an update, open tabs get a one‑click **Reload** prompt. The update
 check is a public, data‑free request and can be turned off with `UPDATE_CHECK_ENABLED=false`.
 
+**Alerts & email digests.** The **Alerts** page always shows an in‑app feed (over‑budget
+categories, unusual spend, upcoming bills, large transactions, low projected balance).
+Email is opt‑in: set `SMTP_*` in `.env`, enable it on the Alerts page, and have a scheduler
+hit the run endpoint to send new alerts and weekly/monthly digests — for example a cron line
+`*/30 * * * * curl -fsS -X POST -H "X-Notify-Token: $NOTIFICATIONS_TOKEN" https://<host>/api/notifications/run`.
+
 ### Running on Proxmox LXC
 
 Saiva runs as Docker containers, so on Proxmox you first need an LXC that *can* run
