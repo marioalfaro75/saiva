@@ -12,8 +12,10 @@ import type {
   NetWorth,
   RecategoriseResult,
   RecategoriseScope,
+  RecurringOut,
   Rule,
   RulePreview,
+  UpcomingBills,
   SavingsGoal,
   SetupBody,
   SniffResult,
@@ -137,6 +139,9 @@ export const api = {
     request<RulePreview>("/rules/preview", { method: "POST", body: JSON.stringify(body) }),
 
   insights: () => request<Insights>("/insights"),
+
+  recurring: () => request<RecurringOut>("/recurring"),
+  upcomingBills: (days = 60) => request<UpcomingBills>(`/recurring/upcoming${qs({ days })}`),
 
   benchmarks: () => request<Benchmark>("/benchmarks"),
 

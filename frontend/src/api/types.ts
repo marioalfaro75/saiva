@@ -228,6 +228,46 @@ export interface Insights {
   insights: Insight[];
 }
 
+export interface RecurringSeries {
+  merchant: string;
+  category_id: string | null;
+  category_name: string | null;
+  direction: "expense" | "income";
+  cadence: string;
+  interval_days: number;
+  typical_amount_cents: number;
+  monthly_amount_cents: number;
+  occurrences: number;
+  first_date: string;
+  last_date: string;
+  next_due: string;
+  active: boolean;
+  is_subscription: boolean;
+}
+
+export interface RecurringOut {
+  series: RecurringSeries[];
+  monthly_committed_cents: number;
+  subscriptions_count: number;
+  subscriptions_monthly_cents: number;
+  income_monthly_cents: number;
+}
+
+export interface UpcomingBill {
+  due_date: string;
+  merchant: string;
+  amount_cents: number;
+  category_id: string | null;
+  category_name: string | null;
+  cadence: string;
+}
+
+export interface UpcomingBills {
+  horizon_days: number;
+  total_cents: number;
+  bills: UpcomingBill[];
+}
+
 export interface SavingsGoal {
   id: string;
   name: string;

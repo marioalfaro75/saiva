@@ -4,6 +4,7 @@ import { useAuth } from "./auth/AuthContext";
 import { Layout } from "./components/Layout";
 import { Accounts } from "./pages/Accounts";
 import { Benchmarks } from "./pages/Benchmarks";
+import { Bills } from "./pages/Bills";
 import { Budgets } from "./pages/Budgets";
 import { Goals } from "./pages/Goals";
 import { ImportPage } from "./pages/Import";
@@ -32,6 +33,7 @@ export default function App() {
         <Route path="/transactions" element={<Transactions />} />
         <Route path="/accounts" element={<Accounts />} />
         <Route path="/budgets" element={<Budgets />} />
+        <Route path="/bills" element={<Bills />} />
         <Route path="/net-worth" element={<NetWorth />} />
         <Route path="/goals" element={<Goals />} />
         <Route path="/benchmarks" element={<Benchmarks />} />

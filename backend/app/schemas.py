@@ -497,6 +497,51 @@ class InsightsOut(BaseModel):
     insights: list[Insight]
 
 
+# ----------------------------------------------------------- recurring & bills
+
+
+class RecurringSeriesOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    merchant: str
+    category_id: str | None
+    category_name: str | None
+    direction: str  # expense | income
+    cadence: str  # weekly | fortnightly | monthly | quarterly | yearly
+    interval_days: int
+    typical_amount_cents: int
+    monthly_amount_cents: int
+    occurrences: int
+    first_date: dt.date
+    last_date: dt.date
+    next_due: dt.date
+    active: bool
+    is_subscription: bool
+
+
+class RecurringOut(BaseModel):
+    series: list[RecurringSeriesOut]
+    monthly_committed_cents: int  # active recurring expenses, normalised to a month
+    subscriptions_count: int
+    subscriptions_monthly_cents: int
+    income_monthly_cents: int  # active recurring income, normalised to a month
+
+
+class UpcomingBillOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    due_date: dt.date
+    merchant: str
+    amount_cents: int
+    category_id: str | None
+    category_name: str | None
+    cadence: str
+
+
+class UpcomingBillsOut(BaseModel):
+    horizon_days: int
+    total_cents: int
+    bills: list[UpcomingBillOut]
+
+
 # --------------------------------------------------------------------- benchmarks
 
 
