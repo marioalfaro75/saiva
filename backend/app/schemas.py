@@ -649,6 +649,39 @@ class FYReportOption(BaseModel):
     end: dt.date
 
 
+# ----------------------------------------------------------------- AI advisor
+
+
+class AiSettingsOut(BaseModel):
+    provider: str  # none | anthropic | openai
+    base_url: str | None
+    model: str | None
+    privacy_mode: str  # local_only | aggregates | full
+    has_key: bool
+    configured: bool
+
+
+class AiSettingsUpdate(BaseModel):
+    provider: Literal["none", "anthropic", "openai"] | None = None
+    base_url: str | None = None
+    model: str | None = None
+    privacy_mode: Literal["local_only", "aggregates", "full"] | None = None
+    api_key: str | None = None  # write-only; "" clears the stored key
+
+
+class ChatMessage(BaseModel):
+    role: Literal["user", "assistant"]
+    content: str = Field(min_length=1, max_length=8000)
+
+
+class ChatRequest(BaseModel):
+    messages: list[ChatMessage] = Field(min_length=1, max_length=40)
+
+
+class ChatReply(BaseModel):
+    reply: str
+
+
 # ------------------------------------------------------------------------- updates
 
 

@@ -21,6 +21,8 @@ dependencies = [
   "python-dateutil>=2.9",
   "alembic>=1.13",
   "fpdf2>=2.8",
+  "cryptography>=43",
+  "httpx>=0.27",
 ]
 
 [project.optional-dependencies]

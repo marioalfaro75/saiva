@@ -5,6 +5,7 @@ from fastapi import APIRouter
 from . import (
     accounts,
     admin,
+    ai,
     auth,
     benchmarks,
     budgets,
@@ -41,4 +42,5 @@ api_router.include_router(recurring.router)
 api_router.include_router(forecast.router)
 api_router.include_router(notifications.router)
 api_router.include_router(reports.router)
+api_router.include_router(ai.router)
 api_router.include_router(admin.router)

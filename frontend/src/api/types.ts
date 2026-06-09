@@ -321,6 +321,20 @@ export interface FYReportOption {
   end: string;
 }
 
+export interface AiSettings {
+  provider: "none" | "anthropic" | "openai";
+  base_url: string | null;
+  model: string | null;
+  privacy_mode: "local_only" | "aggregates" | "full";
+  has_key: boolean;
+  configured: boolean;
+}
+
+export interface ChatMessage {
+  role: "user" | "assistant";
+  content: string;
+}
+
 export interface SavingsGoal {
   id: string;
   name: string;

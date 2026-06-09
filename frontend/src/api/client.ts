@@ -1,9 +1,11 @@
 import type {
   Account,
+  AiSettings,
   Benchmark,
   Budget,
   Category,
   CategoryBreakdown,
+  ChatMessage,
   Forecast,
   ForecastAdjustment,
   FYReportOption,
@@ -169,6 +171,17 @@ export const api = {
   sendTestEmail: () => request<{ message: string }>("/notifications/test", { method: "POST" }),
 
   reportYears: () => request<FYReportOption[]>("/reports/years"),
+
+  aiSettings: () => request<AiSettings>("/ai/settings"),
+  updateAiSettings: (patch: {
+    provider?: AiSettings["provider"];
+    base_url?: string | null;
+    model?: string | null;
+    privacy_mode?: AiSettings["privacy_mode"];
+    api_key?: string;
+  }) => request<AiSettings>("/ai/settings", { method: "PATCH", body: JSON.stringify(patch) }),
+  aiChat: (messages: ChatMessage[]) =>
+    request<{ reply: string }>("/ai/chat", { method: "POST", body: JSON.stringify({ messages }) }),
 
   benchmarks: () => request<Benchmark>("/benchmarks"),
 

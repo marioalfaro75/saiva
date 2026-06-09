@@ -282,3 +282,17 @@ class NotificationSettings(Base, TimestampMixin):
     large_txn_threshold_cents: Mapped[int] = mapped_column(Integer, default=50000)
     low_balance_threshold_cents: Mapped[int] = mapped_column(Integer, default=0)
     last_digest_at: Mapped[dt.datetime | None] = mapped_column(DateTime, nullable=True)
+
+
+class AiSettings(Base, TimestampMixin):
+    """Per-household BYO AI connection (PRD §10). The API key is encrypted at rest;
+    privacy_mode controls how much data may be sent to the model."""
+
+    __tablename__ = "ai_settings"
+
+    household_id: Mapped[str] = mapped_column(ForeignKey("households.id"), primary_key=True)
+    provider: Mapped[str] = mapped_column(String(20), default="none")  # none|anthropic|openai
+    base_url: Mapped[str | None] = mapped_column(String(300), nullable=True)
+    model: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    api_key_encrypted: Mapped[str | None] = mapped_column(Text, nullable=True)
+    privacy_mode: Mapped[str] = mapped_column(String(20), default="aggregates")  # see PRD R41

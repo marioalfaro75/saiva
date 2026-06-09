@@ -2,6 +2,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { type FormEvent, useEffect, useState } from "react";
 
 import { api } from "../api/client";
+import type { AiSettings } from "../api/types";
 import { UpdatesPanel } from "../components/UpdatesPanel";
 
 interface Form {
@@ -55,6 +56,40 @@ export function Settings() {
       setFy(reportYears.data[0].year);
     }
   }, [reportYears.data, fy]);
+
+  const aiQuery = useQuery({ queryKey: ["ai-settings"], queryFn: api.aiSettings });
+  const [ai, setAi] = useState<{
+    provider: AiSettings["provider"];
+    base_url: string;
+    model: string;
+    privacy_mode: AiSettings["privacy_mode"];
+    api_key: string;
+  }>({ provider: "none", base_url: "", model: "", privacy_mode: "aggregates", api_key: "" });
+  useEffect(() => {
+    if (aiQuery.data) {
+      setAi({
+        provider: aiQuery.data.provider,
+        base_url: aiQuery.data.base_url ?? "",
+        model: aiQuery.data.model ?? "",
+        privacy_mode: aiQuery.data.privacy_mode,
+        api_key: "",
+      });
+    }
+  }, [aiQuery.data]);
+  const saveAi = useMutation({
+    mutationFn: () =>
+      api.updateAiSettings({
+        provider: ai.provider,
+        base_url: ai.base_url || null,
+        model: ai.model || null,
+        privacy_mode: ai.privacy_mode,
+        ...(ai.api_key ? { api_key: ai.api_key } : {}),
+      }),
+    onSuccess: () => {
+      void qc.invalidateQueries({ queryKey: ["ai-settings"] });
+      setAi((a) => ({ ...a, api_key: "" }));
+    },
+  });
 
   const onSubmit = (e: FormEvent) => {
     e.preventDefault();
@@ -178,6 +213,83 @@ export function Settings() {
               Download PDF
             </a>
           </div>
+        </div>
+
+        <div className="card">
+          <h2>AI advisor</h2>
+          <p className="muted">
+            Connect your own AI to ask questions about your finances on the Advisor page. Keys are
+            stored encrypted; the privacy mode controls how much data is sent.
+          </p>
+          <div className="row">
+            <div>
+              <label>Provider</label>
+              <select
+                className="pill-select"
+                value={ai.provider}
+                onChange={(e) =>
+                  setAi({ ...ai, provider: e.target.value as AiSettings["provider"] })
+                }
+              >
+                <option value="none">Off</option>
+                <option value="anthropic">Anthropic (Claude)</option>
+                <option value="openai">OpenAI-compatible (OpenAI / Ollama)</option>
+              </select>
+            </div>
+            <div>
+              <label>Privacy mode</label>
+              <select
+                className="pill-select"
+                value={ai.privacy_mode}
+                onChange={(e) =>
+                  setAi({ ...ai, privacy_mode: e.target.value as AiSettings["privacy_mode"] })
+                }
+              >
+                <option value="local_only">Local only</option>
+                <option value="aggregates">Aggregates only</option>
+                <option value="full">Full detail</option>
+              </select>
+            </div>
+          </div>
+          {ai.provider !== "none" && (
+            <>
+              <div className="row" style={{ marginTop: 8 }}>
+                <div>
+                  <label>Model</label>
+                  <input
+                    value={ai.model}
+                    onChange={(e) => setAi({ ...ai, model: e.target.value })}
+                    placeholder={
+                      ai.provider === "anthropic" ? "claude-3-5-sonnet-latest" : "gpt-4o-mini"
+                    }
+                  />
+                </div>
+                {ai.provider === "openai" && (
+                  <div>
+                    <label>Base URL</label>
+                    <input
+                      value={ai.base_url}
+                      onChange={(e) => setAi({ ...ai, base_url: e.target.value })}
+                      placeholder="https://api.openai.com/v1 or http://ollama:11434/v1"
+                    />
+                  </div>
+                )}
+              </div>
+              <div className="field" style={{ marginTop: 8 }}>
+                <label>API key {aiQuery.data?.has_key ? "(set — leave blank to keep)" : ""}</label>
+                <input
+                  type="password"
+                  value={ai.api_key}
+                  onChange={(e) => setAi({ ...ai, api_key: e.target.value })}
+                  placeholder={aiQuery.data?.has_key ? "••••••••" : "Paste your API key"}
+                />
+              </div>
+            </>
+          )}
+          <button className="btn btn-primary" disabled={saveAi.isPending} onClick={() => saveAi.mutate()}>
+            Save AI settings
+          </button>
+          {saveAi.isSuccess && <span className="muted" style={{ marginLeft: 8 }}>Saved.</span>}
         </div>
 
         <UpdatesPanel />
