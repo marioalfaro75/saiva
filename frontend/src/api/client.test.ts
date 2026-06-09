@@ -137,4 +137,11 @@ describe("api client wiring", () => {
     expect(opts.method).toBe("PATCH");
     expect(JSON.parse(opts.body as string)).toEqual({ digest: "weekly" });
   });
+
+  it("reportYears hits the reports endpoint", async () => {
+    const fn = mockFetch([{ year: 2024, label: "FY2025", start: "2024-07-01", end: "2025-06-30" }]);
+    const r = await api.reportYears();
+    expect(r[0].label).toBe("FY2025");
+    expect(lastCall(fn)[0]).toBe("/api/reports/years");
+  });
 });

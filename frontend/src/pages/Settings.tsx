@@ -48,6 +48,14 @@ export function Settings() {
     onSuccess: () => qc.invalidateQueries(),
   });
 
+  const reportYears = useQuery({ queryKey: ["report-years"], queryFn: api.reportYears });
+  const [fy, setFy] = useState<number | "">("");
+  useEffect(() => {
+    if (reportYears.data && reportYears.data.length > 0 && fy === "") {
+      setFy(reportYears.data[0].year);
+    }
+  }, [reportYears.data, fy]);
+
   const onSubmit = (e: FormEvent) => {
     e.preventDefault();
     save.mutate();
@@ -141,6 +149,35 @@ export function Settings() {
             <div className="notice">Added {demo.data?.transactions} demo transactions.</div>
           )}
           {demo.isError && <div className="error">Demo data is only for an empty household.</div>}
+        </div>
+
+        <div className="card">
+          <h2>Financial-year report</h2>
+          <p className="muted">
+            A PDF for your accountant — totals, spend by category, month-by-month and top
+            merchants for the chosen financial year.
+          </p>
+          <div className="toolbar" style={{ marginBottom: 0 }}>
+            <select
+              className="pill-select"
+              value={fy}
+              onChange={(e) => setFy(Number(e.target.value))}
+            >
+              {reportYears.data?.map((o) => (
+                <option key={o.year} value={o.year}>
+                  {o.label}
+                </option>
+              ))}
+            </select>
+            <a
+              className="btn btn-primary"
+              href={fy ? `/api/reports/fy?year=${fy}` : "/api/reports/fy"}
+              target="_blank"
+              rel="noreferrer"
+            >
+              Download PDF
+            </a>
+          </div>
         </div>
 
         <UpdatesPanel />

@@ -19,6 +19,7 @@ from . import (
     networth,
     notifications,
     recurring,
+    reports,
     transactions,
 )
 
@@ -39,4 +40,5 @@ api_router.include_router(benchmarks.router)
 api_router.include_router(recurring.router)
 api_router.include_router(forecast.router)
 api_router.include_router(notifications.router)
+api_router.include_router(reports.router)
 api_router.include_router(admin.router)

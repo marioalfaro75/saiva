@@ -641,6 +641,14 @@ class MessageOut(BaseModel):
     message: str
 
 
+class FYReportOption(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    year: int  # financial-year start year
+    label: str
+    start: dt.date
+    end: dt.date
+
+
 # ------------------------------------------------------------------------- updates
 
 
