@@ -260,7 +260,7 @@ export function Settings() {
                     value={ai.model}
                     onChange={(e) => setAi({ ...ai, model: e.target.value })}
                     placeholder={
-                      ai.provider === "anthropic" ? "claude-3-5-sonnet-latest" : "gpt-4o-mini"
+                      ai.provider === "anthropic" ? "claude-haiku-4-5-20251001" : "gpt-4o-mini"
                     }
                   />
                 </div>
