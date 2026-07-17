@@ -3,6 +3,30 @@
 All notable changes to Saiva are documented here. The project follows
 [semantic versioning](https://semver.org); the newest release is first.
 
+## [0.8.1] — 2026-07-17
+
+Patch release: fixes the container image build and adds AI‑advisor
+quality‑of‑life. First v0.8.x with publishable images (the v0.8.0 image build
+failed).
+
+### Fixed
+- **API image build** — the `python:3.11-slim` base moved to Debian trixie while
+  the Dockerfile pinned the `bookworm` PostgreSQL repo, breaking `make deploy` /
+  `make pull` with an unmet‑dependency error. Pinned the base to
+  `python:3.11-slim-bookworm` and derive the PGDG repo codename from the base OS.
+
+### Added
+- **AI advisor — model dropdown**: the Model field is populated live from the
+  provider (Anthropic `/v1/models`; OpenAI‑compatible `/models`, including local
+  Ollama), with a refresh and a “Custom…” fallback for anything not listed.
+- **AI advisor — Test connection**: a one‑click round‑trip through the configured
+  provider + key + model that reports success or the provider's own error.
+
+### Changed
+- AI provider errors now surface the provider's actual message instead of a bare
+  “400”, and new setups default to a current model.
+
+
 ## [0.8.0] — 2026-06-09
 
 A large feature release: smarter categorisation, a full "Advice & foresight"
@@ -58,4 +82,5 @@ personal financial advice.
 - On the first GHCR publish, set the `saiva-api` / `saiva-web` packages to public
   (or `docker login ghcr.io` on the host) so image pulls are authorised.
 
+[0.8.1]: https://github.com/marioalfaro75/saiva/compare/v0.8.0...v0.8.1
 [0.8.0]: https://github.com/marioalfaro75/saiva/compare/v0.4.0...v0.8.0
