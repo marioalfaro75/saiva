@@ -107,3 +107,43 @@ def test_privacy_mode_controls_raw_transactions(
     auth_client.patch("/api/ai/settings", json={"privacy_mode": "full"})
     auth_client.post("/api/ai/chat", json={"messages": [{"role": "user", "content": "hi"}]})
     assert "secretmerchant" in str(captured["system"]).lower()  # full detail includes recent txns
+
+
+def test_models_requires_configuration(auth_client: TestClient) -> None:
+    assert auth_client.get("/api/ai/models").status_code == 400
+
+
+def test_list_models(auth_client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    auth_client.patch("/api/ai/settings", json={"provider": "anthropic", "api_key": "k"})
+    monkeypatch.setattr(
+        advisor, "list_models", lambda ai: [{"id": "claude-x", "label": "Claude X"}]
+    )
+    resp = auth_client.get("/api/ai/models")
+    assert resp.status_code == 200
+    assert resp.json() == [{"id": "claude-x", "label": "Claude X"}]
+
+
+def test_connection_ok(auth_client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    auth_client.patch("/api/ai/settings", json={"provider": "anthropic", "api_key": "k"})
+    monkeypatch.setattr(advisor, "test_connection", lambda ai: "OK")
+    resp = auth_client.post("/api/ai/test")
+    assert resp.status_code == 200
+    assert "Connected" in resp.json()["message"]
+
+
+def test_connection_surfaces_provider_error(
+    auth_client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    auth_client.patch("/api/ai/settings", json={"provider": "anthropic", "api_key": "bad"})
+
+    def boom(ai):
+        raise advisor.ProviderError("400: model: nope not found")
+
+    monkeypatch.setattr(advisor, "test_connection", boom)
+    resp = auth_client.post("/api/ai/test")
+    assert resp.status_code == 502
+    assert "not found" in resp.json()["detail"]
+
+
+def test_test_requires_configuration(auth_client: TestClient) -> None:
+    assert auth_client.post("/api/ai/test").status_code == 400

@@ -165,3 +165,53 @@ def chat(
     context = build_context(db, household, ai.privacy_mode)
     system = f"{SYSTEM_PROMPT}\n\nData you may use:\n{context}"
     return _call_provider(ai, system, messages)
+
+
+# Substrings that mark an OpenAI model as not chat-capable (kept out of the picker).
+_OPENAI_NON_CHAT = (
+    "embedding", "whisper", "tts", "dall-e", "moderation", "audio",
+    "realtime", "image", "transcribe", "search", "davinci", "babbage",
+)
+
+
+def list_models(ai: models.AiSettings) -> list[dict[str, str]]:
+    """Fetch the models the configured provider/key can use, as {id, label}."""
+    key = crypto.decrypt(ai.api_key_encrypted) if ai.api_key_encrypted else None
+    if ai.provider == "anthropic":
+        base = (ai.base_url or "https://api.anthropic.com").rstrip("/")
+        resp = httpx.get(
+            f"{base}/v1/models",
+            timeout=30,
+            params={"limit": 100},
+            headers={"x-api-key": key or "", "anthropic-version": "2023-06-01"},
+        )
+        _raise_for_provider(resp)
+        return [
+            {"id": str(m["id"]), "label": str(m.get("display_name") or m["id"])}
+            for m in resp.json().get("data", [])
+            if m.get("id")
+        ]
+    if ai.provider == "openai":  # OpenAI-compatible (OpenAI, Ollama, gateways)
+        base = (ai.base_url or "https://api.openai.com/v1").rstrip("/")
+        headers = {}
+        if key:
+            headers["Authorization"] = f"Bearer {key}"
+        resp = httpx.get(f"{base}/models", timeout=30, headers=headers)
+        _raise_for_provider(resp)
+        ids = sorted(str(m["id"]) for m in resp.json().get("data", []) if m.get("id"))
+        return [
+            {"id": i, "label": i}
+            for i in ids
+            if not any(skip in i.lower() for skip in _OPENAI_NON_CHAT)
+        ]
+    raise NotConfiguredError("AI is not configured")
+
+
+def test_connection(ai: models.AiSettings) -> str:
+    """A minimal round-trip that exercises the provider + key + model together —
+    so a bad key (401) or an unknown model (400/404) both surface here."""
+    return _call_provider(
+        ai,
+        "You are a connection test.",
+        [{"role": "user", "content": "Reply with the single word: OK"}],
+    )

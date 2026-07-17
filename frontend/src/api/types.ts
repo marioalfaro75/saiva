@@ -335,6 +335,11 @@ export interface ChatMessage {
   content: string;
 }
 
+export interface AiModel {
+  id: string;
+  label: string;
+}
+
 export interface SavingsGoal {
   id: string;
   name: string;

@@ -1,5 +1,6 @@
 import type {
   Account,
+  AiModel,
   AiSettings,
   Benchmark,
   Budget,
@@ -182,6 +183,8 @@ export const api = {
   }) => request<AiSettings>("/ai/settings", { method: "PATCH", body: JSON.stringify(patch) }),
   aiChat: (messages: ChatMessage[]) =>
     request<{ reply: string }>("/ai/chat", { method: "POST", body: JSON.stringify({ messages }) }),
+  aiModels: () => request<AiModel[]>("/ai/models"),
+  aiTest: () => request<{ message: string }>("/ai/test", { method: "POST" }),
 
   benchmarks: () => request<Benchmark>("/benchmarks"),
 

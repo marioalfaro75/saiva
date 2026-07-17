@@ -87,9 +87,35 @@ export function Settings() {
       }),
     onSuccess: () => {
       void qc.invalidateQueries({ queryKey: ["ai-settings"] });
+      void qc.invalidateQueries({ queryKey: ["ai-models"] });
       setAi((a) => ({ ...a, api_key: "" }));
     },
   });
+
+  const aiModels = useQuery({
+    queryKey: ["ai-models"],
+    queryFn: api.aiModels,
+    enabled: !!aiQuery.data?.has_key && ai.provider !== "none",
+    retry: false,
+  });
+  const [customModel, setCustomModel] = useState(false);
+  const [aiMsg, setAiMsg] = useState<string | null>(null);
+  const testAi = useMutation({
+    mutationFn: api.aiTest,
+    onSuccess: (r) => setAiMsg(r.message),
+    onError: (e) => setAiMsg(e instanceof Error ? e.message : "Test failed"),
+  });
+  const testConnection = async () => {
+    setAiMsg(null);
+    try {
+      await saveAi.mutateAsync();
+    } catch {
+      return; // save error is shown by the Save button state
+    }
+    testAi.mutate();
+  };
+  const modelList = aiModels.data ?? [];
+  const modelIsCustom = customModel || (ai.model !== "" && !modelList.some((m) => m.id === ai.model));
 
   const onSubmit = (e: FormEvent) => {
     e.preventDefault();
@@ -253,28 +279,6 @@ export function Settings() {
           </div>
           {ai.provider !== "none" && (
             <>
-              <div className="row" style={{ marginTop: 8 }}>
-                <div>
-                  <label>Model</label>
-                  <input
-                    value={ai.model}
-                    onChange={(e) => setAi({ ...ai, model: e.target.value })}
-                    placeholder={
-                      ai.provider === "anthropic" ? "claude-haiku-4-5-20251001" : "gpt-4o-mini"
-                    }
-                  />
-                </div>
-                {ai.provider === "openai" && (
-                  <div>
-                    <label>Base URL</label>
-                    <input
-                      value={ai.base_url}
-                      onChange={(e) => setAi({ ...ai, base_url: e.target.value })}
-                      placeholder="https://api.openai.com/v1 or http://ollama:11434/v1"
-                    />
-                  </div>
-                )}
-              </div>
               <div className="field" style={{ marginTop: 8 }}>
                 <label>API key {aiQuery.data?.has_key ? "(set — leave blank to keep)" : ""}</label>
                 <input
@@ -284,12 +288,84 @@ export function Settings() {
                   placeholder={aiQuery.data?.has_key ? "••••••••" : "Paste your API key"}
                 />
               </div>
+              {ai.provider === "openai" && (
+                <div className="field">
+                  <label>Base URL</label>
+                  <input
+                    value={ai.base_url}
+                    onChange={(e) => setAi({ ...ai, base_url: e.target.value })}
+                    placeholder="https://api.openai.com/v1 or http://ollama:11434/v1"
+                  />
+                </div>
+              )}
+              <div className="field">
+                <label>Model</label>
+                <select
+                  className="pill-select"
+                  value={modelIsCustom ? "__custom__" : ai.model}
+                  onChange={(e) => {
+                    if (e.target.value === "__custom__") setCustomModel(true);
+                    else {
+                      setCustomModel(false);
+                      setAi({ ...ai, model: e.target.value });
+                    }
+                  }}
+                >
+                  <option value="">Default</option>
+                  {modelList.map((m) => (
+                    <option key={m.id} value={m.id}>
+                      {m.label}
+                    </option>
+                  ))}
+                  <option value="__custom__">Custom…</option>
+                </select>
+                {modelIsCustom && (
+                  <input
+                    style={{ marginTop: 6 }}
+                    value={ai.model}
+                    onChange={(e) => setAi({ ...ai, model: e.target.value })}
+                    placeholder={
+                      ai.provider === "anthropic" ? "claude-haiku-4-5-20251001" : "gpt-4o-mini"
+                    }
+                  />
+                )}
+                <div className="muted" style={{ fontSize: 12, marginTop: 4 }}>
+                  {!aiQuery.data?.has_key
+                    ? "Save your key to load the model list."
+                    : aiModels.isFetching
+                      ? "Loading models…"
+                      : aiModels.isError
+                        ? "Couldn't list models — pick Custom… and type one."
+                        : `${modelList.length} models available`}
+                  {aiQuery.data?.has_key && (
+                    <button
+                      className="btn btn-ghost"
+                      style={{ marginLeft: 8, padding: "1px 8px" }}
+                      onClick={() => void aiModels.refetch()}
+                    >
+                      ↻ Refresh
+                    </button>
+                  )}
+                </div>
+              </div>
             </>
           )}
-          <button className="btn btn-primary" disabled={saveAi.isPending} onClick={() => saveAi.mutate()}>
-            Save AI settings
-          </button>
-          {saveAi.isSuccess && <span className="muted" style={{ marginLeft: 8 }}>Saved.</span>}
+          <div className="toolbar" style={{ marginTop: 12, marginBottom: 0 }}>
+            <button className="btn btn-primary" disabled={saveAi.isPending} onClick={() => saveAi.mutate()}>
+              Save AI settings
+            </button>
+            {ai.provider !== "none" && (
+              <button
+                className="btn"
+                disabled={!aiQuery.data?.has_key || testAi.isPending || saveAi.isPending}
+                onClick={() => void testConnection()}
+              >
+                {testAi.isPending ? "Testing…" : "Test connection"}
+              </button>
+            )}
+            {saveAi.isSuccess && !aiMsg && <span className="muted">Saved.</span>}
+            {aiMsg && <span className={testAi.isError ? "negative" : "muted"}>{aiMsg}</span>}
+          </div>
         </div>
 
         <UpdatesPanel />

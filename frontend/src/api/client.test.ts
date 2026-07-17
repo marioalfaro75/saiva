@@ -138,6 +138,19 @@ describe("api client wiring", () => {
     expect(JSON.parse(opts.body as string)).toEqual({ digest: "weekly" });
   });
 
+  it("aiModels and aiTest hit the AI endpoints", async () => {
+    const models = mockFetch([{ id: "claude-x", label: "Claude X" }]);
+    const list = await api.aiModels();
+    expect(list[0].id).toBe("claude-x");
+    expect(lastCall(models)[0]).toBe("/api/ai/models");
+
+    const test = mockFetch({ message: "Connected — the model responded." });
+    await api.aiTest();
+    const [url, opts] = lastCall(test);
+    expect(url).toBe("/api/ai/test");
+    expect(opts.method).toBe("POST");
+  });
+
   it("reportYears hits the reports endpoint", async () => {
     const fn = mockFetch([{ year: 2024, label: "FY2025", start: "2024-07-01", end: "2025-06-30" }]);
     const r = await api.reportYears();

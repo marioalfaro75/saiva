@@ -682,6 +682,11 @@ class ChatReply(BaseModel):
     reply: str
 
 
+class AiModelOut(BaseModel):
+    id: str
+    label: str
+
+
 # ------------------------------------------------------------------------- updates
 
 
