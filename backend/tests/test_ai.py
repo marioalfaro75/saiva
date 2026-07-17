@@ -68,6 +68,20 @@ def test_chat_replies_and_audits(auth_client: TestClient, monkeypatch: pytest.Mo
     assert "Top spending categories" in str(captured["system"])
 
 
+def test_provider_error_surfaces_message(
+    auth_client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    auth_client.patch("/api/ai/settings", json={"provider": "anthropic", "api_key": "k"})
+
+    def boom(ai, system, messages):
+        raise advisor.ProviderError("400 — model: claude-x not found")
+
+    monkeypatch.setattr(advisor, "_call_provider", boom)
+    resp = auth_client.post("/api/ai/chat", json={"messages": [{"role": "user", "content": "hi"}]})
+    assert resp.status_code == 502
+    assert "model: claude-x not found" in resp.json()["detail"]
+
+
 def test_privacy_mode_controls_raw_transactions(
     auth_client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:

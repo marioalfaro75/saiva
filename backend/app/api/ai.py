@@ -65,8 +65,12 @@ def chat(
         reply = advisor.chat(db, household, messages)
     except advisor.NotConfiguredError as exc:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc)) from exc
-    except httpx.HTTPError as exc:
+    except advisor.ProviderError as exc:
         raise HTTPException(status.HTTP_502_BAD_GATEWAY, f"AI provider error: {exc}") from exc
+    except httpx.HTTPError as exc:  # connection/timeout, no response body
+        raise HTTPException(
+            status.HTTP_502_BAD_GATEWAY, f"Could not reach the AI provider: {exc}"
+        ) from exc
     # Local audit of AI calls (PRD R42) — record the call, never the data.
     audit_service.record(
         db,

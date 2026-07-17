@@ -32,6 +32,28 @@ class NotConfiguredError(RuntimeError):
     pass
 
 
+class ProviderError(RuntimeError):
+    """The LLM provider returned an error; the message carries its own detail."""
+
+
+def _raise_for_provider(resp: httpx.Response) -> None:
+    """Raise ProviderError with the provider's own error message on a 4xx/5xx."""
+    if resp.status_code < 400:
+        return
+    detail: str = ""
+    try:
+        data = resp.json()
+        if isinstance(data, dict) and isinstance(data.get("error"), dict):
+            detail = str(data["error"].get("message") or data["error"])
+        elif isinstance(data, dict) and data.get("error"):
+            detail = str(data["error"])
+    except ValueError:
+        pass
+    if not detail:
+        detail = resp.text[:400] or f"HTTP {resp.status_code}"
+    raise ProviderError(f"{resp.status_code} — {detail}")
+
+
 def settings_for(db: Session, household_id: str) -> models.AiSettings:
     ai = db.get(models.AiSettings, household_id)
     if ai is None:
@@ -107,13 +129,13 @@ def _call_provider(ai: models.AiSettings, system: str, messages: list[dict[str, 
                 "content-type": "application/json",
             },
             json={
-                "model": ai.model or "claude-3-5-sonnet-latest",
+                "model": ai.model or "claude-haiku-4-5-20251001",
                 "max_tokens": 1024,
                 "system": system,
                 "messages": messages,
             },
         )
-        resp.raise_for_status()
+        _raise_for_provider(resp)
         return str(resp.json()["content"][0]["text"])
     if ai.provider == "openai":  # OpenAI-compatible (OpenAI, Ollama, gateways)
         base = (ai.base_url or "https://api.openai.com/v1").rstrip("/")
@@ -129,7 +151,7 @@ def _call_provider(ai: models.AiSettings, system: str, messages: list[dict[str, 
                 "messages": [{"role": "system", "content": system}, *messages],
             },
         )
-        resp.raise_for_status()
+        _raise_for_provider(resp)
         return str(resp.json()["choices"][0]["message"]["content"])
     raise NotConfiguredError("AI is not configured")
 
