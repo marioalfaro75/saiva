@@ -1,4 +1,6 @@
-FROM python:3.11-slim AS base
+# Pinned to bookworm: the `python:3.11-slim` tag now tracks Debian trixie, and the
+# PostgreSQL APT repo/codename must match the base OS (see the RUN step below).
+FROM python:3.11-slim-bookworm AS base
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1
@@ -8,13 +10,16 @@ ARG SAIVA_VERSION=dev
 ENV SAIVA_VERSION=$SAIVA_VERSION
 
 # postgresql-client-16 provides pg_dump for the pre-migration safety backup; it
-# must match the postgres:16 server, so we pull it from the PGDG apt repo.
-RUN apt-get update \
+# must match the postgres:16 server, so we pull it from the PGDG apt repo. The
+# repo codename is derived from the base OS (VERSION_CODENAME) so it always
+# matches — a mismatched codename pulls an incompatible libpq5 and fails.
+RUN . /etc/os-release \
+ && apt-get update \
  && apt-get install -y --no-install-recommends curl ca-certificates \
  && install -d /usr/share/postgresql-common/pgdg \
  && curl -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc \
       -o /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc \
- && echo "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] http://apt.postgresql.org/pub/repos/apt bookworm-pgdg main" \
+ && echo "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] http://apt.postgresql.org/pub/repos/apt ${VERSION_CODENAME}-pgdg main" \
       > /etc/apt/sources.list.d/pgdg.list \
  && apt-get update \
  && apt-get install -y --no-install-recommends postgresql-client-16 \
