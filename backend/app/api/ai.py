@@ -80,3 +80,42 @@ def chat(
         detail={"provider": ai.provider, "privacy_mode": ai.privacy_mode, "turns": len(messages)},
     )
     return schemas.ChatReply(reply=reply)
+
+
+def _require_configured(db: Session, household_id: str) -> models.AiSettings:
+    ai = advisor.settings_for(db, household_id)
+    if ai.provider not in ("anthropic", "openai"):
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Configure a provider and API key first")
+    return ai
+
+
+@router.get("/models", response_model=list[schemas.AiModelOut])
+def list_ai_models(
+    user: models.User = Depends(get_current_user), db: Session = Depends(get_db)
+) -> list[schemas.AiModelOut]:
+    ai = _require_configured(db, user.household_id)
+    try:
+        found = advisor.list_models(ai)
+    except advisor.ProviderError as exc:
+        raise HTTPException(status.HTTP_502_BAD_GATEWAY, f"AI provider error: {exc}") from exc
+    except httpx.HTTPError as exc:
+        raise HTTPException(
+            status.HTTP_502_BAD_GATEWAY, f"Could not reach the AI provider: {exc}"
+        ) from exc
+    return [schemas.AiModelOut(id=m["id"], label=m["label"]) for m in found]
+
+
+@router.post("/test", response_model=schemas.MessageOut)
+def test_ai_connection(
+    user: models.User = Depends(require_writer), db: Session = Depends(get_db)
+) -> schemas.MessageOut:
+    ai = _require_configured(db, user.household_id)
+    try:
+        advisor.test_connection(ai)
+    except advisor.ProviderError as exc:
+        raise HTTPException(status.HTTP_502_BAD_GATEWAY, f"AI provider error: {exc}") from exc
+    except httpx.HTTPError as exc:
+        raise HTTPException(
+            status.HTTP_502_BAD_GATEWAY, f"Could not reach the AI provider: {exc}"
+        ) from exc
+    return schemas.MessageOut(message="Connected — the model responded.")
