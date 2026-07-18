@@ -17,7 +17,7 @@ from . import recurring as recurring_service
 from .dashboard import _spendable_leaves, category_breakdown, summary
 from .periods import fy_bounds
 
-PROVIDERS = {"none", "anthropic", "openai"}
+PROVIDERS = {"none", "anthropic", "openai", "gemini"}
 PRIVACY_MODES = {"local_only", "aggregates", "full"}
 
 SYSTEM_PROMPT = (
@@ -153,6 +153,31 @@ def _call_provider(ai: models.AiSettings, system: str, messages: list[dict[str, 
         )
         _raise_for_provider(resp)
         return str(resp.json()["choices"][0]["message"]["content"])
+    if ai.provider == "gemini":  # Google Generative Language API
+        base = (ai.base_url or "https://generativelanguage.googleapis.com").rstrip("/")
+        model = ai.model or "gemini-1.5-flash"
+        contents = [
+            {
+                "role": "model" if m["role"] == "assistant" else "user",
+                "parts": [{"text": m["content"]}],
+            }
+            for m in messages
+        ]
+        resp = httpx.post(
+            f"{base}/v1beta/models/{model}:generateContent",
+            timeout=60,
+            headers={"x-goog-api-key": key or "", "content-type": "application/json"},
+            json={
+                "system_instruction": {"parts": [{"text": system}]},
+                "contents": contents,
+                "generationConfig": {"maxOutputTokens": 1024},
+            },
+        )
+        _raise_for_provider(resp)
+        candidates = resp.json().get("candidates") or []
+        if not candidates:
+            raise ProviderError("Gemini returned no answer (the prompt may have been blocked)")
+        return str(candidates[0]["content"]["parts"][0]["text"])
     raise NotConfiguredError("AI is not configured")
 
 
@@ -160,7 +185,7 @@ def chat(
     db: Session, household: models.Household, messages: list[dict[str, str]]
 ) -> str:
     ai = settings_for(db, household.id)
-    if ai.provider not in ("anthropic", "openai"):
+    if ai.provider not in ("anthropic", "openai", "gemini"):
         raise NotConfiguredError("AI is not configured")
     context = build_context(db, household, ai.privacy_mode)
     system = f"{SYSTEM_PROMPT}\n\nData you may use:\n{context}"
@@ -204,6 +229,19 @@ def list_models(ai: models.AiSettings) -> list[dict[str, str]]:
             for i in ids
             if not any(skip in i.lower() for skip in _OPENAI_NON_CHAT)
         ]
+    if ai.provider == "gemini":
+        base = (ai.base_url or "https://generativelanguage.googleapis.com").rstrip("/")
+        resp = httpx.get(f"{base}/v1beta/models", timeout=30, headers={"x-goog-api-key": key or ""})
+        _raise_for_provider(resp)
+        out: list[dict[str, str]] = []
+        for m in resp.json().get("models", []):
+            if "generateContent" not in (m.get("supportedGenerationMethods") or []):
+                continue
+            name = str(m.get("name", ""))
+            model_id = name.split("/", 1)[1] if name.startswith("models/") else name
+            if model_id:
+                out.append({"id": model_id, "label": str(m.get("displayName") or model_id)})
+        return out
     raise NotConfiguredError("AI is not configured")
 
 

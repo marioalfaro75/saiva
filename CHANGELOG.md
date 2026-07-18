@@ -3,6 +3,13 @@
 All notable changes to Saiva are documented here. The project follows
 [semantic versioning](https://semver.org); the newest release is first.
 
+## [Unreleased]
+
+### Added
+- **AI advisor — Google Gemini** as a native provider (alongside Anthropic and
+  OpenAI‑compatible), with model listing and the Test‑connection check.
+
+
 ## [0.8.1] — 2026-07-17
 
 Patch release: fixes the container image build and adds AI‑advisor

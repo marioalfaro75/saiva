@@ -147,3 +147,73 @@ def test_connection_surfaces_provider_error(
 
 def test_test_requires_configuration(auth_client: TestClient) -> None:
     assert auth_client.post("/api/ai/test").status_code == 400
+
+
+def test_settings_accepts_gemini(auth_client: TestClient) -> None:
+    upd = auth_client.patch(
+        "/api/ai/settings",
+        json={"provider": "gemini", "api_key": "g", "model": "gemini-1.5-flash"},
+    ).json()
+    assert upd["provider"] == "gemini"
+    assert upd["configured"] is True
+
+
+def test_gemini_call_shape(monkeypatch: pytest.MonkeyPatch) -> None:
+    from app import models
+
+    captured: dict[str, object] = {}
+
+    class FakeResp:
+        status_code = 200
+
+        def json(self) -> dict:
+            return {"candidates": [{"content": {"parts": [{"text": "OK"}]}}]}
+
+    def fake_post(url, **kw):
+        captured["url"] = url
+        captured["json"] = kw.get("json")
+        return FakeResp()
+
+    monkeypatch.setattr(advisor.httpx, "post", fake_post)
+    ai = models.AiSettings(household_id="h", provider="gemini", model="gemini-1.5-flash")
+    out = advisor._call_provider(
+        ai,
+        "SYS",
+        [
+            {"role": "user", "content": "a"},
+            {"role": "assistant", "content": "b"},
+            {"role": "user", "content": "c"},
+        ],
+    )
+    assert out == "OK"
+    assert "gemini-1.5-flash:generateContent" in str(captured["url"])
+    body = captured["json"]
+    assert body["system_instruction"]["parts"][0]["text"] == "SYS"
+    assert [c["role"] for c in body["contents"]] == ["user", "model", "user"]  # assistant -> model
+
+
+def test_gemini_list_models_filters_to_chat(monkeypatch: pytest.MonkeyPatch) -> None:
+    from app import models
+
+    class FakeResp:
+        status_code = 200
+
+        def json(self) -> dict:
+            return {
+                "models": [
+                    {
+                        "name": "models/gemini-1.5-pro",
+                        "displayName": "Gemini 1.5 Pro",
+                        "supportedGenerationMethods": ["generateContent"],
+                    },
+                    {
+                        "name": "models/embedding-001",
+                        "displayName": "Embedding",
+                        "supportedGenerationMethods": ["embedContent"],
+                    },
+                ]
+            }
+
+    monkeypatch.setattr(advisor.httpx, "get", lambda url, **kw: FakeResp())
+    ai = models.AiSettings(household_id="h", provider="gemini")
+    assert advisor.list_models(ai) == [{"id": "gemini-1.5-pro", "label": "Gemini 1.5 Pro"}]

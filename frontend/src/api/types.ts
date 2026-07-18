@@ -322,7 +322,7 @@ export interface FYReportOption {
 }
 
 export interface AiSettings {
-  provider: "none" | "anthropic" | "openai";
+  provider: "none" | "anthropic" | "openai" | "gemini";
   base_url: string | null;
   model: string | null;
   privacy_mode: "local_only" | "aggregates" | "full";

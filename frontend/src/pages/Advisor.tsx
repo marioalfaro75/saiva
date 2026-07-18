@@ -49,7 +49,7 @@ export function Advisor() {
       {!configured ? (
         <div className="card">
           <p className="muted">
-            Connect an AI provider (Anthropic, OpenAI, or a local Ollama endpoint) in{" "}
+            Connect an AI provider (Anthropic, OpenAI, Google Gemini, or a local Ollama endpoint) in{" "}
             <Link to="/settings">Settings</Link> to start asking questions about your finances.
           </p>
         </div>
