@@ -93,9 +93,9 @@ export function Settings() {
   });
 
   const aiModels = useQuery({
-    queryKey: ["ai-models"],
-    queryFn: api.aiModels,
-    enabled: !!aiQuery.data?.has_key && ai.provider !== "none",
+    queryKey: ["ai-models", ai.provider],
+    queryFn: () => api.aiModels(ai.provider),
+    enabled: ai.provider !== "none",
     retry: false,
   });
   const [customModel, setCustomModel] = useState(false);
@@ -329,28 +329,26 @@ export function Settings() {
                       ai.provider === "anthropic"
                         ? "claude-haiku-4-5-20251001"
                         : ai.provider === "gemini"
-                          ? "gemini-1.5-flash"
+                          ? "gemini-2.5-flash"
                           : "gpt-4o-mini"
                     }
                   />
                 )}
                 <div className="muted" style={{ fontSize: 12, marginTop: 4 }}>
-                  {!aiQuery.data?.has_key
-                    ? "Save your key to load the model list."
-                    : aiModels.isFetching
-                      ? "Loading models…"
-                      : aiModels.isError
-                        ? "Couldn't list models — pick Custom… and type one."
-                        : `${modelList.length} models available`}
-                  {aiQuery.data?.has_key && (
-                    <button
-                      className="btn btn-ghost"
-                      style={{ marginLeft: 8, padding: "1px 8px" }}
-                      onClick={() => void aiModels.refetch()}
-                    >
-                      ↻ Refresh
-                    </button>
-                  )}
+                  {aiModels.isFetching
+                    ? "Loading models…"
+                    : aiModels.isError
+                      ? "Couldn't load models — pick Custom… and type one."
+                      : `${modelList.length} model${modelList.length === 1 ? "" : "s"} available${
+                          aiQuery.data?.has_key ? "" : " (suggested — save your key to load more)"
+                        }`}
+                  <button
+                    className="btn btn-ghost"
+                    style={{ marginLeft: 8, padding: "1px 8px" }}
+                    onClick={() => void aiModels.refetch()}
+                  >
+                    ↻ Refresh
+                  </button>
                 </div>
               </div>
             </>

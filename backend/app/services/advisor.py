@@ -155,7 +155,7 @@ def _call_provider(ai: models.AiSettings, system: str, messages: list[dict[str, 
         return str(resp.json()["choices"][0]["message"]["content"])
     if ai.provider == "gemini":  # Google Generative Language API
         base = (ai.base_url or "https://generativelanguage.googleapis.com").rstrip("/")
-        model = ai.model or "gemini-1.5-flash"
+        model = ai.model or "gemini-2.5-flash"
         contents = [
             {
                 "role": "model" if m["role"] == "assistant" else "user",
@@ -197,6 +197,40 @@ _OPENAI_NON_CHAT = (
     "embedding", "whisper", "tts", "dall-e", "moderation", "audio",
     "realtime", "image", "transcribe", "search", "davinci", "babbage",
 )
+
+# A curated, current baseline of chat-capable models per provider, offered in the
+# picker even before a key is saved. When a key is present the provider's own live
+# /models list is authoritative and merged on top of this; it is only a starting
+# point, and "Custom…" always lets the user type any model id. Most-capable first.
+# Keep these current — deprecated ids here become broken suggestions.
+CURATED_MODELS: dict[str, list[dict[str, str]]] = {
+    "anthropic": [
+        {"id": "claude-opus-4-8", "label": "Claude Opus 4.8"},
+        {"id": "claude-sonnet-5", "label": "Claude Sonnet 5"},
+        {"id": "claude-haiku-4-5-20251001", "label": "Claude Haiku 4.5"},
+    ],
+    "openai": [
+        {"id": "gpt-4o", "label": "GPT-4o"},
+        {"id": "gpt-4o-mini", "label": "GPT-4o mini"},
+        {"id": "gpt-4.1", "label": "GPT-4.1"},
+        {"id": "gpt-4.1-mini", "label": "GPT-4.1 mini"},
+    ],
+    "gemini": [
+        {"id": "gemini-2.5-pro", "label": "Gemini 2.5 Pro"},
+        {"id": "gemini-2.5-flash", "label": "Gemini 2.5 Flash"},
+        {"id": "gemini-2.5-flash-lite", "label": "Gemini 2.5 Flash-Lite"},
+    ],
+}
+
+
+def curated_models(provider: str, base_url: str | None = None) -> list[dict[str, str]]:
+    """Known-good models to offer for a provider even before a key is saved. For
+    OpenAI-compatible providers this applies only to OpenAI's own endpoint — a
+    custom host (e.g. Ollama, a gateway) serves its own catalogue, so we leave the
+    list to the live fetch there instead of suggesting models it may not have."""
+    if provider == "openai" and base_url and "api.openai.com" not in base_url:
+        return []
+    return [dict(m) for m in CURATED_MODELS.get(provider, [])]
 
 
 def list_models(ai: models.AiSettings) -> list[dict[str, str]]:
@@ -243,6 +277,27 @@ def list_models(ai: models.AiSettings) -> list[dict[str, str]]:
                 out.append({"id": model_id, "label": str(m.get("displayName") or model_id)})
         return out
     raise NotConfiguredError("AI is not configured")
+
+
+def available_models(ai: models.AiSettings) -> list[dict[str, str]]:
+    """Models to offer in the picker: a curated, current per-provider baseline plus
+    the provider's own live list when a key is set (deduped, curated first, curated
+    labels kept). Never raises for a missing/invalid key — the baseline still shows
+    and key problems surface via Test connection instead of an empty dropdown."""
+    out = curated_models(ai.provider, ai.base_url)
+    seen = {m["id"] for m in out}
+    # Only hit the network when it can plausibly succeed: key-based providers need a
+    # key; OpenAI-compatible hosts (Ollama/gateways) often don't.
+    if ai.api_key_encrypted or ai.provider == "openai":
+        try:
+            live = list_models(ai)
+        except (ProviderError, httpx.HTTPError):
+            live = []
+        for m in live:
+            if m["id"] not in seen:
+                seen.add(m["id"])
+                out.append(m)
+    return out
 
 
 def test_connection(ai: models.AiSettings) -> str:

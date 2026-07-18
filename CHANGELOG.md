@@ -5,6 +5,16 @@ All notable changes to Saiva are documented here. The project follows
 
 ## [Unreleased]
 
+### Added
+- **AI advisor — curated model lists per provider**: the Model dropdown now shows a
+  built‑in list of valid, current models for the selected provider (Anthropic, OpenAI,
+  Gemini) as soon as you pick it — no need to save a key first. When a key *is* set the
+  provider's own live list is merged on top (deduped), and "Custom…" still accepts any id.
+
+### Changed
+- **AI advisor — Gemini default** bumped to `gemini-2.5-flash` (the previous
+  `gemini-1.5-flash` default has been retired by Google).
+
 ### Fixed
 - **In‑app "Update now"** on newer Docker Engines. The archived `containrrr/watchtower`
   ships an old Docker client (API 1.25) that recent daemons reject, so updates silently
