@@ -82,6 +82,11 @@ services:
       WATCHTOWER_HTTP_API_TOKEN: ${WATCHTOWER_TOKEN:?set WATCHTOWER_TOKEN in .env}
       WATCHTOWER_LABEL_ENABLE: "true"
       WATCHTOWER_CLEANUP: "true"
+      # containrrr/watchtower defaults its Docker client to API 1.25, which newer
+      # Docker Engines reject ("client version is too old; minimum 1.40"). Pin the
+      # client to a supported version so it can pull + recreate. Raise if your
+      # daemon's minimum is higher (docker version -> Server API "Minimum version").
+      DOCKER_API_VERSION: "${DOCKER_API_VERSION:-1.40}"
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
 
