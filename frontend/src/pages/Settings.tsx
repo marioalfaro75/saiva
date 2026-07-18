@@ -260,6 +260,7 @@ export function Settings() {
                 <option value="none">Off</option>
                 <option value="anthropic">Anthropic (Claude)</option>
                 <option value="openai">OpenAI-compatible (OpenAI / Ollama)</option>
+                <option value="gemini">Google (Gemini)</option>
               </select>
             </div>
             <div>
@@ -325,7 +326,11 @@ export function Settings() {
                     value={ai.model}
                     onChange={(e) => setAi({ ...ai, model: e.target.value })}
                     placeholder={
-                      ai.provider === "anthropic" ? "claude-haiku-4-5-20251001" : "gpt-4o-mini"
+                      ai.provider === "anthropic"
+                        ? "claude-haiku-4-5-20251001"
+                        : ai.provider === "gemini"
+                          ? "gemini-1.5-flash"
+                          : "gpt-4o-mini"
                     }
                   />
                 )}

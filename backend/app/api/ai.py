@@ -22,7 +22,7 @@ def _to_out(ai: models.AiSettings) -> schemas.AiSettingsOut:
         model=ai.model,
         privacy_mode=ai.privacy_mode,
         has_key=bool(ai.api_key_encrypted),
-        configured=ai.provider in ("anthropic", "openai"),
+        configured=ai.provider in ("anthropic", "openai", "gemini"),
     )
 
 
@@ -84,7 +84,7 @@ def chat(
 
 def _require_configured(db: Session, household_id: str) -> models.AiSettings:
     ai = advisor.settings_for(db, household_id)
-    if ai.provider not in ("anthropic", "openai"):
+    if ai.provider not in ("anthropic", "openai", "gemini"):
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "Configure a provider and API key first")
     return ai
 

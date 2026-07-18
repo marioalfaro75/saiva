@@ -291,7 +291,8 @@ class AiSettings(Base, TimestampMixin):
     __tablename__ = "ai_settings"
 
     household_id: Mapped[str] = mapped_column(ForeignKey("households.id"), primary_key=True)
-    provider: Mapped[str] = mapped_column(String(20), default="none")  # none|anthropic|openai
+    # none | anthropic | openai | gemini
+    provider: Mapped[str] = mapped_column(String(20), default="none")
     base_url: Mapped[str | None] = mapped_column(String(300), nullable=True)
     model: Mapped[str | None] = mapped_column(String(120), nullable=True)
     api_key_encrypted: Mapped[str | None] = mapped_column(Text, nullable=True)

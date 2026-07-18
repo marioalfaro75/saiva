@@ -653,7 +653,7 @@ class FYReportOption(BaseModel):
 
 
 class AiSettingsOut(BaseModel):
-    provider: str  # none | anthropic | openai
+    provider: str  # none | anthropic | openai | gemini
     base_url: str | None
     model: str | None
     privacy_mode: str  # local_only | aggregates | full
@@ -662,7 +662,7 @@ class AiSettingsOut(BaseModel):
 
 
 class AiSettingsUpdate(BaseModel):
-    provider: Literal["none", "anthropic", "openai"] | None = None
+    provider: Literal["none", "anthropic", "openai", "gemini"] | None = None
     base_url: str | None = None
     model: str | None = None
     privacy_mode: Literal["local_only", "aggregates", "full"] | None = None
