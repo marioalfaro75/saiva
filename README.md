@@ -90,10 +90,12 @@ make pull SAIVA_VERSION=sha-1a2b3c4   # pin / roll back to an exact build
 ```
 
 Upgrades are then `make pull` (re‑pull + restart); the API self‑migrates the database on
-start. **Publishing** images: push a tag — `git tag v0.4.0 && git push origin v0.4.0` —
-and the [`Release`](.github/workflows/release.yml) workflow builds and pushes multi‑arch
-(amd64 + arm64) `saiva-api`/`saiva-web` images. After the first publish, set those GHCR
-packages to **public** (GitHub → your profile → Packages) if you want to pull without
+start. **Cutting a release (recommended):** run **Actions → [Cut release](.github/workflows/cut-release.yml)
+→ Run workflow** and enter a version like `0.8.2` — it builds the multi‑arch
+(amd64 + arm64) `saiva-api`/`saiva-web` images and *then* creates the `v0.8.2` tag and
+GitHub Release, so the `v` prefix and `:latest` never drift. (Pushing a `v*` tag by hand
+still works via the [`Release`](.github/workflows/release.yml) workflow.) After the first
+publish, set those GHCR packages to **public** (GitHub → your profile → Packages) if you want to pull without
 `docker login`; otherwise `docker login ghcr.io` with a token first.
 
 **Release channels.** `latest` follows tagged releases (`v*`); `edge` follows every green
