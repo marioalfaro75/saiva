@@ -74,19 +74,20 @@ services:
 
   # In-app updater. Only watches containers labelled watchtower.enable (api + web),
   # updates on demand via its token-protected HTTP API (no public port, no schedule).
+  # nickfedor/watchtower is the actively-maintained, drop-in fork of the archived
+  # containrrr/watchtower — the original shipped an old Docker client (API 1.25) that
+  # modern daemons reject ("client version is too old"). This fork auto-negotiates.
   watchtower:
-    image: containrrr/watchtower
+    image: nickfedor/watchtower
     restart: unless-stopped
     environment:
       WATCHTOWER_HTTP_API_UPDATE: "true"
       WATCHTOWER_HTTP_API_TOKEN: ${WATCHTOWER_TOKEN:?set WATCHTOWER_TOKEN in .env}
       WATCHTOWER_LABEL_ENABLE: "true"
       WATCHTOWER_CLEANUP: "true"
-      # containrrr/watchtower defaults its Docker client to API 1.25, which newer
-      # Docker Engines reject ("client version is too old; minimum 1.40"). Pin the
-      # client to a supported version so it can pull + recreate. Raise if your
-      # daemon's minimum is higher (docker version -> Server API "Minimum version").
-      DOCKER_API_VERSION: "${DOCKER_API_VERSION:-1.40}"
+      # Optional Docker API version override; blank = auto-negotiate (the default,
+      # and correct on modern daemons). Set only if your daemon requires a fixed one.
+      DOCKER_API_VERSION: "${DOCKER_API_VERSION:-}"
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
 
