@@ -6,10 +6,10 @@ All notable changes to Saiva are documented here. The project follows
 ## [Unreleased]
 
 ### Fixed
-- **In‑app "Update now"** on newer Docker Engines. `containrrr/watchtower` defaulted
-  its Docker client to API 1.25, which recent daemons reject (minimum 1.40), so the
-  update silently did nothing. The Watchtower sidecar now pins `DOCKER_API_VERSION`
-  (default 1.40, overridable in `.env`).
+- **In‑app "Update now"** on newer Docker Engines. The archived `containrrr/watchtower`
+  ships an old Docker client (API 1.25) that recent daemons reject, so updates silently
+  did nothing. Switched the sidecar to the maintained drop‑in fork `nickfedor/watchtower`
+  (auto‑negotiates the API version); `DOCKER_API_VERSION` stays as an optional override.
 
 
 ## [0.8.2] — 2026-07-17
