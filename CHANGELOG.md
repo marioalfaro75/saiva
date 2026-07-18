@@ -3,11 +3,13 @@
 All notable changes to Saiva are documented here. The project follows
 [semantic versioning](https://semver.org); the newest release is first.
 
-## [Unreleased]
+## [0.8.2] — 2026-07-17
 
 ### Added
 - **AI advisor — Google Gemini** as a native provider (alongside Anthropic and
   OpenAI‑compatible), with model listing and the Test‑connection check.
+- **Cut‑release workflow** — a manually‑triggered GitHub Action that builds the
+  images then creates the tag + Release (the `v` prefix and `:latest` can't drift).
 
 
 ## [0.8.1] — 2026-07-17
@@ -89,5 +91,6 @@ personal financial advice.
 - On the first GHCR publish, set the `saiva-api` / `saiva-web` packages to public
   (or `docker login ghcr.io` on the host) so image pulls are authorised.
 
+[0.8.2]: https://github.com/marioalfaro75/saiva/compare/v0.8.1...v0.8.2
 [0.8.1]: https://github.com/marioalfaro75/saiva/compare/v0.8.0...v0.8.1
 [0.8.0]: https://github.com/marioalfaro75/saiva/compare/v0.4.0...v0.8.0

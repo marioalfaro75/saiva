@@ -1,0 +1,119 @@
+name: Cut release
+
+# Manually cut a versioned release from the current default branch. It builds and
+# publishes the images first, then creates the tag + GitHub Release — so a release
+# never exists without its images, and the `v` prefix / `:latest` can't drift.
+# Trigger: Actions → "Cut release" → Run workflow (enter a version like 0.8.2), or
+# via the API. Tags created here use GITHUB_TOKEN, so they do not re-trigger the
+# tag-push build in release.yml (no double build).
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to release, e.g. 0.8.2 (the 'v' prefix is added automatically)"
+        required: true
+      notes:
+        description: "Release notes (Markdown). Leave blank to auto-generate from merged PRs."
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+
+jobs:
+  prep:
+    name: Validate version
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+      tag: ${{ steps.v.outputs.tag }}
+      major_minor: ${{ steps.v.outputs.major_minor }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Normalise version and ensure the tag is new
+        id: v
+        env:
+          RAW_VERSION: ${{ github.event.inputs.version }}
+        run: |
+          ver="${RAW_VERSION#v}"
+          if ! printf '%s' "$ver" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "::error::version must be X.Y.Z (got '$RAW_VERSION')"
+            exit 1
+          fi
+          tag="v$ver"
+          if git rev-parse "refs/tags/$tag" >/dev/null 2>&1; then
+            echo "::error::tag $tag already exists"
+            exit 1
+          fi
+          {
+            echo "version=$ver"
+            echo "tag=$tag"
+            echo "major_minor=$(printf '%s' "$ver" | cut -d. -f1-2)"
+          } >> "$GITHUB_OUTPUT"
+
+  images:
+    name: Publish ${{ matrix.image }}
+    needs: prep
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      matrix:
+        include:
+          - { image: saiva-api, context: ./backend }
+          - { image: saiva-web, context: ./frontend }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Image metadata (tags + labels)
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository_owner }}/${{ matrix.image }}
+          tags: |
+            type=raw,value=${{ needs.prep.outputs.tag }}
+            type=raw,value=${{ needs.prep.outputs.major_minor }}
+            type=raw,value=latest
+            type=sha
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: ${{ matrix.context }}
+          build-args: |
+            SAIVA_VERSION=${{ needs.prep.outputs.version }}
+          push: true
+          platforms: linux/amd64,linux/arm64
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  release:
+    name: Tag + GitHub Release
+    needs: [prep, images]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Create tag and release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.prep.outputs.tag }}
+          target_commitish: ${{ github.sha }}
+          name: ${{ needs.prep.outputs.tag }}
+          body: ${{ github.event.inputs.notes }}
+          generate_release_notes: ${{ github.event.inputs.notes == '' }}
+          make_latest: 'true'
