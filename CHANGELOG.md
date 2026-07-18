@@ -3,6 +3,15 @@
 All notable changes to Saiva are documented here. The project follows
 [semantic versioning](https://semver.org); the newest release is first.
 
+## [Unreleased]
+
+### Fixed
+- **In‑app "Update now"** on newer Docker Engines. `containrrr/watchtower` defaulted
+  its Docker client to API 1.25, which recent daemons reject (minimum 1.40), so the
+  update silently did nothing. The Watchtower sidecar now pins `DOCKER_API_VERSION`
+  (default 1.40, overridable in `.env`).
+
+
 ## [0.8.2] — 2026-07-17
 
 ### Added
