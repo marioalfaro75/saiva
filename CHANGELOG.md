@@ -3,7 +3,7 @@
 All notable changes to Saiva are documented here. The project follows
 [semantic versioning](https://semver.org); the newest release is first.
 
-## [Unreleased]
+## [0.8.2] — 2026-07-17
 
 ### Fixed
 - **In‑app "Update now"** on newer Docker Engines. `containrrr/watchtower` defaulted
