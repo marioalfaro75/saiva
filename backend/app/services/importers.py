@@ -25,6 +25,8 @@ class ParsedTxn:
     amount_cents: int
     raw_description: str
     merchant: str
+    # Bank-assigned unique id when the file carries one (OFX/QFX FITID); None for CSV.
+    provider_txn_id: str | None = None
 
 
 def parse_date(value: str, fmt: str | None = None) -> dt.date:
@@ -198,7 +200,15 @@ def parse_ofx(content: bytes) -> list[ParsedTxn]:
         memo = tag("MEMO")
         description = " ".join(p for p in (name, memo) if p).strip()
         amount = to_cents(tag("TRNAMT"))
-        out.append(ParsedTxn(date, amount, description, normalise_merchant(description)))
+        out.append(
+            ParsedTxn(
+                date,
+                amount,
+                description,
+                normalise_merchant(description),
+                provider_txn_id=tag("FITID") or None,
+            )
+        )
     return out
 
 

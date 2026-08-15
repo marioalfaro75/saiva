@@ -11,7 +11,7 @@ from sqlalchemy.orm import Session
 from .. import models, schemas
 from ..db import get_db
 from ..deps import get_current_user, require_writer
-from ..services import audit, importers
+from ..services import audit, dedup, importers
 from ..services.categorise import build_categoriser
 from ..services.transfers import detect_transfers
 
@@ -54,15 +54,36 @@ def _category_names(db: Session, household_id: str) -> dict[str, str]:
     }
 
 
-def _existing_hashes(db: Session, account_id: str) -> set[str]:
-    return {
-        r[0]
-        for r in db.execute(
-            select(models.Transaction.dedup_hash).where(
-                models.Transaction.account_id == account_id
-            )
-        ).all()
-    }
+def _decide(
+    db: Session, account_id: str, parsed: list[importers.ParsedTxn]
+) -> list[tuple[int, importers.ParsedTxn, dedup.Verdict]]:
+    """Resolve every parsed row to a duplicate verdict, in file order."""
+    deduper = dedup.Deduper(db)
+    return [(i, p, deduper.match(account_id, p)) for i, p in enumerate(parsed)]
+
+
+def _index_set(raw: str | None) -> set[int]:
+    if not raw:
+        return set()
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Invalid decisions JSON") from exc
+    if not isinstance(data, list) or not all(isinstance(i, int) for i in data):
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Decisions must be a list of row indexes")
+    return set(data)
+
+
+def _will_import(verdict: dedup.Verdict, index: int, force: set[int], skip: set[int]) -> bool:
+    """Definite duplicates are never imported — allowing that would knowingly create
+    a double-up. Probable ones are skipped unless the reviewer opts them in."""
+    if index in skip:
+        return False
+    if verdict.status == dedup.NEW:
+        return True
+    if verdict.status == dedup.DUPLICATE_PROBABLE:
+        return index in force
+    return False
 
 
 @router.post("/sniff", response_model=schemas.ImportSniffOut)
@@ -91,20 +112,13 @@ async def preview(
 
     categoriser = build_categoriser(db, user.household_id)
     names = _category_names(db, user.household_id)
-    existing = _existing_hashes(db, account_id)
 
-    new_rows: list[schemas.PreviewRow] = []
-    seen: set[str] = set()
-    duplicates = 0
-    for p in parsed:
-        h = importers.dedup_hash(account_id, p.txn_date, p.amount_cents, p.raw_description)
-        if h in existing or h in seen:
-            duplicates += 1
-            continue
-        seen.add(h)
+    rows: list[schemas.PreviewRow] = []
+    for index, p, verdict in _decide(db, account_id, parsed):
         result = categoriser.categorise(p.raw_description, p.merchant)
-        new_rows.append(
+        rows.append(
             schemas.PreviewRow(
+                row_index=index,
                 txn_date=p.txn_date,
                 amount_cents=p.amount_cents,
                 raw_description=p.raw_description,
@@ -114,15 +128,27 @@ async def preview(
                     names.get(result.category_id) if result.category_id else None
                 ),
                 confidence=result.confidence if result.category_id else None,
-                is_duplicate=False,
+                is_duplicate=verdict.is_duplicate,
+                status=verdict.status,
+                duplicate_reason=verdict.reason,
+                matched_txn_id=verdict.matched.id if verdict.matched else None,
+                matched_date=verdict.matched.txn_date if verdict.matched else None,
+                matched_description=(
+                    verdict.matched.raw_description if verdict.matched else None
+                ),
+                will_import=_will_import(verdict, index, set(), set()),
             )
         )
+    probable = sum(1 for r in rows if r.status == dedup.DUPLICATE_PROBABLE)
+    duplicates = sum(1 for r in rows if r.is_duplicate)
     return schemas.ImportPreviewOut(
         account_id=account_id,
         file_format=file_format,
         total_rows=len(parsed),
-        new_rows=new_rows,
+        rows=rows,
+        new_count=len(rows) - duplicates,
         duplicate_count=duplicates,
+        probable_count=probable,
     )
 
 
@@ -132,6 +158,8 @@ async def commit(
     account_id: str = Form(...),
     file_format: str = Form("csv"),
     mapping: str | None = Form(None),
+    force_import: str | None = Form(None),
+    force_skip: str | None = Form(None),
     user: models.User = Depends(require_writer),
     db: Session = Depends(get_db),
 ) -> schemas.ImportCommitOut:
@@ -142,8 +170,9 @@ async def commit(
     except ValueError as exc:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc)) from exc
 
+    forced = _index_set(force_import)
+    skipped_rows = _index_set(force_skip)
     categoriser = build_categoriser(db, user.household_id)
-    existing = _existing_hashes(db, account_id)
 
     batch = models.ImportBatch(
         household_id=user.household_id,
@@ -157,13 +186,10 @@ async def commit(
 
     added = 0
     skipped = 0
-    seen: set[str] = set()
-    for p in parsed:
-        h = importers.dedup_hash(account_id, p.txn_date, p.amount_cents, p.raw_description)
-        if h in existing or h in seen:
+    for index, p, verdict in _decide(db, account_id, parsed):
+        if not _will_import(verdict, index, forced, skipped_rows):
             skipped += 1
             continue
-        seen.add(h)
         result = categoriser.categorise(p.raw_description, p.merchant)
         db.add(
             models.Transaction(
@@ -176,7 +202,10 @@ async def commit(
                 category_id=result.category_id,
                 confidence=result.confidence if result.category_id else None,
                 source="import",
-                dedup_hash=h,
+                dedup_hash=importers.dedup_hash(
+                    account_id, p.txn_date, p.amount_cents, p.raw_description
+                ),
+                provider_txn_id=p.provider_txn_id,
                 import_batch_id=batch.id,
             )
         )

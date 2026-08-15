@@ -378,7 +378,14 @@ export interface SniffResult {
   suggested_mapping: CsvMapping | null;
 }
 
+export type DuplicateStatus =
+  | "new"
+  | "duplicate_provider"
+  | "duplicate_exact"
+  | "duplicate_probable";
+
 export interface PreviewRow {
+  row_index: number;
   txn_date: string;
   amount_cents: number;
   raw_description: string;
@@ -387,14 +394,22 @@ export interface PreviewRow {
   suggested_category_name: string | null;
   confidence: number | null;
   is_duplicate: boolean;
+  status: DuplicateStatus;
+  duplicate_reason: string | null;
+  matched_txn_id: string | null;
+  matched_date: string | null;
+  matched_description: string | null;
+  will_import: boolean;
 }
 
 export interface ImportPreview {
-  account_id: string;
+  account_id: string | null;
   file_format: string;
   total_rows: number;
-  new_rows: PreviewRow[];
+  rows: PreviewRow[];
+  new_count: number;
   duplicate_count: number;
+  probable_count: number;
 }
 
 export interface ImportCommit {

@@ -211,6 +211,7 @@ class ImportSniffOut(BaseModel):
 
 
 class PreviewRow(BaseModel):
+    row_index: int  # position in the parsed file; how commit decisions refer to a row
     txn_date: dt.date
     amount_cents: int
     raw_description: str
@@ -219,14 +220,26 @@ class PreviewRow(BaseModel):
     suggested_category_name: str | None
     confidence: float | None
     is_duplicate: bool
+    # new | duplicate_provider | duplicate_exact | duplicate_probable
+    status: str
+    duplicate_reason: str | None = None
+    # The stored transaction this row matched, for the reviewer to compare against.
+    matched_txn_id: str | None = None
+    matched_date: dt.date | None = None
+    matched_description: str | None = None
+    # Whether the row will be imported unless the user says otherwise. Definite
+    # duplicates are always off; probable ones default off but can be overridden.
+    will_import: bool = True
 
 
 class ImportPreviewOut(BaseModel):
-    account_id: str
+    account_id: str | None
     file_format: str
     total_rows: int
-    new_rows: list[PreviewRow]
+    rows: list[PreviewRow]
+    new_count: int
     duplicate_count: int
+    probable_count: int
 
 
 class ImportCommitOut(BaseModel):

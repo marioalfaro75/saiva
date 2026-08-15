@@ -153,6 +153,9 @@ class Transaction(Base, TimestampMixin):
     confidence: Mapped[float | None] = mapped_column(Float, nullable=True)
     source: Mapped[str] = mapped_column(String(8), default="import")  # import|manual
     dedup_hash: Mapped[str] = mapped_column(String(64), index=True, default="")
+    # Bank-assigned unique id (OFX/QFX FITID). The most reliable dedup key when the
+    # file provides one — it survives the bank re-dating or re-wording a transaction.
+    provider_txn_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
     import_batch_id: Mapped[str | None] = mapped_column(
         ForeignKey("import_batches.id"), nullable=True
     )
@@ -165,6 +168,7 @@ class Transaction(Base, TimestampMixin):
     __table_args__ = (
         Index("ix_txn_account_dedup", "account_id", "dedup_hash"),
         Index("ix_txn_household_date", "household_id", "txn_date"),
+        Index("ix_txn_account_provider", "account_id", "provider_txn_id"),
     )
 
 

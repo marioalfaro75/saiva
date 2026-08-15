@@ -2,7 +2,7 @@ import { useQuery } from "@tanstack/react-query";
 import { useState } from "react";
 
 import { ApiError, api } from "../api/client";
-import type { CsvMapping, ImportPreview, SniffResult } from "../api/types";
+import type { CsvMapping, ImportPreview, PreviewRow, SniffResult } from "../api/types";
 import { formatCents, formatDate } from "../format";
 
 function ColSelect({
@@ -40,6 +40,8 @@ export function ImportPage() {
   const [sniff, setSniff] = useState<SniffResult | null>(null);
   const [mapping, setMapping] = useState<CsvMapping | null>(null);
   const [preview, setPreview] = useState<ImportPreview | null>(null);
+  // Reviewer overrides of the preview's default verdict, keyed by row index.
+  const [decisions, setDecisions] = useState<Record<number, boolean>>({});
   const [result, setResult] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -48,6 +50,7 @@ export function ImportPage() {
     setSniff(null);
     setMapping(null);
     setPreview(null);
+    setDecisions({});
     setResult(null);
     setError(null);
   };
@@ -73,6 +76,10 @@ export function ImportPage() {
     if (mapping) setMapping({ ...mapping, ...patch });
   };
 
+  // A row imports unless the reviewer said otherwise; definite duplicates never do.
+  const willImport = (r: PreviewRow) => decisions[r.row_index] ?? r.will_import;
+  const canDecide = (r: PreviewRow) => r.status === "new" || r.status === "duplicate_probable";
+
   const run = async (commit: boolean) => {
     if (!file || !accountId) return;
     setBusy(true);
@@ -80,14 +87,23 @@ export function ImportPage() {
     try {
       const csvMapping = format === "csv" ? mapping : null;
       if (commit) {
-        const r = await api.commit(file, accountId, format, csvMapping);
+        const rows = preview?.rows ?? [];
+        const r = await api.commit(file, accountId, format, csvMapping, {
+          forceImport: rows
+            .filter((row) => row.status === "duplicate_probable" && willImport(row))
+            .map((row) => row.row_index),
+          forceSkip: rows
+            .filter((row) => row.status === "new" && !willImport(row))
+            .map((row) => row.row_index),
+        });
         setResult(
-          `Imported ${r.added} transactions — ${r.skipped} duplicates skipped, ${r.transfers_linked} transfers linked.`,
+          `Imported ${r.added} transactions — ${r.skipped} skipped, ${r.transfers_linked} transfers linked.`,
         );
         setFile(null);
         reset();
       } else {
         setPreview(await api.preview(file, accountId, format, csvMapping));
+        setDecisions({});
       }
     } catch (e) {
       setError(e instanceof ApiError ? e.message : "Import failed");
@@ -213,31 +229,82 @@ export function ImportPage() {
           <div className="spread">
             <h2>Preview</h2>
             <span className="muted">
-              {preview.new_rows.length} new · {preview.duplicate_count} duplicates
+              {preview.rows.filter(willImport).length} to import · {preview.duplicate_count}{" "}
+              duplicate{preview.duplicate_count === 1 ? "" : "s"}
+              {preview.probable_count > 0 && ` · ${preview.probable_count} to review`}
             </span>
           </div>
+          {preview.probable_count > 0 && (
+            <p className="muted" style={{ marginTop: 0 }}>
+              Rows marked <strong>Possible duplicate</strong> look like transactions you already
+              have — same amount, around the same date. They are left out by default; tick one to
+              import it anyway.
+            </p>
+          )}
           <table>
             <thead>
               <tr>
+                <th style={{ width: 32 }}>
+                  <span className="sr-only">Import</span>
+                </th>
                 <th>Date</th>
                 <th>Description</th>
                 <th>Suggested category</th>
                 <th className="num">Amount</th>
+                <th>Status</th>
               </tr>
             </thead>
             <tbody>
-              {preview.new_rows.slice(0, 50).map((r, i) => (
-                <tr key={i}>
+              {preview.rows.slice(0, 200).map((r) => (
+                <tr key={r.row_index} style={{ opacity: willImport(r) ? 1 : 0.55 }}>
+                  <td>
+                    <input
+                      type="checkbox"
+                      checked={willImport(r)}
+                      disabled={!canDecide(r)}
+                      title={
+                        canDecide(r)
+                          ? "Import this row"
+                          : "Already imported — importing it again would create a duplicate"
+                      }
+                      onChange={(e) =>
+                        setDecisions((d) => ({ ...d, [r.row_index]: e.target.checked }))
+                      }
+                    />
+                  </td>
                   <td className="muted">{formatDate(r.txn_date)}</td>
                   <td>{r.merchant ?? r.raw_description}</td>
                   <td className="muted">{r.suggested_category_name ?? "—"}</td>
                   <td className={`num ${r.amount_cents < 0 ? "negative" : "positive"}`}>
                     {formatCents(r.amount_cents)}
                   </td>
+                  <td>
+                    {r.status === "new" ? (
+                      <span className="muted">New</span>
+                    ) : r.status === "duplicate_probable" ? (
+                      <span
+                        className="status-pill warning"
+                        title={
+                          r.matched_date
+                            ? `Matches ${formatDate(r.matched_date)} — ${r.matched_description ?? ""}`
+                            : undefined
+                        }
+                      >
+                        Possible duplicate
+                      </span>
+                    ) : (
+                      <span className="tag" title={r.duplicate_reason ?? undefined}>
+                        Already imported
+                      </span>
+                    )}
+                  </td>
                 </tr>
               ))}
             </tbody>
           </table>
+          {preview.rows.length > 200 && (
+            <p className="muted">Showing the first 200 of {preview.rows.length} rows.</p>
+          )}
         </div>
       )}
     </div>

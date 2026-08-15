@@ -246,12 +246,24 @@ export const api = {
     if (mapping) form.append("mapping", JSON.stringify(mapping));
     return request<ImportPreview>("/imports/preview", { method: "POST", body: form });
   },
-  commit: (file: File, accountId: string, fileFormat: string, mapping: unknown) => {
+  commit: (
+    file: File,
+    accountId: string,
+    fileFormat: string,
+    mapping: unknown,
+    // Row indexes the reviewer overrode in the preview: probable duplicates to import
+    // anyway, and otherwise-new rows to leave out.
+    decisions?: { forceImport?: number[]; forceSkip?: number[] },
+  ) => {
     const form = new FormData();
     form.append("file", file);
     form.append("account_id", accountId);
     form.append("file_format", fileFormat);
     if (mapping) form.append("mapping", JSON.stringify(mapping));
+    if (decisions?.forceImport?.length)
+      form.append("force_import", JSON.stringify(decisions.forceImport));
+    if (decisions?.forceSkip?.length)
+      form.append("force_skip", JSON.stringify(decisions.forceSkip));
     return request<ImportCommit>("/imports/commit", { method: "POST", body: form });
   },
 
