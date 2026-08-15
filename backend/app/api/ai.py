@@ -91,17 +91,22 @@ def _require_configured(db: Session, household_id: str) -> models.AiSettings:
 
 @router.get("/models", response_model=list[schemas.AiModelOut])
 def list_ai_models(
-    user: models.User = Depends(get_current_user), db: Session = Depends(get_db)
+    provider: str | None = None,
+    user: models.User = Depends(get_current_user),
+    db: Session = Depends(get_db),
 ) -> list[schemas.AiModelOut]:
-    ai = _require_configured(db, user.household_id)
-    try:
-        found = advisor.list_models(ai)
-    except advisor.ProviderError as exc:
-        raise HTTPException(status.HTTP_502_BAD_GATEWAY, f"AI provider error: {exc}") from exc
-    except httpx.HTTPError as exc:
-        raise HTTPException(
-            status.HTTP_502_BAD_GATEWAY, f"Could not reach the AI provider: {exc}"
-        ) from exc
+    ai = advisor.settings_for(db, user.household_id)
+    if provider and provider != ai.provider:
+        # Preview a provider the user is choosing in the picker but hasn't saved:
+        # there's no stored key for it, so offer the curated baseline only.
+        found = advisor.curated_models(provider)
+    else:
+        if ai.provider not in ("anthropic", "openai", "gemini"):
+            raise HTTPException(
+                status.HTTP_400_BAD_REQUEST, "Configure a provider and API key first"
+            )
+        # Curated baseline plus the live list (best-effort; never raises here).
+        found = advisor.available_models(ai)
     return [schemas.AiModelOut(id=m["id"], label=m["label"]) for m in found]
 
 

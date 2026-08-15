@@ -113,14 +113,67 @@ def test_models_requires_configuration(auth_client: TestClient) -> None:
     assert auth_client.get("/api/ai/models").status_code == 400
 
 
-def test_list_models(auth_client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_list_models_merges_curated_and_live(
+    auth_client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
     auth_client.patch("/api/ai/settings", json={"provider": "anthropic", "api_key": "k"})
     monkeypatch.setattr(
         advisor, "list_models", lambda ai: [{"id": "claude-x", "label": "Claude X"}]
     )
     resp = auth_client.get("/api/ai/models")
     assert resp.status_code == 200
-    assert resp.json() == [{"id": "claude-x", "label": "Claude X"}]
+    ids = [m["id"] for m in resp.json()]
+    assert "claude-x" in ids  # the live model is included
+    assert "claude-opus-4-8" in ids  # …merged onto the curated baseline
+    assert ids.index("claude-opus-4-8") < ids.index("claude-x")  # curated first
+
+
+def test_list_models_previews_curated_without_config(auth_client: TestClient) -> None:
+    # The picker can preview a provider the user is choosing but hasn't saved yet —
+    # no key required, curated baseline only.
+    resp = auth_client.get("/api/ai/models", params={"provider": "gemini"})
+    assert resp.status_code == 200
+    ids = [m["id"] for m in resp.json()]
+    assert "gemini-2.5-flash" in ids
+
+
+def test_available_models_falls_back_to_curated_on_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app import models
+
+    def boom(ai: models.AiSettings) -> list[dict[str, str]]:
+        raise advisor.ProviderError("401 — bad key")
+
+    monkeypatch.setattr(advisor, "list_models", boom)
+    ai = models.AiSettings(household_id="h", provider="openai")
+    ids = [m["id"] for m in advisor.available_models(ai)]
+    assert "gpt-4o" in ids  # curated baseline survives a live-fetch failure
+
+
+def test_available_models_dedupes_and_keeps_curated_labels(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app import models
+
+    monkeypatch.setattr(
+        advisor,
+        "list_models",
+        lambda ai: [{"id": "gpt-4o", "label": "dup"}, {"id": "gpt-9", "label": "GPT-9"}],
+    )
+    ai = models.AiSettings(household_id="h", provider="openai")
+    out = advisor.available_models(ai)
+    ids = [m["id"] for m in out]
+    assert ids.count("gpt-4o") == 1  # the live duplicate is dropped
+    assert "gpt-9" in ids  # a genuinely new live model is appended
+    assert next(m for m in out if m["id"] == "gpt-4o")["label"] == "GPT-4o"  # curated label wins
+
+
+def test_curated_models_skips_custom_openai_host() -> None:
+    assert advisor.curated_models("openai", "http://ollama:11434/v1") == []
+    assert advisor.curated_models("openai", "https://api.openai.com/v1")  # OpenAI itself: listed
+    assert advisor.curated_models("openai", None)  # default endpoint: listed
+    assert advisor.curated_models("gemini")  # non-openai providers unaffected by base_url
 
 
 def test_connection_ok(auth_client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
