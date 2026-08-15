@@ -27,6 +27,8 @@ class ParsedTxn:
     merchant: str
     # Bank-assigned unique id when the file carries one (OFX/QFX FITID); None for CSV.
     provider_txn_id: str | None = None
+    # Raw value of the account column when the file covers several accounts.
+    account_value: str | None = None
 
 
 def parse_date(value: str, fmt: str | None = None) -> dt.date:
@@ -123,6 +125,29 @@ def _suggest_mapping(headers: list[str], has_header: bool) -> CsvMapping:
     )
 
 
+ACCOUNT_HEADER_KEYS = ["account", "acct", "bsb", "card", "product", "source"]
+
+
+def _suggest_account_col(headers: list[str], body: list[list[str]]) -> int | None:
+    """Spot a column that names the account each row belongs to.
+
+    Needs an account-ish header, and values that repeat: a column holding a distinct
+    value for every row is a reference or receipt number, not an account. Also caps
+    the count, since anything beyond a handful is not something to map by hand.
+    Returns a hint only; multi-account import stays off until the user opts in, so a
+    wrong guess costs nothing.
+    """
+    col = _find([h.lower() for h in headers], ACCOUNT_HEADER_KEYS)
+    if col is None or not body:
+        return None
+    values = {r[col].strip() for r in body if col < len(r) and r[col].strip()}
+    if not values or len(values) > 20:
+        return None
+    if len(values) == len(body) and len(body) > 2:
+        return None
+    return col
+
+
 def sniff_csv(content: bytes) -> ImportSniffOut:
     rows = read_rows(content)
     if not rows:
@@ -152,6 +177,7 @@ def sniff_csv(content: bytes) -> ImportSniffOut:
         columns=headers,
         sample_rows=body[:5],
         suggested_mapping=_suggest_mapping(headers, has_header),
+        suggested_account_col=_suggest_account_col(headers, body),
     )
 
 
@@ -178,8 +204,34 @@ def parse_csv(content: bytes, mapping: CsvMapping) -> list[ParsedTxn]:
 
         if amount == 0 and not description:
             continue
-        out.append(ParsedTxn(date, amount, description, normalise_merchant(description)))
+        account_value = None
+        if mapping.account_col is not None and mapping.account_col < len(row):
+            account_value = row[mapping.account_col].strip()
+        out.append(
+            ParsedTxn(
+                date,
+                amount,
+                description,
+                normalise_merchant(description),
+                account_value=account_value,
+            )
+        )
     return out
+
+
+def scan_account_values(content: bytes, mapping: CsvMapping) -> list[tuple[str, int, str | None]]:
+    """Distinct values of the account column, most common first, each with its row
+    count and a sample description to help the user recognise what it refers to."""
+    counts: dict[str, int] = {}
+    samples: dict[str, str] = {}
+    for p in parse_csv(content, mapping):
+        value = (p.account_value or "").strip()
+        if not value:
+            continue
+        counts[value] = counts.get(value, 0) + 1
+        samples.setdefault(value, p.raw_description)
+    ordered = sorted(counts, key=lambda v: (-counts[v], v))
+    return [(v, counts[v], samples.get(v)) for v in ordered]
 
 
 def parse_ofx(content: bytes) -> list[ParsedTxn]:

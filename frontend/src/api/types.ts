@@ -368,6 +368,8 @@ export interface CsvMapping {
   decimal: string;
   invert_amount: boolean;
   skip_rows: number;
+  /** Column naming the account each row belongs to; null for a single-account file. */
+  account_col: number | null;
 }
 
 export interface SniffResult {
@@ -376,13 +378,37 @@ export interface SniffResult {
   columns: string[];
   sample_rows: string[][];
   suggested_mapping: CsvMapping | null;
+  suggested_account_col: number | null;
+}
+
+export interface AccountScanRow {
+  value: string;
+  row_count: number;
+  sample_description: string | null;
+  suggested_account_id: string | null;
+}
+
+export interface AccountAssignment {
+  value: string;
+  account_id?: string | null;
+  create?: { name: string; type: string; institution?: string | null } | null;
+  skip?: boolean;
+}
+
+export interface ImportAccountSummary {
+  account_id: string | null;
+  account_name: string;
+  new_count: number;
+  duplicate_count: number;
 }
 
 export type DuplicateStatus =
   | "new"
   | "duplicate_provider"
   | "duplicate_exact"
-  | "duplicate_probable";
+  | "duplicate_probable"
+  /** The row's account-column value was never mapped, so it will not be imported. */
+  | "unassigned";
 
 export interface PreviewRow {
   row_index: number;
@@ -400,6 +426,8 @@ export interface PreviewRow {
   matched_date: string | null;
   matched_description: string | null;
   will_import: boolean;
+  account_id: string | null;
+  account_name: string | null;
 }
 
 export interface ImportPreview {
@@ -410,6 +438,8 @@ export interface ImportPreview {
   new_count: number;
   duplicate_count: number;
   probable_count: number;
+  accounts: ImportAccountSummary[];
+  unassigned_count: number;
 }
 
 export interface ImportCommit {

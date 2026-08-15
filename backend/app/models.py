@@ -124,7 +124,11 @@ class ImportBatch(Base, TimestampMixin):
 
     id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_uuid)
     household_id: Mapped[str] = mapped_column(ForeignKey("households.id"), index=True)
-    account_id: Mapped[str] = mapped_column(ForeignKey("accounts.id"), index=True)
+    # Null when the file spanned several accounts; each transaction still records its
+    # own account, and mapping_profile keeps the column value -> account assignments.
+    account_id: Mapped[str | None] = mapped_column(
+        ForeignKey("accounts.id"), index=True, nullable=True
+    )
     filename: Mapped[str] = mapped_column(String(255), nullable=False)
     file_format: Mapped[str] = mapped_column(String(8), default="csv")  # csv|ofx|qfx|qif
     status: Mapped[str] = mapped_column(String(10), default="committed")  # committed|undone

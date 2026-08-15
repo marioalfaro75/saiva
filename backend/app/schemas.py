@@ -200,6 +200,9 @@ class CsvMapping(BaseModel):
     decimal: str = "."
     invert_amount: bool = False  # set if outflows are positive in the file
     skip_rows: int = 0
+    # Set when the file covers several accounts: the column naming the account each
+    # row belongs to. Left unset for the ordinary one-account-per-file import.
+    account_col: int | None = None
 
 
 class ImportSniffOut(BaseModel):
@@ -208,6 +211,36 @@ class ImportSniffOut(BaseModel):
     columns: list[str]
     sample_rows: list[list[str]]
     suggested_mapping: CsvMapping | None
+    # A column that looks like it identifies an account, offered as a hint. Multi-account
+    # import stays off until the user opts in, so this is never applied automatically.
+    suggested_account_col: int | None = None
+
+
+class AccountScanRow(BaseModel):
+    """One distinct value of the account column, with what it looks like it means."""
+
+    value: str
+    row_count: int
+    sample_description: str | None
+    suggested_account_id: str | None
+
+
+class AccountCreateFromImport(BaseModel):
+    name: str = Field(min_length=1, max_length=120)
+    type: Literal[
+        "everyday", "savings", "credit_card", "home_loan",
+        "offset", "personal_loan", "cash", "investment",
+    ] = "everyday"
+    institution: str | None = None
+
+
+class AccountAssignment(BaseModel):
+    """Where the rows carrying one account-column value should go."""
+
+    value: str
+    account_id: str | None = None
+    create: AccountCreateFromImport | None = None
+    skip: bool = False
 
 
 class PreviewRow(BaseModel):
@@ -230,6 +263,16 @@ class PreviewRow(BaseModel):
     # Whether the row will be imported unless the user says otherwise. Definite
     # duplicates are always off; probable ones default off but can be overridden.
     will_import: bool = True
+    # Which account the row resolved to (multi-account files); None if unassigned.
+    account_id: str | None = None
+    account_name: str | None = None
+
+
+class ImportAccountSummary(BaseModel):
+    account_id: str | None  # None for an account that this import would create
+    account_name: str
+    new_count: int
+    duplicate_count: int
 
 
 class ImportPreviewOut(BaseModel):
@@ -240,6 +283,10 @@ class ImportPreviewOut(BaseModel):
     new_count: int
     duplicate_count: int
     probable_count: int
+    # Populated when the file covers several accounts.
+    accounts: list[ImportAccountSummary] = []
+    # Rows whose account-column value was left unmapped, and so will not be imported.
+    unassigned_count: int = 0
 
 
 class ImportCommitOut(BaseModel):
