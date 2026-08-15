@@ -15,7 +15,7 @@ from sqlalchemy.orm import Session
 from .. import models
 from ..schemas import BudgetOut
 from .dashboard import _spendable_leaves
-from .periods import fy_bounds
+from .periods import fy_bounds, fy_label
 
 WARN_RATIO = 0.8  # flag a budget once this much of the limit is spent or projected
 
@@ -28,7 +28,7 @@ def budget_window(
     """Resolve a budget's recurring period to the current concrete date range."""
     if period == "annual":
         s, e = fy_bounds(household, today)
-        return s, e, f"FY{e.year}"
+        return s, e, fy_label(s, e)
     if period == "fortnightly":
         length = 14
         anchor = household.pay_cycle_anchor or today.replace(day=1)

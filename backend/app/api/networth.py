@@ -10,8 +10,9 @@ from sqlalchemy.orm import Session
 
 from .. import models, schemas
 from ..db import get_db
-from ..deps import get_current_user, require_writer
+from ..deps import get_current_user, optional_period, require_writer
 from ..services import networth as networth_service
+from ..services import periods
 
 router = APIRouter(prefix="/net-worth", tags=["net-worth"])
 
@@ -25,9 +26,13 @@ def _get_owned(db: Session, item_id: str, household_id: str) -> models.NetWorthI
 
 @router.get("", response_model=schemas.NetWorthOut)
 def get_net_worth(
-    user: models.User = Depends(get_current_user), db: Session = Depends(get_db)
+    window: periods.ResolvedPeriod | None = Depends(optional_period),
+    user: models.User = Depends(get_current_user),
+    db: Session = Depends(get_db),
 ) -> schemas.NetWorthOut:
-    return networth_service.get_net_worth(db, user.household_id)
+    return networth_service.get_net_worth(
+        db, user.household_id, as_at=window.as_at if window else None
+    )
 
 
 @router.post("/items", response_model=schemas.NetWorthOut, status_code=status.HTTP_201_CREATED)

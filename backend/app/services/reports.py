@@ -15,7 +15,7 @@ from sqlalchemy.orm import Session
 from .. import models
 from ..schemas import CategoryBreakdownItem
 from .dashboard import _spendable_leaves, category_breakdown, summary
-from .periods import fy_bounds
+from .periods import fy_bounds, fy_label
 
 
 @dataclass
@@ -44,7 +44,7 @@ class FYReport:
 def _fy_option(household: models.Household, fy_start_year: int) -> FYOption:
     start = dt.date(fy_start_year, household.fy_start_month, household.fy_start_day)
     end = start + relativedelta(years=1) - dt.timedelta(days=1)
-    return FYOption(year=fy_start_year, label=f"FY{end.year}", start=start, end=end)
+    return FYOption(year=fy_start_year, label=fy_label(start, end), start=start, end=end)
 
 
 def available_years(

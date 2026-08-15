@@ -13,6 +13,7 @@ import {
 
 import { api } from "../api/client";
 import { formatCents, formatDate } from "../format";
+import { usePeriod } from "../period/context";
 
 const HORIZONS = [
   { value: 30, label: "30 days" },
@@ -38,19 +39,20 @@ function Stat({ label, value, cls, sub }: { label: string; value: string; cls?: 
 }
 
 export function Forecast() {
+  const { period } = usePeriod();
   const [days, setDays] = useState(90);
   const [categoryId, setCategoryId] = useState("");
   const [cut, setCut] = useState(0);
 
   const categories = useQuery({ queryKey: ["categories"], queryFn: api.categories });
   const base = useQuery({
-    queryKey: ["forecast", days],
-    queryFn: () => api.forecast(days, []),
+    queryKey: ["forecast", days, period],
+    queryFn: () => api.forecast(days, [], period),
   });
   const scenarioOn = categoryId !== "" && cut > 0;
   const scenario = useQuery({
-    queryKey: ["forecast-scenario", days, categoryId, cut],
-    queryFn: () => api.forecast(days, [{ category_id: categoryId, pct: -cut }]),
+    queryKey: ["forecast-scenario", days, categoryId, cut, period],
+    queryFn: () => api.forecast(days, [{ category_id: categoryId, pct: -cut }], period),
     enabled: scenarioOn,
   });
 

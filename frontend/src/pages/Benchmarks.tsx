@@ -5,6 +5,7 @@ import { api } from "../api/client";
 import type { BenchmarkItem } from "../api/types";
 import { useAuth } from "../auth/AuthContext";
 import { formatCents } from "../format";
+import { usePeriod } from "../period/context";
 
 function signed(cents: number): string {
   return `${cents > 0 ? "+" : "-"}${formatCents(Math.abs(cents))}`;
@@ -34,12 +35,16 @@ function Row({ item }: { item: BenchmarkItem }) {
 }
 
 export function Benchmarks() {
+  const { period } = usePeriod();
   const qc = useQueryClient();
   const { me } = useAuth();
   const [adults, setAdults] = useState(me?.household.adults ?? 1);
   const [children, setChildren] = useState(me?.household.children ?? 0);
 
-  const bm = useQuery({ queryKey: ["benchmarks"], queryFn: api.benchmarks });
+  const bm = useQuery({
+    queryKey: ["benchmarks", period],
+    queryFn: () => api.benchmarks(period),
+  });
   const save = useMutation({
     mutationFn: () => api.updateHousehold({ adults, children }),
     onSuccess: () => qc.invalidateQueries({ queryKey: ["benchmarks"] }),

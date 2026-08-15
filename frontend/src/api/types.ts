@@ -402,6 +402,33 @@ export interface ImportAccountSummary {
   duplicate_count: number;
 }
 
+export interface PeriodOption {
+  value: string;
+  label: string;
+}
+
+export interface PeriodFinancialYear {
+  value: string;
+  label: string;
+  start: string;
+  end: string;
+  quarters: PeriodOption[];
+  months: PeriodOption[];
+}
+
+export interface PeriodOptions {
+  default: string;
+  relative: PeriodOption[];
+  financial_years: PeriodFinancialYear[];
+}
+
+export interface ResolvedPeriod {
+  start: string;
+  end: string;
+  label: string;
+  is_current: boolean;
+}
+
 export type DuplicateStatus =
   | "new"
   | "duplicate_provider"

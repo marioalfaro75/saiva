@@ -747,6 +747,38 @@ class AiModelOut(BaseModel):
     label: str
 
 
+# -------------------------------------------------------------------------- periods
+
+
+class PeriodOption(BaseModel):
+    value: str  # the selector to send back, e.g. "fy:2025" or "q:2025-2"
+    label: str
+
+
+class PeriodFinancialYear(BaseModel):
+    value: str
+    label: str
+    start: dt.date
+    end: dt.date
+    quarters: list[PeriodOption]
+    months: list[PeriodOption]
+
+
+class PeriodOptionsOut(BaseModel):
+    """Everything the global period picker needs, in one request."""
+
+    default: str  # the current financial year
+    relative: list[PeriodOption]
+    financial_years: list[PeriodFinancialYear]
+
+
+class ResolvedPeriodOut(BaseModel):
+    start: dt.date
+    end: dt.date
+    label: str
+    is_current: bool
+
+
 # ------------------------------------------------------------------------- updates
 
 

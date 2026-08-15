@@ -3,6 +3,7 @@ import { Link } from "react-router-dom";
 
 import { api } from "../api/client";
 import type { Insight } from "../api/types";
+import { usePeriod } from "../period/context";
 
 const PILL_CLASS: Record<string, string> = { alert: "over", warn: "warning", info: "info" };
 const PILL_LABEL: Record<string, string> = { alert: "Alert", warn: "Heads up", info: "FYI" };
@@ -31,7 +32,11 @@ function InsightCard({ insight }: { insight: Insight }) {
 }
 
 export function Insights() {
-  const insights = useQuery({ queryKey: ["insights"], queryFn: api.insights });
+  const { period } = usePeriod();
+  const insights = useQuery({
+    queryKey: ["insights", period],
+    queryFn: () => api.insights(period),
+  });
   const data = insights.data;
   const list = data?.insights ?? [];
 

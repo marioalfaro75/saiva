@@ -13,13 +13,20 @@ Runs in a container, HTTPS‑only.
 ## Features
 
 **Accounts & import**
-- File import — **CSV** (guided column mapping) and **OFX/QFX** — with de‑duplication and
-  robust Australian date handling.
+- File import — **CSV** (guided column mapping) and **OFX/QFX** — including statements
+  that **cover several accounts** (map each account‑column value to an account, or create
+  one inline), with robust Australian date handling.
+- **Duplicate‑proof imports** — overlapping date ranges never double up: matching uses the
+  bank's own transaction id where present, then exact matches counted by occurrence, then
+  near matches (re‑dated or re‑worded rows) flagged for review. Genuine repeat purchases
+  are kept, not silently dropped.
 - Rule + **ML categorisation** (confidence‑thresholded), an assisted per‑row categorise
   popover with scopes and "make a rule", a **rules** manager, and per‑transaction locking.
 - Automatic **transfer detection** between your own accounts.
 
 **Understand your money**
+- **Global period picker** — view any **financial year**, quarter, month or relative range;
+  every relevant page follows it, derived from your own FY start date.
 - **Overview** dashboard — income, spending and balances at a glance.
 - **Transactions** — search, filter, and bulk categorise / review.
 - **Insights** — a rule‑based feed of savings opportunities and notable changes.

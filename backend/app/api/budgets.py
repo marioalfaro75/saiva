@@ -8,8 +8,9 @@ from sqlalchemy.orm import Session
 
 from .. import models, schemas
 from ..db import get_db
-from ..deps import get_current_user, require_writer
+from ..deps import get_current_user, optional_period, require_writer
 from ..services import budgets as budgets_service
+from ..services import periods
 
 router = APIRouter(prefix="/budgets", tags=["budgets"])
 
@@ -29,9 +30,13 @@ def _get_owned(db: Session, budget_id: str, household_id: str) -> models.Budget:
 
 @router.get("", response_model=list[schemas.BudgetOut])
 def list_budgets(
-    user: models.User = Depends(get_current_user), db: Session = Depends(get_db)
+    window: periods.ResolvedPeriod | None = Depends(optional_period),
+    user: models.User = Depends(get_current_user),
+    db: Session = Depends(get_db),
 ) -> list[schemas.BudgetOut]:
-    return budgets_service.list_budgets(db, _household(db, user))
+    return budgets_service.list_budgets(
+        db, _household(db, user), window.as_at if window else None
+    )
 
 
 @router.post("", response_model=schemas.BudgetOut, status_code=status.HTTP_201_CREATED)

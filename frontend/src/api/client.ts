@@ -21,9 +21,11 @@ import type {
   Notification,
   NotificationList,
   NotificationSettings,
+  PeriodOptions,
   RecategoriseResult,
   RecategoriseScope,
   RecurringOut,
+  ResolvedPeriod,
   Rule,
   RulePreview,
   UpcomingBills,
@@ -149,13 +151,14 @@ export const api = {
   previewRule: (body: { match_type: MatchType; pattern: string }) =>
     request<RulePreview>("/rules/preview", { method: "POST", body: JSON.stringify(body) }),
 
-  insights: () => request<Insights>("/insights"),
+  insights: (period?: string) => request<Insights>(`/insights${qs({ period })}`),
 
-  recurring: () => request<RecurringOut>("/recurring"),
-  upcomingBills: (days = 60) => request<UpcomingBills>(`/recurring/upcoming${qs({ days })}`),
+  recurring: (period?: string) => request<RecurringOut>(`/recurring${qs({ period })}`),
+  upcomingBills: (days = 60, period?: string) =>
+    request<UpcomingBills>(`/recurring/upcoming${qs({ days, period })}`),
 
-  forecast: (days = 90, adjustments: ForecastAdjustment[] = []) =>
-    request<Forecast>("/forecast", {
+  forecast: (days = 90, adjustments: ForecastAdjustment[] = [], period?: string) =>
+    request<Forecast>(`/forecast${qs({ period })}`, {
       method: "POST",
       body: JSON.stringify({ days, adjustments }),
     }),
@@ -175,6 +178,10 @@ export const api = {
 
   reportYears: () => request<FYReportOption[]>("/reports/years"),
 
+  periodOptions: () => request<PeriodOptions>("/periods/options"),
+  resolvePeriod: (period: string) =>
+    request<ResolvedPeriod>(`/periods/resolve${qs({ period })}`),
+
   aiSettings: () => request<AiSettings>("/ai/settings"),
   updateAiSettings: (patch: {
     provider?: AiSettings["provider"];
@@ -183,13 +190,16 @@ export const api = {
     privacy_mode?: AiSettings["privacy_mode"];
     api_key?: string;
   }) => request<AiSettings>("/ai/settings", { method: "PATCH", body: JSON.stringify(patch) }),
-  aiChat: (messages: ChatMessage[]) =>
-    request<{ reply: string }>("/ai/chat", { method: "POST", body: JSON.stringify({ messages }) }),
+  aiChat: (messages: ChatMessage[], period?: string) =>
+    request<{ reply: string }>(`/ai/chat${qs({ period })}`, {
+      method: "POST",
+      body: JSON.stringify({ messages }),
+    }),
   aiModels: (provider?: string) =>
     request<AiModel[]>(`/ai/models${provider ? `?provider=${encodeURIComponent(provider)}` : ""}`),
   aiTest: () => request<{ message: string }>("/ai/test", { method: "POST" }),
 
-  benchmarks: () => request<Benchmark>("/benchmarks"),
+  benchmarks: (period?: string) => request<Benchmark>(`/benchmarks${qs({ period })}`),
 
   transactions: (params: Record<string, string | number | boolean | undefined>) =>
     request<TransactionList>(`/transactions${qs(params)}`),
@@ -288,14 +298,14 @@ export const api = {
   breakdown: (p: PeriodParams) => request<CategoryBreakdown>(`/dashboard/categories${qs({ ...p })}`),
   trends: (p: PeriodParams) => request<Trend>(`/dashboard/trends${qs({ ...p })}`),
 
-  budgets: () => request<Budget[]>("/budgets"),
+  budgets: (period?: string) => request<Budget[]>(`/budgets${qs({ period })}`),
   createBudget: (body: { category_id: string; period: string; limit_cents: number }) =>
     request<Budget>("/budgets", { method: "POST", body: JSON.stringify(body) }),
   updateBudget: (id: string, patch: { period?: string; limit_cents?: number }) =>
     request<Budget>(`/budgets/${id}`, { method: "PATCH", body: JSON.stringify(patch) }),
   deleteBudget: (id: string) => request<void>(`/budgets/${id}`, { method: "DELETE" }),
 
-  netWorth: () => request<NetWorth>("/net-worth"),
+  netWorth: (period?: string) => request<NetWorth>(`/net-worth${qs({ period })}`),
   createNetWorthItem: (body: { name: string; kind: string; value_cents: number }) =>
     request<NetWorth>("/net-worth/items", { method: "POST", body: JSON.stringify(body) }),
   updateNetWorthItem: (id: string, patch: { name?: string; value_cents?: number }) =>
@@ -304,7 +314,7 @@ export const api = {
     request<NetWorth>(`/net-worth/items/${id}`, { method: "DELETE" }),
   recordNetWorthSnapshot: () => request<NetWorth>("/net-worth/snapshot", { method: "POST" }),
 
-  goals: () => request<SavingsGoal[]>("/goals"),
+  goals: (period?: string) => request<SavingsGoal[]>(`/goals${qs({ period })}`),
   createGoal: (body: {
     name: string;
     target_cents: number;

@@ -58,18 +58,33 @@ def record_snapshot(
     return snapshot
 
 
-def get_net_worth(db: Session, household_id: str) -> NetWorthOut:
+def get_net_worth(
+    db: Session, household_id: str, as_at: dt.date | None = None
+) -> NetWorthOut:
+    """The balance sheet, optionally as it stood at `as_at`.
+
+    Items hold current balances only, so for a date in the past the totals come from
+    the last snapshot on or before it and the history stops there. Without a snapshot
+    that far back the current figures are the best available, and are returned as-is.
+    """
     items = _items(db, household_id)
     assets, liabilities, net = _totals(items)
+    conditions = [models.NetWorthSnapshot.household_id == household_id]
+    historical = as_at is not None and as_at < dt.date.today()
+    if historical:
+        conditions.append(models.NetWorthSnapshot.as_of <= as_at)
     snapshots = (
         db.execute(
             select(models.NetWorthSnapshot)
-            .where(models.NetWorthSnapshot.household_id == household_id)
+            .where(*conditions)
             .order_by(models.NetWorthSnapshot.as_of)
         )
         .scalars()
         .all()
     )
+    if historical and snapshots:
+        latest = snapshots[-1]
+        assets, liabilities, net = latest.assets_cents, latest.liabilities_cents, latest.net_cents
     return NetWorthOut(
         assets_cents=assets,
         liabilities_cents=liabilities,

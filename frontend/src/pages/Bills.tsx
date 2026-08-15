@@ -3,6 +3,7 @@ import { useQuery } from "@tanstack/react-query";
 import { api } from "../api/client";
 import type { RecurringSeries } from "../api/types";
 import { formatCents, formatDate } from "../format";
+import { usePeriod } from "../period/context";
 
 function cap(s: string): string {
   return s.charAt(0).toUpperCase() + s.slice(1);
@@ -16,8 +17,15 @@ function tagFor(s: RecurringSeries) {
 }
 
 export function Bills() {
-  const recurring = useQuery({ queryKey: ["recurring"], queryFn: api.recurring });
-  const upcoming = useQuery({ queryKey: ["upcoming-bills"], queryFn: () => api.upcomingBills(60) });
+  const { period } = usePeriod();
+  const recurring = useQuery({
+    queryKey: ["recurring", period],
+    queryFn: () => api.recurring(period),
+  });
+  const upcoming = useQuery({
+    queryKey: ["upcoming-bills", period],
+    queryFn: () => api.upcomingBills(60, period),
+  });
 
   const data = recurring.data;
   const series = data?.series ?? [];

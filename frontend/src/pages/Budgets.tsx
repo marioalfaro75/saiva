@@ -4,6 +4,7 @@ import { type FormEvent, useMemo, useState } from "react";
 import { api } from "../api/client";
 import type { Budget, Category } from "../api/types";
 import { dollarsToCents, formatCents, formatPct } from "../format";
+import { usePeriod } from "../period/context";
 
 const PERIODS = [
   { value: "monthly", label: "Monthly" },
@@ -139,8 +140,13 @@ function BudgetCard({
 }
 
 export function Budgets() {
+  // Distinct from a budget's own recurrence below: this is the app-wide view period.
+  const { period: viewPeriod } = usePeriod();
   const qc = useQueryClient();
-  const budgets = useQuery({ queryKey: ["budgets"], queryFn: api.budgets });
+  const budgets = useQuery({
+    queryKey: ["budgets", viewPeriod],
+    queryFn: () => api.budgets(viewPeriod),
+  });
   const categories = useQuery({ queryKey: ["categories"], queryFn: api.categories });
 
   const taken = useMemo(

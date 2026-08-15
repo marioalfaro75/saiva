@@ -15,7 +15,7 @@ from . import crypto
 from . import forecast as forecast_service
 from . import recurring as recurring_service
 from .dashboard import _spendable_leaves, category_breakdown, summary
-from .periods import fy_bounds
+from .periods import fy_bounds, fy_label
 
 PROVIDERS = {"none", "anthropic", "openai", "gemini"}
 PRIVACY_MODES = {"local_only", "aggregates", "full"}
@@ -83,10 +83,10 @@ def build_context(
     lines = [
         f"Household: {household.name} — {household.adults} adults, "
         f"{household.children} children, {household.state or 'AU'}.",
-        f"FY{end.year} ({start:%d %b %Y}–{end:%d %b %Y}): income {_m(s.income_cents)}, "
+        f"{fy_label(start, end)} ({start:%d %b %Y}–{end:%d %b %Y}): income {_m(s.income_cents)}, "
         f"expenses {_m(s.expense_cents)}, net {_m(s.net_cents)}, "
         f"savings rate {s.savings_rate * 100:.0f}%.",
-        "Top spending categories this FY:",
+        f"Top spending categories in {fy_label(start, end)}:",
     ]
     lines += [
         f"- {it.category_name}: {_m(it.amount_cents)} ({it.pct * 100:.0f}%)"
@@ -182,12 +182,17 @@ def _call_provider(ai: models.AiSettings, system: str, messages: list[dict[str, 
 
 
 def chat(
-    db: Session, household: models.Household, messages: list[dict[str, str]]
+    db: Session,
+    household: models.Household,
+    messages: list[dict[str, str]],
+    as_at: dt.date | None = None,
 ) -> str:
+    """`as_at` follows the app's period picker, so questions about a past financial
+    year are answered from that year's figures rather than today's."""
     ai = settings_for(db, household.id)
     if ai.provider not in ("anthropic", "openai", "gemini"):
         raise NotConfiguredError("AI is not configured")
-    context = build_context(db, household, ai.privacy_mode)
+    context = build_context(db, household, ai.privacy_mode, as_at)
     system = f"{SYSTEM_PROMPT}\n\nData you may use:\n{context}"
     return _call_provider(ai, system, messages)
 
