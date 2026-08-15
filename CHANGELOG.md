@@ -5,6 +5,9 @@ All notable changes to Saiva are documented here. The project follows
 
 ## [Unreleased]
 
+
+## [0.8.4] — 2026-08-15
+
 ### Added
 - **AI advisor — curated model lists per provider**: the Model dropdown now shows a
   built‑in list of valid, current models for the selected provider (Anthropic, OpenAI,
@@ -14,6 +17,9 @@ All notable changes to Saiva are documented here. The project follows
 ### Changed
 - **AI advisor — Gemini default** bumped to `gemini-2.5-flash` (the previous
   `gemini-1.5-flash` default has been retired by Google).
+
+
+## [0.8.3] — 2026-07-18
 
 ### Fixed
 - **In‑app "Update now"** on newer Docker Engines. The archived `containrrr/watchtower`
@@ -110,6 +116,8 @@ personal financial advice.
 - On the first GHCR publish, set the `saiva-api` / `saiva-web` packages to public
   (or `docker login ghcr.io` on the host) so image pulls are authorised.
 
+[0.8.4]: https://github.com/marioalfaro75/saiva/compare/v0.8.3...v0.8.4
+[0.8.3]: https://github.com/marioalfaro75/saiva/compare/v0.8.2...v0.8.3
 [0.8.2]: https://github.com/marioalfaro75/saiva/compare/v0.8.1...v0.8.2
 [0.8.1]: https://github.com/marioalfaro75/saiva/compare/v0.8.0...v0.8.1
 [0.8.0]: https://github.com/marioalfaro75/saiva/compare/v0.4.0...v0.8.0
