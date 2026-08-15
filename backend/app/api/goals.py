@@ -7,8 +7,9 @@ from sqlalchemy.orm import Session
 
 from .. import models, schemas
 from ..db import get_db
-from ..deps import get_current_user, require_writer
+from ..deps import get_current_user, optional_period, require_writer
 from ..services import goals as goals_service
+from ..services import periods
 
 router = APIRouter(prefix="/goals", tags=["goals"])
 
@@ -36,9 +37,11 @@ def _validate_account(db: Session, account_id: str | None, household_id: str) ->
 
 @router.get("", response_model=list[schemas.SavingsGoalOut])
 def list_goals(
-    user: models.User = Depends(get_current_user), db: Session = Depends(get_db)
+    window: periods.ResolvedPeriod | None = Depends(optional_period),
+    user: models.User = Depends(get_current_user),
+    db: Session = Depends(get_db),
 ) -> list[schemas.SavingsGoalOut]:
-    return goals_service.list_goals(db, _household(db, user))
+    return goals_service.list_goals(db, _household(db, user), window.as_at if window else None)
 
 
 @router.post("", response_model=schemas.SavingsGoalOut, status_code=status.HTTP_201_CREATED)

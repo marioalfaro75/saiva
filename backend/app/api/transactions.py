@@ -12,7 +12,8 @@ from sqlalchemy.orm import Session
 
 from .. import models, schemas
 from ..db import get_db
-from ..deps import get_current_user, require_writer
+from ..deps import get_current_user, optional_period, require_writer
+from ..services import periods
 from ..services.categorise import build_categoriser
 from ..services.importers import dedup_hash
 from ..services.merchants import normalise_merchant
@@ -87,9 +88,14 @@ def list_transactions(
     max_amount_cents: int | None = None,
     page: int = Query(1, ge=1),
     page_size: int = Query(50, ge=1, le=200),
+    window: periods.ResolvedPeriod | None = Depends(optional_period),
     user: models.User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> schemas.TransactionListOut:
+    # The global period picker sets the window; explicit start/end still work on
+    # their own for callers that filter by raw dates.
+    if window is not None:
+        start, end = window.start, window.end
     conditions = [models.Transaction.household_id == user.household_id]
     if account_id:
         conditions.append(models.Transaction.account_id == account_id)

@@ -4,6 +4,7 @@ import { type FormEvent, useState } from "react";
 import { api } from "../api/client";
 import type { SavingsGoal } from "../api/types";
 import { dollarsToCents, formatCents, formatDate } from "../format";
+import { usePeriod } from "../period/context";
 
 type GoalPatch = {
   target_cents?: number;
@@ -120,8 +121,12 @@ function GoalCard({
 }
 
 export function Goals() {
+  const { period } = usePeriod();
   const qc = useQueryClient();
-  const goals = useQuery({ queryKey: ["goals"], queryFn: api.goals });
+  const goals = useQuery({
+    queryKey: ["goals", period],
+    queryFn: () => api.goals(period),
+  });
   const accounts = useQuery({ queryKey: ["accounts"], queryFn: api.accounts });
 
   const [name, setName] = useState("");

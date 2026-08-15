@@ -200,6 +200,9 @@ class CsvMapping(BaseModel):
     decimal: str = "."
     invert_amount: bool = False  # set if outflows are positive in the file
     skip_rows: int = 0
+    # Set when the file covers several accounts: the column naming the account each
+    # row belongs to. Left unset for the ordinary one-account-per-file import.
+    account_col: int | None = None
 
 
 class ImportSniffOut(BaseModel):
@@ -208,9 +211,40 @@ class ImportSniffOut(BaseModel):
     columns: list[str]
     sample_rows: list[list[str]]
     suggested_mapping: CsvMapping | None
+    # A column that looks like it identifies an account, offered as a hint. Multi-account
+    # import stays off until the user opts in, so this is never applied automatically.
+    suggested_account_col: int | None = None
+
+
+class AccountScanRow(BaseModel):
+    """One distinct value of the account column, with what it looks like it means."""
+
+    value: str
+    row_count: int
+    sample_description: str | None
+    suggested_account_id: str | None
+
+
+class AccountCreateFromImport(BaseModel):
+    name: str = Field(min_length=1, max_length=120)
+    type: Literal[
+        "everyday", "savings", "credit_card", "home_loan",
+        "offset", "personal_loan", "cash", "investment",
+    ] = "everyday"
+    institution: str | None = None
+
+
+class AccountAssignment(BaseModel):
+    """Where the rows carrying one account-column value should go."""
+
+    value: str
+    account_id: str | None = None
+    create: AccountCreateFromImport | None = None
+    skip: bool = False
 
 
 class PreviewRow(BaseModel):
+    row_index: int  # position in the parsed file; how commit decisions refer to a row
     txn_date: dt.date
     amount_cents: int
     raw_description: str
@@ -219,14 +253,40 @@ class PreviewRow(BaseModel):
     suggested_category_name: str | None
     confidence: float | None
     is_duplicate: bool
+    # new | duplicate_provider | duplicate_exact | duplicate_probable
+    status: str
+    duplicate_reason: str | None = None
+    # The stored transaction this row matched, for the reviewer to compare against.
+    matched_txn_id: str | None = None
+    matched_date: dt.date | None = None
+    matched_description: str | None = None
+    # Whether the row will be imported unless the user says otherwise. Definite
+    # duplicates are always off; probable ones default off but can be overridden.
+    will_import: bool = True
+    # Which account the row resolved to (multi-account files); None if unassigned.
+    account_id: str | None = None
+    account_name: str | None = None
+
+
+class ImportAccountSummary(BaseModel):
+    account_id: str | None  # None for an account that this import would create
+    account_name: str
+    new_count: int
+    duplicate_count: int
 
 
 class ImportPreviewOut(BaseModel):
-    account_id: str
+    account_id: str | None
     file_format: str
     total_rows: int
-    new_rows: list[PreviewRow]
+    rows: list[PreviewRow]
+    new_count: int
     duplicate_count: int
+    probable_count: int
+    # Populated when the file covers several accounts.
+    accounts: list[ImportAccountSummary] = []
+    # Rows whose account-column value was left unmapped, and so will not be imported.
+    unassigned_count: int = 0
 
 
 class ImportCommitOut(BaseModel):
@@ -685,6 +745,38 @@ class ChatReply(BaseModel):
 class AiModelOut(BaseModel):
     id: str
     label: str
+
+
+# -------------------------------------------------------------------------- periods
+
+
+class PeriodOption(BaseModel):
+    value: str  # the selector to send back, e.g. "fy:2025" or "q:2025-2"
+    label: str
+
+
+class PeriodFinancialYear(BaseModel):
+    value: str
+    label: str
+    start: dt.date
+    end: dt.date
+    quarters: list[PeriodOption]
+    months: list[PeriodOption]
+
+
+class PeriodOptionsOut(BaseModel):
+    """Everything the global period picker needs, in one request."""
+
+    default: str  # the current financial year
+    relative: list[PeriodOption]
+    financial_years: list[PeriodFinancialYear]
+
+
+class ResolvedPeriodOut(BaseModel):
+    start: dt.date
+    end: dt.date
+    label: str
+    is_current: bool
 
 
 # ------------------------------------------------------------------------- updates

@@ -5,6 +5,36 @@ All notable changes to Saiva are documented here. The project follows
 
 ## [Unreleased]
 
+### Added
+- **Global period picker** — a selector in the top bar that every period‑aware view
+  follows: financial years, their quarters and months, relative ranges, and *all
+  time*. Quarters and labels come from your own **FY start** in Settings, so a
+  July–June household sees `FY2025–26` with quarters from July, and a calendar‑year
+  one sees `2025`. The choice persists across reloads and rides in the URL, so a link
+  opens on the same period. Views that look forward (forecast, bills, goals) or
+  report a position (net worth) answer *as at* the selected period rather than today,
+  and a banner appears whenever you are not looking at the current period.
+- **Import — statements covering several accounts.** Tick “rows belong to more than
+  one account”, pick the column that names it, and map each value to an account or
+  create one inline. Unmapped values are skipped and reported rather than filed
+  somewhere arbitrary; the mapping is remembered for next time.
+
+### Fixed
+- **Import no longer drops genuine repeat transactions.** Two identical purchases on
+  one day (two coffees, two ATM withdrawals) hashed the same, so the second was
+  silently discarded — on the first import and on every later one. Duplicates are now
+  matched by count, so repeats survive while re‑importing a file still skips it.
+- **Import catches duplicates it used to miss** — OFX/QFX `FITID` is now stored and
+  matched first, identifying a transaction even when the bank re‑dates and re‑words
+  it; and near matches (same amount, within a few days, similar wording after
+  stripping receipt numbers) are flagged for review, skipped by default. Preview shows
+  every row with its verdict and the transaction it matched, each overridable.
+
+### Upgrade notes
+- Adds migrations **0008–0009**; they apply automatically on start (after the
+  pre‑migration backup). No manual steps, and the de‑duplication fingerprint is
+  unchanged, so existing transactions keep matching.
+
 
 ## [0.8.4] — 2026-08-15
 

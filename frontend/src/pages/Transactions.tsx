@@ -3,6 +3,7 @@ import { useState } from "react";
 import { useSearchParams } from "react-router-dom";
 
 import { api } from "../api/client";
+import { usePeriod } from "../period/context";
 import { CategoriseDialog } from "../components/CategoriseDialog";
 import { RulesManager } from "../components/RulesManager";
 import { formatCents, formatDate } from "../format";
@@ -33,16 +34,18 @@ export function Transactions() {
     window.setTimeout(() => setFlash((cur) => (cur === message ? null : cur)), 2500);
   };
 
+  const { period } = usePeriod();
   const accounts = useQuery({ queryKey: ["accounts"], queryFn: api.accounts });
   const categories = useQuery({ queryKey: ["categories"], queryFn: api.categories });
   const txns = useQuery({
-    queryKey: ["txns", q, accountId, categoryId, uncategorised, page],
+    queryKey: ["txns", q, accountId, categoryId, uncategorised, page, period],
     queryFn: () =>
       api.transactions({
         q: q || undefined,
         account_id: accountId || undefined,
         category_id: categoryId || undefined,
         uncategorised: uncategorised || undefined,
+        period,
         page,
         page_size: 50,
       }),

@@ -3,6 +3,7 @@ import { useState } from "react";
 import { Link } from "react-router-dom";
 
 import { api } from "../api/client";
+import { usePeriod } from "../period/context";
 import type { ChatMessage } from "../api/types";
 
 const PRIVACY_LABEL: Record<string, string> = {
@@ -12,12 +13,13 @@ const PRIVACY_LABEL: Record<string, string> = {
 };
 
 export function Advisor() {
+  const { period } = usePeriod();
   const settings = useQuery({ queryKey: ["ai-settings"], queryFn: api.aiSettings });
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [draft, setDraft] = useState("");
 
   const send = useMutation({
-    mutationFn: (msgs: ChatMessage[]) => api.aiChat(msgs),
+    mutationFn: (msgs: ChatMessage[]) => api.aiChat(msgs, period),
     onSuccess: (r) => setMessages((m) => [...m, { role: "assistant", content: r.reply }]),
   });
 

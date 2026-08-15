@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import datetime as dt
+import unicodedata
 
 from fastapi import APIRouter, Depends, Query, Response
 from sqlalchemy.orm import Session
@@ -14,6 +15,17 @@ from ..services import reports as reports_service
 from ..services.periods import fy_bounds
 
 router = APIRouter(prefix="/reports", tags=["reports"])
+
+
+def _ascii_filename(name: str) -> str:
+    """Content-Disposition is latin-1 only, while labels and household names carry
+    real typography (an en dash in "FY2025–26", accented letters). Fold those to
+    ASCII here rather than restrict what the rest of the app can display."""
+    folded = name.replace(" ", "_").replace("–", "-").replace("—", "-")
+    ascii_only = (
+        unicodedata.normalize("NFKD", folded).encode("ascii", "ignore").decode("ascii")
+    )
+    return ascii_only or "report.pdf"
 
 
 @router.get("/years", response_model=list[schemas.FYReportOption])
@@ -40,7 +52,7 @@ def fy_report_pdf(
         year = fy_bounds(household, dt.date.today())[0].year
     report = reports_service.build_fy_report(db, household, year)
     pdf = reports_service.render_pdf(household, report)
-    filename = f"{household.name}-{report.label}.pdf".replace(" ", "_")
+    filename = _ascii_filename(f"{household.name}-{report.label}.pdf")
     return Response(
         content=pdf,
         media_type="application/pdf",

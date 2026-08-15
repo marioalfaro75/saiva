@@ -151,6 +151,39 @@ describe("api client wiring", () => {
     expect(opts.method).toBe("POST");
   });
 
+  it("period endpoints carry the selector", async () => {
+    const options = mockFetch({ default: "fy:2025", relative: [], financial_years: [] });
+    await api.periodOptions();
+    expect(lastCall(options)[0]).toBe("/api/periods/options");
+
+    const resolve = mockFetch({ start: "2024-07-01", end: "2025-06-30", label: "FY2024\u201325", is_current: false });
+    await api.resolvePeriod("fy:2024");
+    expect(lastCall(resolve)[0]).toBe("/api/periods/resolve?period=fy%3A2024");
+  });
+
+  it("period-aware reads pass the period through", async () => {
+    const insights = mockFetch({ items: [] });
+    await api.insights("fy:2024");
+    expect(lastCall(insights)[0]).toBe("/api/insights?period=fy%3A2024");
+
+    const bills = mockFetch({ bills: [] });
+    await api.upcomingBills(60, "fy:2024");
+    expect(lastCall(bills)[0]).toBe("/api/recurring/upcoming?days=60&period=fy%3A2024");
+
+    // Omitting the period leaves the request exactly as it was before.
+    const plain = mockFetch({ items: [] });
+    await api.insights();
+    expect(lastCall(plain)[0]).toBe("/api/insights");
+  });
+
+  it("forecast sends the period as a query param alongside its POST body", async () => {
+    const fn = mockFetch({ points: [] });
+    await api.forecast(30, [], "fy:2024");
+    const [url, opts] = lastCall(fn);
+    expect(url).toBe("/api/forecast?period=fy%3A2024");
+    expect(JSON.parse(opts.body as string)).toMatchObject({ days: 30 });
+  });
+
   it("reportYears hits the reports endpoint", async () => {
     const fn = mockFetch([{ year: 2024, label: "FY2025", start: "2024-07-01", end: "2025-06-30" }]);
     const r = await api.reportYears();

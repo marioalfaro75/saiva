@@ -368,6 +368,8 @@ export interface CsvMapping {
   decimal: string;
   invert_amount: boolean;
   skip_rows: number;
+  /** Column naming the account each row belongs to; null for a single-account file. */
+  account_col: number | null;
 }
 
 export interface SniffResult {
@@ -376,9 +378,67 @@ export interface SniffResult {
   columns: string[];
   sample_rows: string[][];
   suggested_mapping: CsvMapping | null;
+  suggested_account_col: number | null;
 }
 
+export interface AccountScanRow {
+  value: string;
+  row_count: number;
+  sample_description: string | null;
+  suggested_account_id: string | null;
+}
+
+export interface AccountAssignment {
+  value: string;
+  account_id?: string | null;
+  create?: { name: string; type: string; institution?: string | null } | null;
+  skip?: boolean;
+}
+
+export interface ImportAccountSummary {
+  account_id: string | null;
+  account_name: string;
+  new_count: number;
+  duplicate_count: number;
+}
+
+export interface PeriodOption {
+  value: string;
+  label: string;
+}
+
+export interface PeriodFinancialYear {
+  value: string;
+  label: string;
+  start: string;
+  end: string;
+  quarters: PeriodOption[];
+  months: PeriodOption[];
+}
+
+export interface PeriodOptions {
+  default: string;
+  relative: PeriodOption[];
+  financial_years: PeriodFinancialYear[];
+}
+
+export interface ResolvedPeriod {
+  start: string;
+  end: string;
+  label: string;
+  is_current: boolean;
+}
+
+export type DuplicateStatus =
+  | "new"
+  | "duplicate_provider"
+  | "duplicate_exact"
+  | "duplicate_probable"
+  /** The row's account-column value was never mapped, so it will not be imported. */
+  | "unassigned";
+
 export interface PreviewRow {
+  row_index: number;
   txn_date: string;
   amount_cents: number;
   raw_description: string;
@@ -387,14 +447,26 @@ export interface PreviewRow {
   suggested_category_name: string | null;
   confidence: number | null;
   is_duplicate: boolean;
+  status: DuplicateStatus;
+  duplicate_reason: string | null;
+  matched_txn_id: string | null;
+  matched_date: string | null;
+  matched_description: string | null;
+  will_import: boolean;
+  account_id: string | null;
+  account_name: string | null;
 }
 
 export interface ImportPreview {
-  account_id: string;
+  account_id: string | null;
   file_format: string;
   total_rows: number;
-  new_rows: PreviewRow[];
+  rows: PreviewRow[];
+  new_count: number;
   duplicate_count: number;
+  probable_count: number;
+  accounts: ImportAccountSummary[];
+  unassigned_count: number;
 }
 
 export interface ImportCommit {

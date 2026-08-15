@@ -4,6 +4,9 @@ import { NavLink } from "react-router-dom";
 
 import { api } from "../api/client";
 import { useAuth } from "../auth/AuthContext";
+import { formatDate } from "../format";
+import { usePeriod } from "../period/context";
+import { PeriodPicker } from "../period/PeriodPicker";
 import { SPA_VERSION } from "../version";
 
 const NAV = [
@@ -25,6 +28,7 @@ const NAV = [
 
 export function Layout({ children }: { children: ReactNode }) {
   const { me, logout } = useAuth();
+  const { resolved, isPast } = usePeriod();
   const isOwner = me?.user.role === "owner";
 
   // Server version (polled) drives the "reload to update" nudge (Layer 3).
@@ -71,12 +75,22 @@ export function Layout({ children }: { children: ReactNode }) {
           ))}
         </nav>
         <div className="topbar-right">
+          <PeriodPicker />
           <span className="muted hide-mobile">{me?.household.name}</span>
           <button className="btn btn-ghost" onClick={() => void logout()}>
             Sign out
           </button>
         </div>
       </header>
+
+      {isPast && resolved && (
+        // Past and future windows look identical to the current one at a glance, so
+        // say plainly that these figures are not today's.
+        <div className="period-bar">
+          Viewing <strong>{resolved.label}</strong> ({formatDate(resolved.start)} –{" "}
+          {formatDate(resolved.end)}) — not the current period.
+        </div>
+      )}
 
       {reloadNeeded && (
         <div className="update-bar">

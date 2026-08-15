@@ -1,16 +1,59 @@
 # Saiva — Household Finance & Insights App
 
 A self‑hosted web app that helps an Australian family understand their income and
-spending, get actionable insights and savings recommendations, benchmark against
-similar households (ABS data), and — optionally — chat with an AI advisor (cloud
-BYO‑key or a local model) grounded in their own data. Runs in a container, HTTPS‑only.
+spending, track bills and forecast cashflow, get actionable insights and savings
+recommendations, benchmark against similar households (ABS data), and — optionally —
+chat with an AI advisor (cloud BYO‑key or a local model) grounded in their own data.
+Runs in a container, HTTPS‑only.
 
-> **Status:** Phase 0 + Phase 1 (MVP) implemented — accounts, file import
-> (CSV/OFX/QFX) with de‑duplication, rule + ML categorisation, transfer
-> detection, and an overview dashboard. **Phase 2 complete:** per‑category
-> **budgets**, a manual **net‑worth** balance sheet, **savings goals** with
-> suggested contributions, a rule‑based **insights feed**, and indicative
-> **ABS spending benchmarks**. See the [PRD](docs/PRD.md) for the full plan.
+> **Status:** MVP through **Phase 3 complete** — the full feature set below is
+> implemented and shipping. See [Features](#features) for the list, and the
+> [PRD](docs/PRD.md) for the roadmap and design rationale.
+
+## Features
+
+**Accounts & import**
+- File import — **CSV** (guided column mapping) and **OFX/QFX** — including statements
+  that **cover several accounts** (map each account‑column value to an account, or create
+  one inline), with robust Australian date handling.
+- **Duplicate‑proof imports** — overlapping date ranges never double up: matching uses the
+  bank's own transaction id where present, then exact matches counted by occurrence, then
+  near matches (re‑dated or re‑worded rows) flagged for review. Genuine repeat purchases
+  are kept, not silently dropped.
+- Rule + **ML categorisation** (confidence‑thresholded), an assisted per‑row categorise
+  popover with scopes and "make a rule", a **rules** manager, and per‑transaction locking.
+- Automatic **transfer detection** between your own accounts.
+
+**Understand your money**
+- **Global period picker** — view any **financial year**, quarter, month or relative range;
+  every relevant page follows it, derived from your own FY start date.
+- **Overview** dashboard — income, spending and balances at a glance.
+- **Transactions** — search, filter, and bulk categorise / review.
+- **Insights** — a rule‑based feed of savings opportunities and notable changes.
+- **ABS benchmarks** — compare your spending against similar Australian households.
+
+**Plan ahead**
+- **Budgets** — per‑category tracking (flexible by default).
+- **Bills & recurring** — automatic detection of subscriptions, bills and salary, an
+  upcoming‑bills view, and committed‑monthly totals.
+- **Cashflow forecast** — projects your balance forward from recurring income and a
+  per‑category run‑rate, flags the lowest projected point, and runs simple what‑if scenarios.
+- **Net worth** — a manual assets & liabilities balance sheet.
+- **Savings goals** — targets with suggested contributions.
+
+**Stay informed**
+- **Alerts** — an in‑app feed (over‑budget categories, unusual spend, upcoming bills, large
+  transactions, low projected balance) with opt‑in **email** and weekly/monthly digests.
+- **AI advisor (BYO key)** — ask questions about your own data via Anthropic (Claude),
+  Google Gemini, any OpenAI‑compatible endpoint, or a local **Ollama**, with privacy modes
+  that control what's shared.
+- **Financial‑year PDF report** — a one‑click accountant summary for any financial year.
+
+**Self‑host & operate**
+- **HTTPS‑only** via Caddy — internal CA for localhost/LAN, or Let's Encrypt for a domain.
+- **Prebuilt GHCR images** (`edge` / `latest` / pinned channels), **pre‑migration backups**,
+  and **in‑app updates** (the owner clicks *Update now*; the app never touches the Docker socket).
+- Multi‑user household with **role‑based access**, an **audit log**, and a full **JSON export**.
 
 ## Run it in a container
 
@@ -210,12 +253,16 @@ CI fails if a model change ships without a matching migration (`alembic check`).
 
 ```
 backend/    FastAPI API — auth, accounts, import, categorisation, transfers, dashboard,
-            budgets, net worth, goals, insights, benchmarks; pytest (≈90% coverage)
-frontend/   React + TS SPA (Vite) — dashboard, insights, transactions, accounts,
-            budgets, net worth, goals, benchmarks, import, settings
+            budgets, bills/recurring, forecast, net worth, goals, insights, benchmarks,
+            alerts/notifications, financial-year reports, AI advisor; pytest (≈90% coverage)
+frontend/   React + TS SPA (Vite) — overview, insights, advisor, alerts, transactions,
+            accounts, budgets, bills, forecast, net worth, goals, benchmarks, import, settings
 infra/      Caddy reverse-proxy config (auto-HTTPS)
+scripts/    deploy.sh — the one-command deploy/pull helper behind `make`
 docs/       Product Requirements Document
-docker-compose.yml   one-command deploy (Postgres + API + web + Caddy)
+.github/    CI + release workflows (tests, image publish, Cut release)
+docker-compose.yml        local build (Postgres + API + web + Caddy)
+docker-compose.prod.yml   prebuilt GHCR images + Caddy + Watchtower (in-app updates)
 ```
 
 ## 📄 Product Requirements Document

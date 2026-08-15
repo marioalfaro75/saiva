@@ -124,7 +124,11 @@ class ImportBatch(Base, TimestampMixin):
 
     id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_uuid)
     household_id: Mapped[str] = mapped_column(ForeignKey("households.id"), index=True)
-    account_id: Mapped[str] = mapped_column(ForeignKey("accounts.id"), index=True)
+    # Null when the file spanned several accounts; each transaction still records its
+    # own account, and mapping_profile keeps the column value -> account assignments.
+    account_id: Mapped[str | None] = mapped_column(
+        ForeignKey("accounts.id"), index=True, nullable=True
+    )
     filename: Mapped[str] = mapped_column(String(255), nullable=False)
     file_format: Mapped[str] = mapped_column(String(8), default="csv")  # csv|ofx|qfx|qif
     status: Mapped[str] = mapped_column(String(10), default="committed")  # committed|undone
@@ -153,6 +157,9 @@ class Transaction(Base, TimestampMixin):
     confidence: Mapped[float | None] = mapped_column(Float, nullable=True)
     source: Mapped[str] = mapped_column(String(8), default="import")  # import|manual
     dedup_hash: Mapped[str] = mapped_column(String(64), index=True, default="")
+    # Bank-assigned unique id (OFX/QFX FITID). The most reliable dedup key when the
+    # file provides one — it survives the bank re-dating or re-wording a transaction.
+    provider_txn_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
     import_batch_id: Mapped[str | None] = mapped_column(
         ForeignKey("import_batches.id"), nullable=True
     )
@@ -165,6 +172,7 @@ class Transaction(Base, TimestampMixin):
     __table_args__ = (
         Index("ix_txn_account_dedup", "account_id", "dedup_hash"),
         Index("ix_txn_household_date", "household_id", "txn_date"),
+        Index("ix_txn_account_provider", "account_id", "provider_txn_id"),
     )
 
 

@@ -2,6 +2,7 @@ import { Navigate, Route, Routes } from "react-router-dom";
 
 import { useAuth } from "./auth/AuthContext";
 import { Layout } from "./components/Layout";
+import { PeriodProvider } from "./period/PeriodProvider";
 import { Accounts } from "./pages/Accounts";
 import { Advisor } from "./pages/Advisor";
 import { Alerts } from "./pages/Alerts";
@@ -29,24 +30,26 @@ export default function App() {
   }
 
   return (
-    <Layout>
-      <Routes>
-        <Route path="/" element={<Overview />} />
-        <Route path="/insights" element={<Insights />} />
-        <Route path="/alerts" element={<Alerts />} />
-        <Route path="/advisor" element={<Advisor />} />
-        <Route path="/transactions" element={<Transactions />} />
-        <Route path="/accounts" element={<Accounts />} />
-        <Route path="/budgets" element={<Budgets />} />
-        <Route path="/bills" element={<Bills />} />
-        <Route path="/forecast" element={<Forecast />} />
-        <Route path="/net-worth" element={<NetWorth />} />
-        <Route path="/goals" element={<Goals />} />
-        <Route path="/benchmarks" element={<Benchmarks />} />
-        <Route path="/import" element={<ImportPage />} />
-        <Route path="/settings" element={<Settings />} />
-        <Route path="*" element={<Navigate to="/" replace />} />
-      </Routes>
-    </Layout>
+    <PeriodProvider>
+      <Layout>
+        <Routes>
+          <Route path="/" element={<Overview />} />
+          <Route path="/insights" element={<Insights />} />
+          <Route path="/alerts" element={<Alerts />} />
+          <Route path="/advisor" element={<Advisor />} />
+          <Route path="/transactions" element={<Transactions />} />
+          <Route path="/accounts" element={<Accounts />} />
+          <Route path="/budgets" element={<Budgets />} />
+          <Route path="/bills" element={<Bills />} />
+          <Route path="/forecast" element={<Forecast />} />
+          <Route path="/net-worth" element={<NetWorth />} />
+          <Route path="/goals" element={<Goals />} />
+          <Route path="/benchmarks" element={<Benchmarks />} />
+          <Route path="/import" element={<ImportPage />} />
+          <Route path="/settings" element={<Settings />} />
+          <Route path="*" element={<Navigate to="/" replace />} />
+        </Routes>
+      </Layout>
+    </PeriodProvider>
   );
 }

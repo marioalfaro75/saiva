@@ -1,5 +1,4 @@
 import { useQuery } from "@tanstack/react-query";
-import { useState } from "react";
 import {
   Bar,
   BarChart,
@@ -13,14 +12,8 @@ import {
 } from "recharts";
 
 import { api } from "../api/client";
+import { usePeriod } from "../period/context";
 import { formatCents, formatPct } from "../format";
-
-const PERIODS = [
-  { value: "this_month", label: "This month" },
-  { value: "last_30d", label: "Last 30 days" },
-  { value: "this_period", label: "Pay period" },
-  { value: "this_fy", label: "Financial year" },
-];
 
 const COLORS = [
   "#2dd4bf", "#60a5fa", "#f59e0b", "#f472b6", "#a78bfa",
@@ -37,7 +30,7 @@ function Stat({ label, value, cls }: { label: string; value: string; cls?: strin
 }
 
 export function Overview() {
-  const [period, setPeriod] = useState("this_month");
+  const { period, resolved } = usePeriod();
   const summary = useQuery({ queryKey: ["summary", period], queryFn: () => api.summary({ period }) });
   const breakdown = useQuery({
     queryKey: ["breakdown", period],
@@ -59,13 +52,7 @@ export function Overview() {
     <div>
       <div className="page-head">
         <h1>Overview</h1>
-        <select className="pill-select" value={period} onChange={(e) => setPeriod(e.target.value)}>
-          {PERIODS.map((p) => (
-            <option key={p.value} value={p.value}>
-              {p.label}
-            </option>
-          ))}
-        </select>
+        <span className="muted">{resolved?.label}</span>
       </div>
 
       {summary.data?.txn_count === 0 && (

@@ -5,6 +5,7 @@ import { Line, LineChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from "rec
 import { api } from "../api/client";
 import type { NetWorth as NetWorthData, NetWorthItem } from "../api/types";
 import { dollarsToCents, formatCents } from "../format";
+import { usePeriod } from "../period/context";
 
 type SavePatch = { name?: string; value_cents?: number };
 
@@ -119,8 +120,12 @@ function ItemTable({
 }
 
 export function NetWorth() {
+  const { period } = usePeriod();
   const qc = useQueryClient();
-  const nw = useQuery({ queryKey: ["netWorth"], queryFn: api.netWorth });
+  const nw = useQuery({
+    queryKey: ["netWorth", period],
+    queryFn: () => api.netWorth(period),
+  });
 
   const [name, setName] = useState("");
   const [kind, setKind] = useState("asset");

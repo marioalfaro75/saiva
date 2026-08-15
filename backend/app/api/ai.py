@@ -8,8 +8,8 @@ from sqlalchemy.orm import Session
 
 from .. import models, schemas
 from ..db import get_db
-from ..deps import get_current_user, require_writer
-from ..services import advisor, crypto
+from ..deps import get_current_user, optional_period, require_writer
+from ..services import advisor, crypto, periods
 from ..services import audit as audit_service
 
 router = APIRouter(prefix="/ai", tags=["ai"])
@@ -54,6 +54,7 @@ def update_ai_settings(
 @router.post("/chat", response_model=schemas.ChatReply)
 def chat(
     payload: schemas.ChatRequest,
+    window: periods.ResolvedPeriod | None = Depends(optional_period),
     user: models.User = Depends(require_writer),
     db: Session = Depends(get_db),
 ) -> schemas.ChatReply:
@@ -62,7 +63,7 @@ def chat(
     ai = advisor.settings_for(db, user.household_id)
     messages = [{"role": m.role, "content": m.content} for m in payload.messages]
     try:
-        reply = advisor.chat(db, household, messages)
+        reply = advisor.chat(db, household, messages, window.as_at if window else None)
     except advisor.NotConfiguredError as exc:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc)) from exc
     except advisor.ProviderError as exc:
