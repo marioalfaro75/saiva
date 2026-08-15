@@ -5,6 +5,13 @@ All notable changes to Saiva are documented here. The project follows
 
 ## [Unreleased]
 
+
+## [0.9.0] — 2026-08-15
+
+A feature release: look at any financial year across the whole app, import
+statements that cover several accounts, and imports that no longer double up —
+or quietly lose — transactions.
+
 ### Added
 - **Global period picker** — a selector in the top bar that every period‑aware view
   follows: financial years, their quarters and months, relative ranges, and *all
@@ -146,6 +153,7 @@ personal financial advice.
 - On the first GHCR publish, set the `saiva-api` / `saiva-web` packages to public
   (or `docker login ghcr.io` on the host) so image pulls are authorised.
 
+[0.9.0]: https://github.com/marioalfaro75/saiva/compare/v0.8.4...v0.9.0
 [0.8.4]: https://github.com/marioalfaro75/saiva/compare/v0.8.3...v0.8.4
 [0.8.3]: https://github.com/marioalfaro75/saiva/compare/v0.8.2...v0.8.3
 [0.8.2]: https://github.com/marioalfaro75/saiva/compare/v0.8.1...v0.8.2
