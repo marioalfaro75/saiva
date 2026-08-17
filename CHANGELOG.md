@@ -5,6 +5,12 @@ All notable changes to Saiva are documented here. The project follows
 
 ## [Unreleased]
 
+
+## [0.10.0] — 2026-08-17
+
+Every table in the app can now be sorted by any column and filtered column by
+column.
+
 ### Added
 - **Sort and filter every table.** Every column in every table is sortable, and each
   has its own filter box (behind a **Filter** toggle on each table). Sorting uses the
@@ -166,6 +172,7 @@ personal financial advice.
 - On the first GHCR publish, set the `saiva-api` / `saiva-web` packages to public
   (or `docker login ghcr.io` on the host) so image pulls are authorised.
 
+[0.10.0]: https://github.com/marioalfaro75/saiva/compare/v0.9.0...v0.10.0
 [0.9.0]: https://github.com/marioalfaro75/saiva/compare/v0.8.4...v0.9.0
 [0.8.4]: https://github.com/marioalfaro75/saiva/compare/v0.8.3...v0.8.4
 [0.8.3]: https://github.com/marioalfaro75/saiva/compare/v0.8.2...v0.8.3
