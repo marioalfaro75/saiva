@@ -6,6 +6,10 @@ import { api } from "../api/client";
 import type { NetWorth as NetWorthData, NetWorthItem } from "../api/types";
 import { dollarsToCents, formatCents } from "../format";
 import { usePeriod } from "../period/context";
+import { FilterRow, FilterToggle } from "../table/FilterRow";
+import { SortHeader } from "../table/SortHeader";
+import type { ColumnSpec } from "../table/sorting";
+import { useTable } from "../table/useTable";
 
 type SavePatch = { name?: string; value_cents?: number };
 
@@ -83,8 +87,16 @@ function ItemRow({
   );
 }
 
+const ITEM_LABELS = { name: "Name", value: "Value" };
+
+const ITEM_COLUMNS: ColumnSpec<NetWorthItem>[] = [
+  { key: "name", sort: (i) => i.name },
+  { key: "value", sort: (i) => i.value_cents, text: (i) => formatCents(i.value_cents) },
+];
+
 function ItemTable({
   title,
+  tableId,
   items,
   total,
   onSave,
@@ -92,12 +104,15 @@ function ItemTable({
   busy,
 }: {
   title: string;
+  /** Assets and liabilities are separate tables, so each remembers its own state. */
+  tableId: string;
   items: NetWorthItem[];
   total: number;
   onSave: (id: string, patch: SavePatch) => void;
   onRemove: (id: string) => void;
   busy: boolean;
 }) {
+  const table = useTable(items, ITEM_COLUMNS, { id: tableId });
   return (
     <div className="card">
       <div className="spread">
@@ -105,13 +120,33 @@ function ItemTable({
         <strong>{formatCents(total)}</strong>
       </div>
       {items.length ? (
-        <table>
-          <tbody>
-            {items.map((i) => (
-              <ItemRow key={i.id} item={i} onSave={onSave} onRemove={onRemove} busy={busy} />
-            ))}
-          </tbody>
-        </table>
+        <>
+          <div className="spread">
+            <span />
+            <FilterToggle table={table} />
+          </div>
+          <table>
+            {/* This list had no header row; it needs one for the columns to be
+                sortable, and the empty cell keeps the actions column aligned. */}
+            <thead>
+              <tr>
+                <SortHeader table={table} col="name">
+                  Name
+                </SortHeader>
+                <SortHeader table={table} col="value" numeric>
+                  Value
+                </SortHeader>
+                <th className="actions"></th>
+              </tr>
+              <FilterRow table={table} labels={ITEM_LABELS} columns={["name", "value", null]} />
+            </thead>
+            <tbody>
+              {table.rows.map((i) => (
+                <ItemRow key={i.id} item={i} onSave={onSave} onRemove={onRemove} busy={busy} />
+              ))}
+            </tbody>
+          </table>
+        </>
       ) : (
         <p className="muted">None yet.</p>
       )}
@@ -213,6 +248,7 @@ export function NetWorth() {
       <div className="grid" style={{ gridTemplateColumns: "1fr 1fr", marginTop: 16 }}>
         <ItemTable
           title="Assets"
+          tableId="networth-assets"
           items={assets}
           total={data?.assets_cents ?? 0}
           onSave={onSave}
@@ -221,6 +257,7 @@ export function NetWorth() {
         />
         <ItemTable
           title="Liabilities"
+          tableId="networth-liabilities"
           items={liabilities}
           total={data?.liabilities_cents ?? 0}
           onSave={onSave}

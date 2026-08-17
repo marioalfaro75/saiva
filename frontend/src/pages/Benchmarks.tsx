@@ -6,6 +6,10 @@ import type { BenchmarkItem } from "../api/types";
 import { useAuth } from "../auth/AuthContext";
 import { formatCents } from "../format";
 import { usePeriod } from "../period/context";
+import { FilterRow, FilterToggle } from "../table/FilterRow";
+import { SortHeader } from "../table/SortHeader";
+import type { ColumnSpec } from "../table/sorting";
+import { useTable } from "../table/useTable";
 
 function signed(cents: number): string {
   return `${cents > 0 ? "+" : "-"}${formatCents(Math.abs(cents))}`;
@@ -34,6 +38,31 @@ function Row({ item }: { item: BenchmarkItem }) {
   );
 }
 
+const BENCHMARK_LABELS = {
+  category: "Category",
+  yours: "You / wk",
+  typical: "Typical / wk",
+  ratio: "vs typical",
+  difference: "Difference",
+};
+
+const BENCHMARK_COLUMNS: ColumnSpec<BenchmarkItem>[] = [
+  { key: "category", sort: (i) => i.category },
+  {
+    key: "yours",
+    sort: (i) => i.your_weekly_cents,
+    text: (i) => formatCents(i.your_weekly_cents),
+  },
+  {
+    key: "typical",
+    sort: (i) => i.typical_weekly_cents,
+    text: (i) => formatCents(i.typical_weekly_cents),
+  },
+  // The bar has no text of its own; sorting and filtering use the ratio it draws.
+  { key: "ratio", sort: (i) => i.pct_of_typical, text: (i) => `${Math.round(i.pct_of_typical * 100)}%` },
+  { key: "difference", sort: (i) => i.diff_cents, text: (i) => signed(i.diff_cents) },
+];
+
 export function Benchmarks() {
   const { period } = usePeriod();
   const qc = useQueryClient();
@@ -45,6 +74,7 @@ export function Benchmarks() {
     queryKey: ["benchmarks", period],
     queryFn: () => api.benchmarks(period),
   });
+  const table = useTable(bm.data?.items ?? [], BENCHMARK_COLUMNS, { id: "benchmarks" });
   const save = useMutation({
     mutationFn: () => api.updateHousehold({ adults, children }),
     onSuccess: () => qc.invalidateQueries({ queryKey: ["benchmarks"] }),
@@ -117,18 +147,37 @@ export function Benchmarks() {
       )}
 
       <div className="card" style={{ marginTop: 16 }}>
+        <div className="spread">
+          <span />
+          <FilterToggle table={table} />
+        </div>
         <table>
           <thead>
             <tr>
-              <th>Category</th>
-              <th className="num">You / wk</th>
-              <th className="num">Typical / wk</th>
-              <th>vs typical</th>
-              <th className="num">Difference</th>
+              <SortHeader table={table} col="category">
+                Category
+              </SortHeader>
+              <SortHeader table={table} col="yours" numeric>
+                You / wk
+              </SortHeader>
+              <SortHeader table={table} col="typical" numeric>
+                Typical / wk
+              </SortHeader>
+              <SortHeader table={table} col="ratio">
+                vs typical
+              </SortHeader>
+              <SortHeader table={table} col="difference" numeric>
+                Difference
+              </SortHeader>
             </tr>
+            <FilterRow
+              table={table}
+              labels={BENCHMARK_LABELS}
+              columns={["category", "yours", "typical", "ratio", "difference"]}
+            />
           </thead>
           <tbody>
-            {(data?.items ?? []).map((i) => (
+            {table.rows.map((i) => (
               <Row key={i.category} item={i} />
             ))}
           </tbody>

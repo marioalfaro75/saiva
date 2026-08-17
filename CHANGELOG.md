@@ -5,6 +5,19 @@ All notable changes to Saiva are documented here. The project follows
 
 ## [Unreleased]
 
+### Added
+- **Sort and filter every table.** Every column in every table is sortable, and each
+  has its own filter box (behind a **Filter** toggle on each table). Sorting uses the
+  underlying value, so amounts and dates order properly rather than alphabetically,
+  and blank cells always sort last. How you left a table is remembered.
+- **Transactions sorts and filters across the whole list, not the visible page** —
+  the ordering and filtering happen in the database, and the choice is kept in the
+  URL so a sorted, filtered view can be reloaded or shared.
+- **Search now covers every column** on the Transactions page — previously only the
+  description and merchant; it now also matches the account, category, notes, date
+  and amount.
+- **Net worth** gained a header row, so assets and liabilities can be sorted too.
+
 
 ## [0.9.0] — 2026-08-15
 

@@ -1,9 +1,13 @@
 import { useQuery } from "@tanstack/react-query";
 
 import { api } from "../api/client";
-import type { RecurringSeries } from "../api/types";
+import type { RecurringSeries, UpcomingBill } from "../api/types";
 import { formatCents, formatDate } from "../format";
 import { usePeriod } from "../period/context";
+import { FilterRow, FilterToggle } from "../table/FilterRow";
+import { SortHeader } from "../table/SortHeader";
+import type { ColumnSpec } from "../table/sorting";
+import { useTable } from "../table/useTable";
 
 function cap(s: string): string {
   return s.charAt(0).toUpperCase() + s.slice(1);
@@ -15,6 +19,60 @@ function tagFor(s: RecurringSeries) {
   if (s.is_subscription) return <span className="tag transfer">subscription</span>;
   return <span className="tag">bill</span>;
 }
+
+/** The label the row's tag shows, so "subscription" or "income" can be sorted and
+ *  filtered like any other column. */
+function kindOf(s: RecurringSeries): string {
+  if (!s.active) return "inactive";
+  if (s.direction === "income") return "income";
+  return s.is_subscription ? "subscription" : "bill";
+}
+
+const UPCOMING_LABELS = {
+  due: "Due",
+  merchant: "Merchant",
+  category: "Category",
+  cadence: "Cadence",
+  amount: "Amount",
+};
+
+const UPCOMING_COLUMNS: ColumnSpec<UpcomingBill>[] = [
+  { key: "due", sort: (b) => b.due_date, text: (b) => formatDate(b.due_date) },
+  { key: "merchant", sort: (b) => b.merchant },
+  { key: "category", sort: (b) => b.category_name },
+  { key: "cadence", sort: (b) => cap(b.cadence) },
+  { key: "amount", sort: (b) => b.amount_cents, text: (b) => formatCents(-b.amount_cents) },
+];
+
+const SERIES_LABELS = {
+  merchant: "Merchant",
+  cadence: "Cadence",
+  category: "Category",
+  typical: "Typical",
+  monthly: "Monthly",
+  last: "Last seen",
+  next: "Next due",
+  kind: "Kind",
+};
+
+const SERIES_COLUMNS: ColumnSpec<RecurringSeries>[] = [
+  { key: "merchant", sort: (s) => s.merchant },
+  { key: "cadence", sort: (s) => cap(s.cadence) },
+  { key: "category", sort: (s) => s.category_name },
+  {
+    key: "typical",
+    sort: (s) => s.typical_amount_cents,
+    text: (s) => formatCents(s.typical_amount_cents),
+  },
+  {
+    key: "monthly",
+    sort: (s) => s.monthly_amount_cents,
+    text: (s) => formatCents(s.monthly_amount_cents),
+  },
+  { key: "last", sort: (s) => s.last_date, text: (s) => formatDate(s.last_date) },
+  { key: "next", sort: (s) => s.next_due, text: (s) => formatDate(s.next_due) },
+  { key: "kind", sort: kindOf },
+];
 
 export function Bills() {
   const { period } = usePeriod();
@@ -30,6 +88,11 @@ export function Bills() {
   const data = recurring.data;
   const series = data?.series ?? [];
   const bills = upcoming.data?.bills ?? [];
+  const upcomingTable = useTable(bills, UPCOMING_COLUMNS, {
+    id: "bills-upcoming",
+    defaultSort: { key: "due", dir: "asc" },
+  });
+  const seriesTable = useTable(series, SERIES_COLUMNS, { id: "bills-recurring" });
 
   return (
     <div>
@@ -67,18 +130,38 @@ export function Bills() {
           </span>
         </div>
         {bills.length > 0 ? (
+          <>
+          <div className="spread">
+            <span />
+            <FilterToggle table={upcomingTable} />
+          </div>
           <table>
             <thead>
               <tr>
-                <th>Due</th>
-                <th>Merchant</th>
-                <th>Category</th>
-                <th>Cadence</th>
-                <th className="num">Amount</th>
+                <SortHeader table={upcomingTable} col="due">
+                  Due
+                </SortHeader>
+                <SortHeader table={upcomingTable} col="merchant">
+                  Merchant
+                </SortHeader>
+                <SortHeader table={upcomingTable} col="category">
+                  Category
+                </SortHeader>
+                <SortHeader table={upcomingTable} col="cadence">
+                  Cadence
+                </SortHeader>
+                <SortHeader table={upcomingTable} col="amount" numeric>
+                  Amount
+                </SortHeader>
               </tr>
+              <FilterRow
+                table={upcomingTable}
+                labels={UPCOMING_LABELS}
+                columns={["due", "merchant", "category", "cadence", "amount"]}
+              />
             </thead>
             <tbody>
-              {bills.map((b, i) => (
+              {upcomingTable.rows.map((b, i) => (
                 <tr key={`${b.merchant}-${b.due_date}-${i}`}>
                   <td>{formatDate(b.due_date)}</td>
                   <td>{b.merchant}</td>
@@ -89,6 +172,7 @@ export function Bills() {
               ))}
             </tbody>
           </table>
+          </>
         ) : (
           <p className="muted">No upcoming bills detected yet.</p>
         )}
@@ -97,21 +181,50 @@ export function Bills() {
       <div className="card">
         <h2>Recurring transactions</h2>
         {series.length > 0 ? (
+          <>
+          <div className="spread">
+            <span />
+            <FilterToggle table={seriesTable} />
+          </div>
           <table>
             <thead>
               <tr>
-                <th>Merchant</th>
-                <th>Cadence</th>
-                <th>Category</th>
-                <th className="num">Typical</th>
-                <th className="num">Monthly</th>
-                <th>Last seen</th>
-                <th>Next due</th>
-                <th></th>
+                <SortHeader table={seriesTable} col="merchant">
+                  Merchant
+                </SortHeader>
+                <SortHeader table={seriesTable} col="cadence">
+                  Cadence
+                </SortHeader>
+                <SortHeader table={seriesTable} col="category">
+                  Category
+                </SortHeader>
+                <SortHeader table={seriesTable} col="typical" numeric>
+                  Typical
+                </SortHeader>
+                <SortHeader table={seriesTable} col="monthly" numeric>
+                  Monthly
+                </SortHeader>
+                <SortHeader table={seriesTable} col="last">
+                  Last seen
+                </SortHeader>
+                <SortHeader table={seriesTable} col="next">
+                  Next due
+                </SortHeader>
+                <SortHeader table={seriesTable} col="kind">
+                  Kind
+                </SortHeader>
               </tr>
+              <FilterRow
+                table={seriesTable}
+                labels={SERIES_LABELS}
+                columns={[
+                  "merchant", "cadence", "category", "typical",
+                  "monthly", "last", "next", "kind",
+                ]}
+              />
             </thead>
             <tbody>
-              {series.map((s) => (
+              {seriesTable.rows.map((s) => (
                 <tr key={`${s.merchant}-${s.cadence}`} style={{ opacity: s.active ? 1 : 0.55 }}>
                   <td>{s.merchant}</td>
                   <td className="muted">{cap(s.cadence)}</td>
@@ -129,6 +242,7 @@ export function Bills() {
               ))}
             </tbody>
           </table>
+          </>
         ) : (
           <p className="muted">
             No recurring transactions detected yet. Once a few months of history are imported,
