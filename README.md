@@ -28,7 +28,11 @@ Runs in a container, HTTPS‑only.
 - **Global period picker** — view any **financial year**, quarter, month or relative range;
   every relevant page follows it, derived from your own FY start date.
 - **Overview** dashboard — income, spending and balances at a glance.
-- **Transactions** — search, filter, and bulk categorise / review.
+- **Transactions** — search across every column, sort and filter by any column, and
+  bulk categorise / review. Sorting and filtering run over your whole history, not
+  just the page on screen, and the view can be shared as a link.
+- **Sortable, filterable tables everywhere** — every table sorts by any column and has
+  per-column filters, and remembers how you left it.
 - **Insights** — a rule‑based feed of savings opportunities and notable changes.
 - **ABS benchmarks** — compare your spending against similar Australian households.
 
