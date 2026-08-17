@@ -11,6 +11,9 @@ import type {
   SniffResult,
 } from "../api/types";
 import { formatCents, formatDate } from "../format";
+import { SortHeader } from "../table/SortHeader";
+import type { ColumnSpec } from "../table/sorting";
+import { useTable } from "../table/useTable";
 
 const ACCOUNT_TYPES = [
   "everyday",
@@ -21,6 +24,22 @@ const ACCOUNT_TYPES = [
   "personal_loan",
   "cash",
   "investment",
+];
+
+// Import tables sort but are deliberately not remembered: a filter restored from a
+// previous import would hide rows of a new file during the review step.
+const SCAN_COLUMNS: ColumnSpec<AccountScanRow>[] = [
+  { key: "value", sort: (r) => r.value },
+  { key: "rows", sort: (r) => r.row_count },
+];
+
+const PREVIEW_COLUMNS: ColumnSpec<PreviewRow>[] = [
+  { key: "date", sort: (r) => r.txn_date },
+  { key: "description", sort: (r) => r.merchant ?? r.raw_description },
+  { key: "account", sort: (r) => r.account_name },
+  { key: "category", sort: (r) => r.suggested_category_name },
+  { key: "amount", sort: (r) => r.amount_cents },
+  { key: "status", sort: (r) => r.status },
 ];
 
 /** What the user chose to do with one distinct value of the account column. */
@@ -156,6 +175,10 @@ export function ImportPage() {
       if (c.mode === "skip") return { value: r.value, skip: true };
       return { value: r.value }; // unchosen -> the server reports it as unassigned
     });
+
+  const scanTable = useTable(scan ?? [], SCAN_COLUMNS);
+  // Sorting by Status groups every possible duplicate together for review.
+  const previewTable = useTable(preview?.rows ?? [], PREVIEW_COLUMNS);
 
   const unchosen = (scan ?? []).filter((r) => (choices[r.value]?.mode ?? "") === "").length;
   const readyToRun = !!file && (multiAccount ? !!scan : !!accountId) && !busy;
@@ -352,13 +375,17 @@ export function ImportPage() {
                     <table>
                       <thead>
                         <tr>
-                          <th>Value in file</th>
-                          <th className="num">Rows</th>
+                          <SortHeader table={scanTable} col="value">
+                            Value in file
+                          </SortHeader>
+                          <SortHeader table={scanTable} col="rows" numeric>
+                            Rows
+                          </SortHeader>
                           <th>Import into</th>
                         </tr>
                       </thead>
                       <tbody>
-                        {scan.map((s) => {
+                        {scanTable.rows.map((s) => {
                           const c = choices[s.value] ?? { mode: "" };
                           return (
                             <tr key={s.value}>
@@ -507,16 +534,30 @@ export function ImportPage() {
                 <th style={{ width: 32 }}>
                   <span className="sr-only">Import</span>
                 </th>
-                <th>Date</th>
-                <th>Description</th>
-                {multiAccount && <th>Account</th>}
-                <th>Suggested category</th>
-                <th className="num">Amount</th>
-                <th>Status</th>
+                <SortHeader table={previewTable} col="date">
+                  Date
+                </SortHeader>
+                <SortHeader table={previewTable} col="description">
+                  Description
+                </SortHeader>
+                {multiAccount && (
+                  <SortHeader table={previewTable} col="account">
+                    Account
+                  </SortHeader>
+                )}
+                <SortHeader table={previewTable} col="category">
+                  Suggested category
+                </SortHeader>
+                <SortHeader table={previewTable} col="amount" numeric>
+                  Amount
+                </SortHeader>
+                <SortHeader table={previewTable} col="status">
+                  Status
+                </SortHeader>
               </tr>
             </thead>
             <tbody>
-              {preview.rows.slice(0, 200).map((r) => (
+              {previewTable.rows.slice(0, 200).map((r) => (
                 <tr key={r.row_index} style={{ opacity: willImport(r) ? 1 : 0.55 }}>
                   <td>
                     <input
