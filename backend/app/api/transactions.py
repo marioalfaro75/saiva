@@ -4,11 +4,14 @@ delete (PRD R13, R15, R20)."""
 from __future__ import annotations
 
 import datetime as dt
+import re
 from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
-from sqlalchemy import func, or_, select
+from sqlalchemy import Integer, String, case, cast, false, func, or_, select
 from sqlalchemy.orm import Session
+from sqlalchemy.sql import Select
+from sqlalchemy.sql.elements import ColumnElement
 
 from .. import models, schemas
 from ..db import get_db
@@ -75,6 +78,62 @@ def _get_owned(db: Session, txn_id: str, household_id: str) -> models.Transactio
     return t
 
 
+# Sortable columns, allow-listed: the key selects a column here and is never
+# interpolated into SQL. Account and category sort by name, which is what the table
+# shows, so both need a join.
+SORTABLE = {
+    "date": models.Transaction.txn_date,
+    "description": models.Transaction.merchant,
+    "account": models.Account.name,
+    "category": models.Category.name,
+    "amount": models.Transaction.amount_cents,
+}
+
+# Per-column filters, matching the columns the transactions table displays.
+FILTERABLE = {
+    "description": (models.Transaction.raw_description, models.Transaction.merchant),
+    "account": (models.Account.name,),
+    "category": (models.Category.name,),
+}
+
+
+def _amount_condition(term: str) -> ColumnElement[bool] | None:
+    """Match an amount the way the table displays it.
+
+    Amounts are stored in cents, so a text match on the raw column would make "12.50"
+    fail to find 1250. Dividing by 100.0 and casting is no better — the database
+    renders that as "85.4", so "85.40" would still miss. Build "85.40" from integer
+    arithmetic instead, which formats identically on SQLite and Postgres.
+    """
+    digits = re.sub(r"[^\d.]", "", term)
+    if not digits:
+        return None
+    cents = func.abs(models.Transaction.amount_cents)
+    # floor() and %, not a plain cast: SQLAlchemy renders `/` as true division, and
+    # Postgres rounds when casting the result to an integer — so 8560 would give a
+    # whole part of 86 and a remainder of -40, rendering "86.-40". SQLite truncates,
+    # which would have hidden it.
+    whole = cast(func.floor(cents / 100.0), Integer)
+    frac = cents % 100
+    padded = case((frac < 10, "0" + cast(frac, String)), else_=cast(frac, String))
+    formatted = cast(whole, String) + "." + padded
+    # "85", "85.4", "5.40" and "85.40" all match -$85.40.
+    return formatted.like(f"%{digits}%")
+
+
+def _sorted(stmt: Select, sort: str | None, direction: str) -> Select:
+    """Apply ordering. Always ends with a unique-ish tiebreaker so paging through a
+    sorted list cannot repeat or skip rows when several share a sort value."""
+    tiebreak = (models.Transaction.txn_date.desc(), models.Transaction.created_at.desc())
+    if sort is None:
+        return stmt.order_by(*tiebreak)
+    column = SORTABLE[sort]
+    # Blank values sort last whichever direction is chosen, matching the client-side
+    # tables, so an uncategorised row never tops the list.
+    ordered = column.asc() if direction == "asc" else column.desc()
+    return stmt.order_by(column.is_(None), ordered, *tiebreak)
+
+
 @router.get("", response_model=schemas.TransactionListOut)
 def list_transactions(
     q: str | None = None,
@@ -88,10 +147,23 @@ def list_transactions(
     max_amount_cents: int | None = None,
     page: int = Query(1, ge=1),
     page_size: int = Query(50, ge=1, le=200),
+    sort: str | None = None,
+    dir: str = "asc",
+    f_description: str | None = None,
+    f_account: str | None = None,
+    f_category: str | None = None,
+    f_amount: str | None = None,
+    f_date: str | None = None,
     window: periods.ResolvedPeriod | None = Depends(optional_period),
     user: models.User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> schemas.TransactionListOut:
+    if sort is not None and sort not in SORTABLE:
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST, f"Cannot sort by '{sort}'"
+        )
+    if dir not in ("asc", "desc"):
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "dir must be asc or desc")
     # The global period picker sets the window; explicit start/end still work on
     # their own for callers that filter by raw dates.
     if window is not None:
@@ -114,20 +186,43 @@ def list_transactions(
     if max_amount_cents is not None:
         conditions.append(models.Transaction.amount_cents <= max_amount_cents)
     if q:
+        # Free-text search spans every column the table shows, not just the description.
         like = f"%{q}%"
-        conditions.append(
-            or_(
-                models.Transaction.raw_description.ilike(like),
-                models.Transaction.merchant.ilike(like),
-            )
-        )
+        anywhere: list[ColumnElement[bool]] = [
+            models.Transaction.raw_description.ilike(like),
+            models.Transaction.merchant.ilike(like),
+            models.Transaction.notes.ilike(like),
+            models.Account.name.ilike(like),
+            models.Category.name.ilike(like),
+            cast(models.Transaction.txn_date, String).like(like),
+        ]
+        amount_match = _amount_condition(q)
+        if amount_match is not None:
+            anywhere.append(amount_match)
+        conditions.append(or_(*anywhere))
 
-    total = db.execute(select(func.count(models.Transaction.id)).where(*conditions)).scalar_one()
+    for name, columns in FILTERABLE.items():
+        term = {"description": f_description, "account": f_account, "category": f_category}[name]
+        if term:
+            conditions.append(or_(*[c.ilike(f"%{term}%") for c in columns]))
+    if f_amount:
+        amount_match = _amount_condition(f_amount)
+        # A filter of pure punctuation matches nothing rather than everything.
+        conditions.append(amount_match if amount_match is not None else false())
+    if f_date:
+        conditions.append(cast(models.Transaction.txn_date, String).like(f"%{f_date}%"))
+
+    # Left joins: sorting or filtering by account/category must never drop rows that
+    # have neither, which an inner join would do silently.
+    def joined(stmt: Select) -> Select:
+        return stmt.join(models.Account, isouter=True).join(models.Category, isouter=True)
+
+    total = db.execute(
+        joined(select(func.count(models.Transaction.id))).where(*conditions)
+    ).scalar_one()
     rows = (
         db.execute(
-            select(models.Transaction)
-            .where(*conditions)
-            .order_by(models.Transaction.txn_date.desc(), models.Transaction.created_at.desc())
+            _sorted(joined(select(models.Transaction)).where(*conditions), sort, dir)
             .limit(page_size)
             .offset((page - 1) * page_size)
         )

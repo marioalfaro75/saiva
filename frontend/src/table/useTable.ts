@@ -17,10 +17,12 @@ export interface UseTableOptions {
   defaultSort?: SortState | null;
 }
 
-export interface Table<T> {
-  /** Filtered and sorted rows to render. */
-  rows: T[];
-  columns: ColumnSpec<T>[];
+/**
+ * What the header and filter-row components need. Implemented both by `useTable`
+ * (rows held in memory) and by `useServerTable` (the paginated transactions list),
+ * so the same markup drives either.
+ */
+export interface TableControls {
   sort: SortState | null;
   toggleSort: (key: string) => void;
   filters: Record<string, string>;
@@ -32,6 +34,12 @@ export interface Table<T> {
   /** Rows after filtering, and rows before it — for a "12 of 340" count. */
   matched: number;
   total: number;
+}
+
+export interface Table<T> extends TableControls {
+  /** Filtered and sorted rows to render. */
+  rows: T[];
+  columns: ColumnSpec<T>[];
 }
 
 /**

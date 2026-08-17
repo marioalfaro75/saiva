@@ -1,16 +1,16 @@
-import type { Table } from "./useTable";
+import type { TableControls } from "./useTable";
 
 /**
  * A row of per-column filter inputs, sitting under the header. Columns without a
  * filterable value (checkboxes, action buttons) get an empty cell so the row still
  * lines up with the header above it.
  */
-export function FilterRow<T>({
+export function FilterRow({
   table,
   labels,
   columns,
 }: {
-  table: Table<T>;
+  table: TableControls;
   /** Human name per column key, used for the input's accessible label. */
   labels: Record<string, string>;
   /** Column keys in render order; `null` leaves a cell empty. */
@@ -35,14 +35,20 @@ export function FilterRow<T>({
   );
 }
 
-/** The filter toggle and, when filtering, how much of the table is being shown. */
-export function FilterToggle<T>({ table }: { table: Table<T> }) {
+/** The filter toggle and, when filtering, how much of the table is being shown.
+ *  `count` overrides the row tally for tables the server paginates, where only the
+ *  number of matching rows is known. */
+export function FilterToggle({ table, count }: { table: TableControls; count?: number }) {
   const filtering = table.activeFilterCount > 0;
   return (
     <span className="filter-toggle">
       {filtering && (
         <span className="muted">
-          {table.matched} of {table.total}
+          {/* A server-paginated table only knows how many rows match, not the
+              unfiltered total, so it reports the one figure it has. */}
+          {count !== undefined
+            ? `${count} matching`
+            : `${table.matched} of ${table.total}`}
         </span>
       )}
       <button

@@ -1,18 +1,18 @@
 import type { ReactNode } from "react";
 
-import type { Table } from "./useTable";
+import type { TableControls } from "./useTable";
 
 /**
  * A sortable column heading. The clickable part is a real button so the column can be
  * sorted from the keyboard, and `aria-sort` tells a screen reader the current order.
  */
-export function SortHeader<T>({
+export function SortHeader({
   table,
   col,
   numeric,
   children,
 }: {
-  table: Table<T>;
+  table: TableControls;
   col: string;
   numeric?: boolean;
   children: ReactNode;
