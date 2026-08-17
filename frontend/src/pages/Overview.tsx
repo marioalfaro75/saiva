@@ -12,7 +12,12 @@ import {
 } from "recharts";
 
 import { api } from "../api/client";
+import type { CategoryBreakdownItem } from "../api/types";
 import { usePeriod } from "../period/context";
+import { FilterRow, FilterToggle } from "../table/FilterRow";
+import { SortHeader } from "../table/SortHeader";
+import type { ColumnSpec } from "../table/sorting";
+import { useTable } from "../table/useTable";
 import { formatCents, formatPct } from "../format";
 
 const COLORS = [
@@ -29,6 +34,20 @@ function Stat({ label, value, cls }: { label: string; value: string; cls?: strin
   );
 }
 
+const BREAKDOWN_LABELS = {
+  category: "Category",
+  parent: "Parent",
+  spent: "Spent",
+  share: "Share",
+};
+
+const BREAKDOWN_COLUMNS: ColumnSpec<CategoryBreakdownItem>[] = [
+  { key: "category", sort: (i) => i.category_name },
+  { key: "parent", sort: (i) => i.parent_name },
+  { key: "spent", sort: (i) => i.amount_cents, text: (i) => formatCents(i.amount_cents) },
+  { key: "share", sort: (i) => i.pct, text: (i) => formatPct(i.pct) },
+];
+
 export function Overview() {
   const { period, resolved } = usePeriod();
   const summary = useQuery({ queryKey: ["summary", period], queryFn: () => api.summary({ period }) });
@@ -37,6 +56,11 @@ export function Overview() {
     queryFn: () => api.breakdown({ period }),
   });
   const trends = useQuery({ queryKey: ["trends", period], queryFn: () => api.trends({ period }) });
+  // Only the leading categories are charted, but the table sorts the whole breakdown.
+  const table = useTable(breakdown.data?.items ?? [], BREAKDOWN_COLUMNS, {
+    id: "overview-breakdown",
+    defaultSort: { key: "spent", dir: "desc" },
+  });
 
   const pie = (breakdown.data?.items ?? [])
     .slice(0, 8)
@@ -118,17 +142,35 @@ export function Overview() {
       <div className="card" style={{ marginTop: 16 }}>
         <h2>Top categories</h2>
         {breakdown.data && breakdown.data.items.length > 0 ? (
-          <table>
+          <>
+            <div className="spread">
+              <span />
+              <FilterToggle table={table} />
+            </div>
+            <table>
             <thead>
               <tr>
-                <th>Category</th>
-                <th>Parent</th>
-                <th className="num">Spent</th>
-                <th className="num">Share</th>
+                <SortHeader table={table} col="category">
+                  Category
+                </SortHeader>
+                <SortHeader table={table} col="parent">
+                  Parent
+                </SortHeader>
+                <SortHeader table={table} col="spent" numeric>
+                  Spent
+                </SortHeader>
+                <SortHeader table={table} col="share" numeric>
+                  Share
+                </SortHeader>
               </tr>
+              <FilterRow
+                table={table}
+                labels={BREAKDOWN_LABELS}
+                columns={["category", "parent", "spent", "share"]}
+              />
             </thead>
             <tbody>
-              {breakdown.data.items.slice(0, 12).map((i) => (
+              {table.rows.map((i) => (
                 <tr key={i.category_id ?? "uncat"}>
                   <td>{i.category_name}</td>
                   <td className="muted">{i.parent_name ?? "—"}</td>
@@ -137,7 +179,8 @@ export function Overview() {
                 </tr>
               ))}
             </tbody>
-          </table>
+            </table>
+          </>
         ) : (
           <p className="muted">Nothing to show yet.</p>
         )}
