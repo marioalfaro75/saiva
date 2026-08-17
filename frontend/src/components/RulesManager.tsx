@@ -2,7 +2,11 @@ import { useEffect, useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
 import { api } from "../api/client";
-import type { Category, MatchType } from "../api/types";
+import { FilterRow, FilterToggle } from "../table/FilterRow";
+import { SortHeader } from "../table/SortHeader";
+import type { ColumnSpec } from "../table/sorting";
+import { useTable } from "../table/useTable";
+import type { Category, MatchType, Rule } from "../api/types";
 
 const MATCH_TYPES: MatchType[] = ["contains", "starts_with", "equals", "merchant", "regex"];
 
@@ -20,10 +24,34 @@ interface Props {
   onFlash: (message: string) => void;
 }
 
+const RULE_LABELS = {
+  active: "Active",
+  when: "When",
+  pattern: "Matches",
+  category: "Category",
+  source: "Source",
+};
+
 export function RulesManager({ categories, onFlash }: Props) {
   const qc = useQueryClient();
   const rules = useQuery({ queryKey: ["rules"], queryFn: api.rules });
   const subcategories = useMemo(() => categories.filter((c) => c.parent_id), [categories]);
+  const categoryNames = useMemo(
+    () => new Map(categories.map((c) => [c.id, c.name])),
+    [categories],
+  );
+  // Category sorts by name rather than id, which is what the row shows.
+  const columns = useMemo<ColumnSpec<Rule>[]>(
+    () => [
+      { key: "active", sort: (r) => r.is_active, text: (r) => (r.is_active ? "active" : "off") },
+      { key: "when", sort: (r) => r.match_type.replace("_", " ") },
+      { key: "pattern", sort: (r) => r.pattern },
+      { key: "category", sort: (r) => categoryNames.get(r.category_id) ?? "" },
+      { key: "source", sort: (r) => r.source },
+    ],
+    [categoryNames],
+  );
+  const table = useTable(rules.data ?? [], columns, { id: "rules" });
 
   const [matchType, setMatchType] = useState<MatchType>("contains");
   const [pattern, setPattern] = useState("");
@@ -135,19 +163,39 @@ export function RulesManager({ categories, onFlash }: Props) {
         <h2>Your rules</h2>
         {rules.data && rules.data.length === 0 && <p className="muted">No rules yet.</p>}
         {rules.data && rules.data.length > 0 && (
+          <>
+          <div className="spread">
+            <span />
+            <FilterToggle table={table} />
+          </div>
           <table>
             <thead>
               <tr>
-                <th>Active</th>
-                <th>When</th>
-                <th>Matches</th>
-                <th>Category</th>
-                <th>Source</th>
+                <SortHeader table={table} col="active">
+                  Active
+                </SortHeader>
+                <SortHeader table={table} col="when">
+                  When
+                </SortHeader>
+                <SortHeader table={table} col="pattern">
+                  Matches
+                </SortHeader>
+                <SortHeader table={table} col="category">
+                  Category
+                </SortHeader>
+                <SortHeader table={table} col="source">
+                  Source
+                </SortHeader>
                 <th className="actions"></th>
               </tr>
+              <FilterRow
+                table={table}
+                labels={RULE_LABELS}
+                columns={["active", "when", "pattern", "category", "source", null]}
+              />
             </thead>
             <tbody>
-              {rules.data.map((r) => (
+              {table.rows.map((r) => (
                 <tr key={r.id}>
                   <td>
                     <input
@@ -224,6 +272,7 @@ export function RulesManager({ categories, onFlash }: Props) {
               ))}
             </tbody>
           </table>
+          </>
         )}
       </div>
     </div>

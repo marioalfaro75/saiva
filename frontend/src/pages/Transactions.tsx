@@ -6,11 +6,13 @@ import { api } from "../api/client";
 import { usePeriod } from "../period/context";
 import { FilterRow, FilterToggle } from "../table/FilterRow";
 import { SortHeader } from "../table/SortHeader";
+import type { ColumnSpec } from "../table/sorting";
 import { useServerTable } from "../table/useServerTable";
+import { useTable } from "../table/useTable";
 import { CategoriseDialog } from "../components/CategoriseDialog";
 import { RulesManager } from "../components/RulesManager";
 import { formatCents, formatDate } from "../format";
-import type { Transaction } from "../api/types";
+import type { Transaction, TxnGroup } from "../api/types";
 
 const TXN_LABELS = {
   date: "Date",
@@ -20,6 +22,14 @@ const TXN_LABELS = {
   amount: "Amount",
 };
 const TXN_FILTER_KEYS = Object.keys(TXN_LABELS);
+
+const GROUP_LABELS = { label: "Merchant", count: "Count", total: "Total" };
+
+const GROUP_COLUMNS: ColumnSpec<TxnGroup>[] = [
+  { key: "label", sort: (g) => g.sample_description || g.key },
+  { key: "count", sort: (g) => g.count },
+  { key: "total", sort: (g) => g.total_cents, text: (g) => formatCents(g.total_cents) },
+];
 
 type Tab = "transactions" | "rules";
 type View = "list" | "groups";
@@ -71,6 +81,11 @@ export function Transactions() {
     queryKey: ["txn-groups", groupBy],
     queryFn: () => api.transactionGroups(groupBy, true),
     enabled: tab === "transactions" && view === "groups",
+  });
+  // Group review is fully loaded, so it sorts and filters in the browser.
+  const groupTable = useTable(groups.data?.groups ?? [], GROUP_COLUMNS, {
+    id: "txn-groups",
+    defaultSort: { key: "count", dir: "desc" },
   });
 
   const invalidate = () => {
@@ -422,17 +437,32 @@ export function Transactions() {
             </div>
           ) : (
             <div className="card">
+              <div className="spread">
+                <span />
+                <FilterToggle table={groupTable} />
+              </div>
               <table>
                 <thead>
                   <tr>
-                    <th>{groupBy === "merchant" ? "Merchant" : "Description"}</th>
-                    <th className="num">Count</th>
-                    <th className="num">Total</th>
+                    <SortHeader table={groupTable} col="label">
+                      {groupBy === "merchant" ? "Merchant" : "Description"}
+                    </SortHeader>
+                    <SortHeader table={groupTable} col="count" numeric>
+                      Count
+                    </SortHeader>
+                    <SortHeader table={groupTable} col="total" numeric>
+                      Total
+                    </SortHeader>
                     <th>Categorise all as</th>
                   </tr>
+                  <FilterRow
+                    table={groupTable}
+                    labels={GROUP_LABELS}
+                    columns={["label", "count", "total", null]}
+                  />
                 </thead>
                 <tbody>
-                  {groups.data?.groups.map((g) => (
+                  {groupTable.rows.map((g) => (
                     <tr key={g.key}>
                       <td>{g.sample_description || g.key}</td>
                       <td className="num">{g.count}</td>
