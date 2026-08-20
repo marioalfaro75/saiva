@@ -270,3 +270,132 @@ def test_gemini_list_models_filters_to_chat(monkeypatch: pytest.MonkeyPatch) -> 
     monkeypatch.setattr(advisor.httpx, "get", lambda url, **kw: FakeResp())
     ai = models.AiSettings(household_id="h", provider="gemini")
     assert advisor.list_models(ai) == [{"id": "gemini-1.5-pro", "label": "Gemini 1.5 Pro"}]
+
+
+# ------------------------------------------------------------------- output limits
+
+
+class _Resp:
+    status_code = 200
+
+    def __init__(self, payload: dict) -> None:
+        self._payload = payload
+
+    def json(self) -> dict:
+        return self._payload
+
+
+def _settings(provider: str, model: str | None = None):
+    from app import models
+
+    return models.AiSettings(household_id="h", provider=provider, model=model)
+
+
+def _capture(monkeypatch: pytest.MonkeyPatch, payload: dict) -> dict:
+    sent: dict[str, object] = {}
+
+    def fake_post(url, **kw):
+        sent["url"] = url
+        sent["json"] = kw.get("json")
+        return _Resp(payload)
+
+    monkeypatch.setattr(advisor.httpx, "post", fake_post)
+    return sent
+
+
+def test_anthropic_asks_for_enough_room(monkeypatch: pytest.MonkeyPatch) -> None:
+    """1024 tokens could not hold the answers this assistant is asked for."""
+    sent = _capture(
+        monkeypatch, {"content": [{"type": "text", "text": "hi"}], "stop_reason": "end_turn"}
+    )
+    advisor._call_provider(_settings("anthropic"), "SYS", [{"role": "user", "content": "q"}])
+    assert sent["json"]["max_tokens"] == advisor.MAX_OUTPUT_TOKENS > 1024
+
+
+def test_openai_asks_for_enough_room(monkeypatch: pytest.MonkeyPatch) -> None:
+    sent = _capture(
+        monkeypatch,
+        {"choices": [{"message": {"content": "hi"}, "finish_reason": "stop"}]},
+    )
+    advisor._call_provider(_settings("openai"), "SYS", [{"role": "user", "content": "q"}])
+    assert sent["json"]["max_tokens"] == advisor.MAX_OUTPUT_TOKENS
+
+
+def test_gemini_reserves_a_thinking_budget(monkeypatch: pytest.MonkeyPatch) -> None:
+    """2.5 models charge their reasoning to the same budget as the reply, so without
+    a reserved slice the visible answer can be a single sentence."""
+    sent = _capture(
+        monkeypatch,
+        {"candidates": [{"content": {"parts": [{"text": "hi"}]}, "finishReason": "STOP"}]},
+    )
+    advisor._call_provider(_settings("gemini"), "SYS", [{"role": "user", "content": "q"}])
+    config = sent["json"]["generationConfig"]
+    assert config["maxOutputTokens"] == advisor.MAX_OUTPUT_TOKENS
+    assert 0 < config["thinkingConfig"]["thinkingBudget"] < advisor.MAX_OUTPUT_TOKENS
+
+
+@pytest.mark.parametrize(
+    ("provider", "payload"),
+    [
+        ("anthropic", {"content": [{"type": "text", "text": "cut"}], "stop_reason": "max_tokens"}),
+        ("openai", {"choices": [{"message": {"content": "cut"}, "finish_reason": "length"}]}),
+        (
+            "gemini",
+            {
+                "candidates": [
+                    {"content": {"parts": [{"text": "cut"}]}, "finishReason": "MAX_TOKENS"}
+                ]
+            },
+        ),
+    ],
+)
+def test_truncated_answers_say_so(
+    provider: str, payload: dict, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A cut-off answer used to be indistinguishable from a finished one."""
+    _capture(monkeypatch, payload)
+    out = advisor._call_provider(_settings(provider), "SYS", [{"role": "user", "content": "q"}])
+    assert out.startswith("cut")
+    assert "cut off" in out
+
+
+@pytest.mark.parametrize(
+    ("provider", "payload"),
+    [
+        ("anthropic", {"content": [{"type": "text", "text": "done"}], "stop_reason": "end_turn"}),
+        ("openai", {"choices": [{"message": {"content": "done"}, "finish_reason": "stop"}]}),
+        (
+            "gemini",
+            {"candidates": [{"content": {"parts": [{"text": "done"}]}, "finishReason": "STOP"}]},
+        ),
+    ],
+)
+def test_complete_answers_are_left_alone(
+    provider: str, payload: dict, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _capture(monkeypatch, payload)
+    assert advisor._call_provider(
+        _settings(provider), "SYS", [{"role": "user", "content": "q"}]
+    ) == "done"
+
+
+def test_gemini_spending_its_whole_budget_thinking_is_explained(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """No parts at all used to raise a KeyError and surface as a 500."""
+    _capture(monkeypatch, {"candidates": [{"content": {}, "finishReason": "MAX_TOKENS"}]})
+    with pytest.raises(advisor.ProviderError, match="budget"):
+        advisor._call_provider(_settings("gemini"), "SYS", [{"role": "user", "content": "q"}])
+
+
+def test_anthropic_ignores_non_text_blocks(monkeypatch: pytest.MonkeyPatch) -> None:
+    _capture(
+        monkeypatch,
+        {
+            "content": [{"type": "thinking", "thinking": "…"}, {"type": "text", "text": "answer"}],
+            "stop_reason": "end_turn",
+        },
+    )
+    assert advisor._call_provider(
+        _settings("anthropic"), "SYS", [{"role": "user", "content": "q"}]
+    ) == "answer"

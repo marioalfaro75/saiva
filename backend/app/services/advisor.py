@@ -116,6 +116,31 @@ def build_context(
     return "\n".join(lines)
 
 
+# Room for a full answer. The old 1024 was too small for the kind of question this
+# is for — "list my uncategorised transactions and say what they look like" needs
+# far more than that — and answers were being cut off mid-sentence.
+MAX_OUTPUT_TOKENS = 4096
+# Gemini 2.5 models reason before answering and charge that thinking to the *same*
+# budget as the visible reply, so a large maxOutputTokens can still yield one
+# sentence. Reserving a slice for thinking leaves the rest for the answer.
+GEMINI_THINKING_BUDGET = 1024
+
+TRUNCATED_NOTE = (
+    "\n\n_[This answer was cut off because it reached the length limit. "
+    "Ask a narrower question, or ask me to continue.]_"
+)
+
+
+def _note_if_truncated(text: str, stop_reason: str | None) -> str:
+    """Say so when the model ran out of room.
+
+    Every provider reports this differently and none of it used to be read, so a
+    half-finished answer was indistinguishable from a complete one.
+    """
+    truncated = (stop_reason or "").lower() in {"max_tokens", "length", "maxtokens"}
+    return f"{text}{TRUNCATED_NOTE}" if truncated else text
+
+
 def _call_provider(ai: models.AiSettings, system: str, messages: list[dict[str, str]]) -> str:
     key = crypto.decrypt(ai.api_key_encrypted) if ai.api_key_encrypted else None
     if ai.provider == "anthropic":
@@ -130,13 +155,17 @@ def _call_provider(ai: models.AiSettings, system: str, messages: list[dict[str, 
             },
             json={
                 "model": ai.model or "claude-haiku-4-5-20251001",
-                "max_tokens": 1024,
+                "max_tokens": MAX_OUTPUT_TOKENS,
                 "system": system,
                 "messages": messages,
             },
         )
         _raise_for_provider(resp)
-        return str(resp.json()["content"][0]["text"])
+        data = resp.json()
+        blocks = [b for b in data.get("content", []) if b.get("type") == "text"]
+        if not blocks:
+            raise ProviderError("The model returned no text (it may have hit the length limit)")
+        return _note_if_truncated(str(blocks[0]["text"]), data.get("stop_reason"))
     if ai.provider == "openai":  # OpenAI-compatible (OpenAI, Ollama, gateways)
         base = (ai.base_url or "https://api.openai.com/v1").rstrip("/")
         headers = {"content-type": "application/json"}
@@ -149,10 +178,14 @@ def _call_provider(ai: models.AiSettings, system: str, messages: list[dict[str, 
             json={
                 "model": ai.model or "gpt-4o-mini",
                 "messages": [{"role": "system", "content": system}, *messages],
+                "max_tokens": MAX_OUTPUT_TOKENS,
             },
         )
         _raise_for_provider(resp)
-        return str(resp.json()["choices"][0]["message"]["content"])
+        choice = resp.json()["choices"][0]
+        return _note_if_truncated(
+            str(choice["message"]["content"] or ""), choice.get("finish_reason")
+        )
     if ai.provider == "gemini":  # Google Generative Language API
         base = (ai.base_url or "https://generativelanguage.googleapis.com").rstrip("/")
         model = ai.model or "gemini-2.5-flash"
@@ -170,14 +203,27 @@ def _call_provider(ai: models.AiSettings, system: str, messages: list[dict[str, 
             json={
                 "system_instruction": {"parts": [{"text": system}]},
                 "contents": contents,
-                "generationConfig": {"maxOutputTokens": 1024},
+                "generationConfig": {
+                    "maxOutputTokens": MAX_OUTPUT_TOKENS,
+                    "thinkingConfig": {"thinkingBudget": GEMINI_THINKING_BUDGET},
+                },
             },
         )
         _raise_for_provider(resp)
         candidates = resp.json().get("candidates") or []
         if not candidates:
             raise ProviderError("Gemini returned no answer (the prompt may have been blocked)")
-        return str(candidates[0]["content"]["parts"][0]["text"])
+        first = candidates[0]
+        # A 2.5 model that spends its whole budget thinking returns a candidate with
+        # no parts at all; that used to raise a KeyError and surface as a 500.
+        parts = [p for p in (first.get("content") or {}).get("parts", []) if p.get("text")]
+        if not parts:
+            raise ProviderError(
+                "The model used its whole response budget before answering "
+                f"(finish reason: {first.get('finishReason') or 'unknown'}). Try a "
+                "narrower question."
+            )
+        return _note_if_truncated(str(parts[0]["text"]), first.get("finishReason"))
     raise NotConfiguredError("AI is not configured")
 
 
