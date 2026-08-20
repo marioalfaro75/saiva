@@ -6,6 +6,9 @@ No tool-calling yet — the model answers from the snapshot. BYO key, encrypted.
 from __future__ import annotations
 
 import datetime as dt
+import json
+from collections.abc import Callable
+from typing import Any
 
 import httpx
 from sqlalchemy import func, select
@@ -13,7 +16,7 @@ from sqlalchemy.orm import Session
 
 from .. import models
 from ..constants import UNCATEGORISED
-from . import crypto, periods
+from . import advisor_tools, crypto, periods
 from . import forecast as forecast_service
 from . import recurring as recurring_service
 from .budgets import list_budgets
@@ -76,7 +79,8 @@ def settings_for(db: Session, household_id: str) -> models.AiSettings:
 
 
 def _m(cents: int) -> str:
-    return f"${cents / 100:,.2f}"
+    """Formatted the way the app shows it: -$1,200.00, not $-1,200.00."""
+    return f"-${abs(cents) / 100:,.2f}" if cents < 0 else f"${cents / 100:,.2f}"
 
 
 # The snapshot is meant to fit in roughly a page: enough to answer the common
@@ -334,6 +338,12 @@ TRUNCATED_NOTE = (
 )
 
 
+def _looks_like_unsupported_tools(exc: ProviderError) -> bool:
+    """Whether a provider rejected the request because it cannot do tool calling."""
+    text = str(exc).lower()
+    return "tool" in text or "function" in text
+
+
 def _note_if_truncated(text: str, stop_reason: str | None) -> str:
     """Say so when the model ran out of room.
 
@@ -430,6 +440,236 @@ def _call_provider(ai: models.AiSettings, system: str, messages: list[dict[str, 
     raise NotConfiguredError("AI is not configured")
 
 
+# --------------------------------------------------------------- tool-calling loop
+#
+# Each provider expresses tool use differently enough that a shared abstraction would
+# obscure more than it saves, so each keeps its own loop over its own message format.
+# All three share the round cap, the executor and the truncation handling.
+
+
+def _anthropic_tools(tools: list[advisor_tools.Tool]) -> list[dict[str, object]]:
+    return [
+        {"name": t.name, "description": t.description, "input_schema": t.parameters}
+        for t in tools
+    ]
+
+
+def _converse_anthropic(
+    ai: models.AiSettings,
+    system: str,
+    messages: list[dict[str, Any]],
+    tools: list[advisor_tools.Tool],
+    execute: Callable[[str, dict[str, Any]], str],
+) -> str:
+    key = crypto.decrypt(ai.api_key_encrypted) if ai.api_key_encrypted else None
+    base = (ai.base_url or "https://api.anthropic.com").rstrip("/")
+    convo: list[dict[str, Any]] = list(messages)
+    for _ in range(advisor_tools.MAX_TOOL_ROUNDS + 1):
+        resp = httpx.post(
+            f"{base}/v1/messages",
+            timeout=90,
+            headers={
+                "x-api-key": key or "",
+                "anthropic-version": "2023-06-01",
+                "content-type": "application/json",
+            },
+            json={
+                "model": ai.model or "claude-haiku-4-5-20251001",
+                "max_tokens": MAX_OUTPUT_TOKENS,
+                "system": system,
+                "messages": convo,
+                "tools": _anthropic_tools(tools),
+            },
+        )
+        _raise_for_provider(resp)
+        data = resp.json()
+        content = data.get("content", [])
+        calls = [b for b in content if b.get("type") == "tool_use"]
+        if not calls:
+            text = next((b["text"] for b in content if b.get("type") == "text"), "")
+            return _note_if_truncated(str(text), data.get("stop_reason"))
+        convo.append({"role": "assistant", "content": content})
+        convo.append(
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": c["id"],
+                        "content": execute(str(c["name"]), dict(c.get("input") or {})),
+                    }
+                    for c in calls
+                ],
+            }
+        )
+    return _ROUND_LIMIT_NOTE
+
+
+def _converse_openai(
+    ai: models.AiSettings,
+    system: str,
+    messages: list[dict[str, Any]],
+    tools: list[advisor_tools.Tool],
+    execute: Callable[[str, dict[str, Any]], str],
+) -> str:
+    key = crypto.decrypt(ai.api_key_encrypted) if ai.api_key_encrypted else None
+    base = (ai.base_url or "https://api.openai.com/v1").rstrip("/")
+    headers = {"content-type": "application/json"}
+    if key:
+        headers["Authorization"] = f"Bearer {key}"
+    convo: list[dict[str, Any]] = [{"role": "system", "content": system}, *messages]
+    schema = [
+        {
+            "type": "function",
+            "function": {
+                "name": t.name,
+                "description": t.description,
+                "parameters": t.parameters,
+            },
+        }
+        for t in tools
+    ]
+    for _ in range(advisor_tools.MAX_TOOL_ROUNDS + 1):
+        resp = httpx.post(
+            f"{base}/chat/completions",
+            timeout=90,
+            headers=headers,
+            json={
+                "model": ai.model or "gpt-4o-mini",
+                "messages": convo,
+                "max_tokens": MAX_OUTPUT_TOKENS,
+                "tools": schema,
+            },
+        )
+        _raise_for_provider(resp)
+        choice = resp.json()["choices"][0]
+        message = choice.get("message") or {}
+        calls = message.get("tool_calls") or []
+        if not calls:
+            return _note_if_truncated(
+                str(message.get("content") or ""), choice.get("finish_reason")
+            )
+        convo.append(message)
+        for call in calls:
+            fn = call.get("function") or {}
+            try:
+                args = json.loads(fn.get("arguments") or "{}")
+            except json.JSONDecodeError:
+                args = {}
+            convo.append(
+                {
+                    "role": "tool",
+                    "tool_call_id": call.get("id"),
+                    "content": execute(str(fn.get("name")), args),
+                }
+            )
+    return _ROUND_LIMIT_NOTE
+
+
+def _converse_gemini(
+    ai: models.AiSettings,
+    system: str,
+    messages: list[dict[str, Any]],
+    tools: list[advisor_tools.Tool],
+    execute: Callable[[str, dict[str, Any]], str],
+) -> str:
+    key = crypto.decrypt(ai.api_key_encrypted) if ai.api_key_encrypted else None
+    base = (ai.base_url or "https://generativelanguage.googleapis.com").rstrip("/")
+    model = ai.model or "gemini-2.5-flash"
+    contents: list[dict[str, Any]] = [
+        {
+            "role": "model" if m["role"] == "assistant" else "user",
+            "parts": [{"text": m["content"]}],
+        }
+        for m in messages
+    ]
+    declarations = [
+        {"name": t.name, "description": t.description, "parameters": t.parameters}
+        for t in tools
+    ]
+    for _ in range(advisor_tools.MAX_TOOL_ROUNDS + 1):
+        resp = httpx.post(
+            f"{base}/v1beta/models/{model}:generateContent",
+            timeout=90,
+            headers={"x-goog-api-key": key or "", "content-type": "application/json"},
+            json={
+                "system_instruction": {"parts": [{"text": system}]},
+                "contents": contents,
+                "tools": [{"functionDeclarations": declarations}],
+                "generationConfig": {
+                    "maxOutputTokens": MAX_OUTPUT_TOKENS,
+                    "thinkingConfig": {"thinkingBudget": GEMINI_THINKING_BUDGET},
+                },
+            },
+        )
+        _raise_for_provider(resp)
+        candidates = resp.json().get("candidates") or []
+        if not candidates:
+            raise ProviderError("Gemini returned no answer (the prompt may have been blocked)")
+        first = candidates[0]
+        parts = (first.get("content") or {}).get("parts") or []
+        calls = [p["functionCall"] for p in parts if p.get("functionCall")]
+        if not calls:
+            text = next((p["text"] for p in parts if p.get("text")), None)
+            if text is None:
+                raise ProviderError(
+                    "The model used its whole response budget before answering "
+                    f"(finish reason: {first.get('finishReason') or 'unknown'}). Try a "
+                    "narrower question."
+                )
+            return _note_if_truncated(str(text), first.get("finishReason"))
+        contents.append({"role": "model", "parts": parts})
+        contents.append(
+            {
+                "role": "user",
+                "parts": [
+                    {
+                        "functionResponse": {
+                            "name": c.get("name"),
+                            "response": {
+                                "result": execute(
+                                    str(c.get("name")), dict(c.get("args") or {})
+                                )
+                            },
+                        }
+                    }
+                    for c in calls
+                ],
+            }
+        )
+    return _ROUND_LIMIT_NOTE
+
+
+_ROUND_LIMIT_NOTE = (
+    "I looked several things up but could not settle on an answer. Please try asking "
+    "something more specific."
+)
+
+_CONVERSATIONS = {
+    "anthropic": _converse_anthropic,
+    "openai": _converse_openai,
+    "gemini": _converse_gemini,
+}
+
+
+def _respond(
+    ai: models.AiSettings,
+    system: str,
+    messages: list[dict[str, Any]],
+    tools: list[advisor_tools.Tool],
+    execute: Callable[[str, dict[str, Any]], str],
+) -> str:
+    """Answer with tools available, falling back to the snapshot alone if the
+    endpoint cannot do tool calling — common with local models, and a degraded
+    answer beats an error."""
+    try:
+        return _CONVERSATIONS[ai.provider](ai, system, messages, tools, execute)
+    except ProviderError as exc:
+        if not _looks_like_unsupported_tools(exc):
+            raise
+        return _call_provider(ai, system, messages)
+
+
 def chat(
     db: Session,
     household: models.Household,
@@ -441,9 +681,20 @@ def chat(
     ai = settings_for(db, household.id)
     if ai.provider not in ("anthropic", "openai", "gemini"):
         raise NotConfiguredError("AI is not configured")
+    if window is None:
+        fy_start, _ = fy_bounds(household, dt.date.today())
+        window = periods.resolve(household, f"fy:{fy_start.year}")
     context = build_context(db, household, ai.privacy_mode, window)
     system = f"{SYSTEM_PROMPT}\n\nData you may use:\n{context}"
-    return _call_provider(ai, system, messages)
+
+    tools = advisor_tools.tools_for(ai.privacy_mode)
+    calls: list[str] = []
+
+    def execute(name: str, args: dict[str, Any]) -> str:
+        calls.append(name)
+        return advisor_tools.run(db, household, ai.privacy_mode, name, args, window)
+
+    return _respond(ai, system, messages, tools, execute)
 
 
 # Substrings that mark an OpenAI model as not chat-capable (kept out of the picker).

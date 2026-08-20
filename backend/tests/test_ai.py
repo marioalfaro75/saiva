@@ -37,12 +37,13 @@ def test_chat_requires_configuration(auth_client: TestClient) -> None:
 def _stub_capture(monkeypatch: pytest.MonkeyPatch) -> dict[str, object]:
     captured: dict[str, object] = {}
 
-    def fake_call(ai, system, messages):
+    def fake_respond(ai, system, messages, tools, execute):
         captured["system"] = system
         captured["messages"] = messages
+        captured["tools"] = [t.name for t in tools]
         return "Here is some general guidance."
 
-    monkeypatch.setattr(advisor, "_call_provider", fake_call)
+    monkeypatch.setattr(advisor, "_respond", fake_respond)
     return captured
 
 
@@ -73,10 +74,10 @@ def test_provider_error_surfaces_message(
 ) -> None:
     auth_client.patch("/api/ai/settings", json={"provider": "anthropic", "api_key": "k"})
 
-    def boom(ai, system, messages):
+    def boom(ai, system, messages, tools, execute):
         raise advisor.ProviderError("400 — model: claude-x not found")
 
-    monkeypatch.setattr(advisor, "_call_provider", boom)
+    monkeypatch.setattr(advisor, "_respond", boom)
     resp = auth_client.post("/api/ai/chat", json={"messages": [{"role": "user", "content": "hi"}]})
     assert resp.status_code == 502
     assert "model: claude-x not found" in resp.json()["detail"]

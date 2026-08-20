@@ -5,6 +5,31 @@ All notable changes to Saiva are documented here. The project follows
 
 ## [Unreleased]
 
+### Added
+- **The AI advisor can now look things up.** It has read-only access to search your
+  transactions, total spending by category or merchant, list uncategorised items and
+  compare two periods — so questions like "are there any transactions mentioning
+  Helen" or "who do I spend the most with" are answered from your data rather than
+  declined. Which lookups it may use follows your **privacy mode**: the ones that
+  reveal individual transactions are simply not offered in *Aggregates only*.
+- **A far richer picture for the advisor.** It now sees top merchants, an
+  uncategorised summary, month‑by‑month figures, a comparison with the previous
+  period, budgets needing attention, goals, net worth, and a note of what data you
+  hold overall — instead of a household line and ten category totals.
+- The advisor **follows the period picker**, so asking while viewing a past financial
+  year answers for that year.
+
+### Fixed
+- **Answers no longer stop mid‑sentence.** The reply limit was too small for the
+  questions this is for, and on Gemini 2.5 models the limit was being spent on the
+  model's own reasoning before it wrote anything. The limit is larger, reasoning has
+  its own budget, and a reply that does hit the limit now says so rather than
+  trailing off.
+- **The advisor explains its own limits.** When a question needs data your privacy
+  mode withholds, it now says which setting is responsible and where to change it,
+  instead of only "the provided data does not include…".
+- Amounts in advisor answers read `-$1,200.00` rather than `$-1,200.00`.
+
 
 ## [0.10.1] — 2026-08-20
 
