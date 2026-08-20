@@ -20,8 +20,33 @@ function lastCall(fn: ReturnType<typeof mockFetch>): [string, RequestInit] {
   return fn.mock.calls[0] as unknown as [string, RequestInit];
 }
 
+
+function mockResponses(...responses: { body: unknown; status?: number }[]) {
+  const fn = vi.fn((..._args: unknown[]) => {
+    const next = responses.shift() ?? { body: {}, status: 200 };
+    const status = next.status ?? 200;
+    return Promise.resolve({
+      ok: status >= 200 && status < 300,
+      status,
+      statusText: "ERR",
+      headers: { get: () => "application/json" },
+      json: () => Promise.resolve(next.body),
+      text: () => Promise.resolve(JSON.stringify(next.body)),
+      clone: () => ({ json: () => Promise.resolve(next.body) }),
+    });
+  });
+  vi.stubGlobal("fetch", fn);
+  return fn;
+}
+
+function headerOf(fn: ReturnType<typeof mockResponses>, call: number): string | null {
+  const opts = fn.mock.calls[call][1] as RequestInit;
+  return new Headers(opts.headers).get("X-CSRF-Token");
+}
+
 afterEach(() => {
   vi.unstubAllGlobals();
+  document.cookie = "saiva_csrf=; max-age=0; path=/";
 });
 
 describe("api client wiring", () => {
@@ -199,5 +224,60 @@ describe("api client wiring", () => {
     expect(url).toBe("/api/ai/chat");
     expect(opts.method).toBe("POST");
     expect(JSON.parse(opts.body as string)).toEqual({ messages: [{ role: "user", content: "hi" }] });
+  });
+});
+
+describe("CSRF handling", () => {
+  it("reads the current cookie for each write", async () => {
+    document.cookie = "saiva_csrf=cookie-token; path=/";
+    const fn = mockResponses({ body: { id: "a" }, status: 201 });
+    await api.createAccount({ name: "A", type: "everyday" });
+    expect(headerOf(fn, 0)).toBe("cookie-token");
+
+    // The cookie changes underneath us; the next write must pick that up.
+    document.cookie = "saiva_csrf=rotated-token; path=/";
+    const again = mockResponses({ body: { id: "b" }, status: 201 });
+    await api.createAccount({ name: "B", type: "everyday" });
+    expect(headerOf(again, 0)).toBe("rotated-token");
+  });
+
+  it("does not send a CSRF header on reads", async () => {
+    document.cookie = "saiva_csrf=cookie-token; path=/";
+    const fn = mockResponses({ body: [] });
+    await api.accounts();
+    expect(headerOf(fn, 0)).toBeNull();
+  });
+
+  it("refetches the token and retries once when a write is rejected", async () => {
+    const fn = mockResponses(
+      { body: { detail: "CSRF token missing or invalid" }, status: 403 },
+      { body: { csrf_token: "fresh" } },
+      { body: { id: "a" }, status: 201 },
+    );
+    await api.createAccount({ name: "A", type: "everyday" });
+    expect(fn.mock.calls.map((c) => c[0])).toEqual([
+      "/api/accounts",
+      "/api/auth/csrf",
+      "/api/accounts",
+    ]);
+    expect(headerOf(fn, 2)).toBe("fresh");
+  });
+
+  it("gives up after one retry rather than looping", async () => {
+    const fn = mockResponses(
+      { body: { detail: "CSRF token missing or invalid" }, status: 403 },
+      { body: { csrf_token: "fresh" } },
+      { body: { detail: "CSRF token missing or invalid" }, status: 403 },
+    );
+    await expect(api.createAccount({ name: "A", type: "everyday" })).rejects.toThrow(/CSRF/);
+    expect(fn.mock.calls).toHaveLength(3);
+  });
+
+  it("does not retry a 403 that is not about CSRF", async () => {
+    const fn = mockResponses({ body: { detail: "Insufficient permissions" }, status: 403 });
+    await expect(api.createAccount({ name: "A", type: "everyday" })).rejects.toThrow(
+      /Insufficient/,
+    );
+    expect(fn.mock.calls).toHaveLength(1);
   });
 });

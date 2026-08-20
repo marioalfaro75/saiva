@@ -6,6 +6,21 @@ All notable changes to Saiva are documented here. The project follows
 ## [Unreleased]
 
 
+## [0.10.1] — 2026-08-20
+
+Patch release: fixes a security-token error that blocked saving once the app
+had been opened in more than one tab.
+
+### Fixed
+- **"CSRF token missing or invalid" when the app is open in more than one tab.**
+  Loading Saiva in a second tab reissued the security token, leaving the first tab
+  sending one that no longer matched — so saving anything there failed until it was
+  reloaded, while reading kept working. The token is no longer reissued when you
+  already have one, each request now reads the current one rather than a copy kept
+  from startup, and a request rejected for this reason fetches a fresh token and
+  retries once.
+
+
 ## [0.10.0] — 2026-08-17
 
 Every table in the app can now be sorted by any column and filtered column by
@@ -172,6 +187,7 @@ personal financial advice.
 - On the first GHCR publish, set the `saiva-api` / `saiva-web` packages to public
   (or `docker login ghcr.io` on the host) so image pulls are authorised.
 
+[0.10.1]: https://github.com/marioalfaro75/saiva/compare/v0.10.0...v0.10.1
 [0.10.0]: https://github.com/marioalfaro75/saiva/compare/v0.9.0...v0.10.0
 [0.9.0]: https://github.com/marioalfaro75/saiva/compare/v0.8.4...v0.9.0
 [0.8.4]: https://github.com/marioalfaro75/saiva/compare/v0.8.3...v0.8.4

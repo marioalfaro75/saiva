@@ -55,8 +55,14 @@ def auth_status(db: Session = Depends(get_db)) -> dict[str, bool]:
 
 
 @router.get("/csrf")
-def issue_csrf(response: Response) -> dict[str, str]:
-    token = security.generate_csrf_token()
+def issue_csrf(request: Request, response: Response) -> dict[str, str]:
+    """Hand back the caller's CSRF token, minting one only if they have none.
+
+    Rotating it on every call breaks any other tab that is already open: that tab
+    keeps sending the token it was given, which no longer matches the cookie, and
+    every write it attempts fails until it is reloaded.
+    """
+    token = request.cookies.get(security.CSRF_COOKIE) or security.generate_csrf_token()
     _set_csrf_cookie(response, token)
     return {"csrf_token": token}
 
