@@ -6,25 +6,39 @@ No tool-calling yet — the model answers from the snapshot. BYO key, encrypted.
 from __future__ import annotations
 
 import datetime as dt
+import json
+from collections.abc import Callable
+from typing import Any
 
 import httpx
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from .. import models
-from . import crypto
+from ..constants import UNCATEGORISED
+from . import advisor_tools, crypto, periods
 from . import forecast as forecast_service
 from . import recurring as recurring_service
-from .dashboard import _spendable_leaves, category_breakdown, summary
-from .periods import fy_bounds, fy_label
+from .budgets import list_budgets
+from .dashboard import _spendable_leaves, category_breakdown, summary, trends
+from .goals import list_goals
+from .networth import get_net_worth
+from .periods import fy_bounds
 
 PROVIDERS = {"none", "anthropic", "openai", "gemini"}
 PRIVACY_MODES = {"local_only", "aggregates", "full"}
 
 SYSTEM_PROMPT = (
     "You are Saiva's financial information assistant for an Australian household. "
-    "Answer using only the data provided below. Be concise and practical. "
-    "Give general information, not personal financial advice, and never recommend "
-    "specific financial products. If the data doesn't cover the question, say so."
+    "Answer using only the data provided below, and quote the figures from it rather "
+    "than estimating. Be concise and practical. Give general information, not "
+    "personal financial advice, and never recommend specific financial products.\n"
+    "The data covers one period, stated below; if asked about another, say which "
+    "period you are looking at and that they can change it with the period selector "
+    "at the top of the app.\n"
+    "If a question needs something you were not given, say plainly what is missing "
+    "and — where the WHAT YOU CAN SEE note explains a privacy setting is the reason "
+    "— tell them which setting to change. Never guess at values you cannot see."
 )
 
 
@@ -65,55 +79,279 @@ def settings_for(db: Session, household_id: str) -> models.AiSettings:
 
 
 def _m(cents: int) -> str:
-    return f"${cents / 100:,.2f}"
+    """Formatted the way the app shows it: -$1,200.00, not $-1,200.00."""
+    return f"-${abs(cents) / 100:,.2f}" if cents < 0 else f"${cents / 100:,.2f}"
+
+
+# The snapshot is meant to fit in roughly a page: enough to answer the common
+# questions in one round trip, with detail fetched on demand rather than always sent.
+MAX_CATEGORIES = 15
+MAX_MERCHANTS = 10
+MAX_UNCATEGORISED = 15
+MAX_TRANSACTIONS = 20
+
+# Told to the model so it can explain its own limits accurately. Without this it
+# says only "the provided data does not include…", which leaves the user with no
+# idea that a setting caused it or that they can change it.
+CAPABILITIES = {
+    "aggregates": (
+        "You can see totals and category/merchant summaries, but NOT individual "
+        "transactions or their descriptions — the household chose the 'Aggregates "
+        "only' privacy mode. If a question needs transaction detail, say so and tell "
+        "them they can switch to 'Full detail' in Settings > AI advisor."
+    ),
+    "full": "You can see summaries and individual transactions for this period.",
+    "local_only": "You can see summaries and individual transactions for this period.",
+}
+
+
+def _coverage(db: Session, household_id: str) -> str:
+    """What data exists overall, so the model knows the shape of the history even
+    when the question is about one period."""
+    first, last, count = db.execute(
+        select(
+            func.min(models.Transaction.txn_date),
+            func.max(models.Transaction.txn_date),
+            func.count(models.Transaction.id),
+        ).where(models.Transaction.household_id == household_id)
+    ).one()
+    if first is None:
+        return "No transactions have been imported yet."
+    accounts = db.execute(
+        select(func.count(models.Account.id)).where(
+            models.Account.household_id == household_id
+        )
+    ).scalar_one()
+    return (
+        f"Records span {first:%d %b %Y} to {last:%d %b %Y} — {count:,} transactions "
+        f"across {accounts} account(s)."
+    )
+
+
+def _merchant_totals(txns: list[models.Transaction]) -> list[tuple[str, int, int]]:
+    """Spend per merchant, biggest first."""
+    totals: dict[str, int] = {}
+    counts: dict[str, int] = {}
+    for t in txns:
+        if t.amount_cents >= 0:
+            continue
+        name = t.merchant or t.raw_description or "(no description)"
+        totals[name] = totals.get(name, 0) + -t.amount_cents
+        counts[name] = counts.get(name, 0) + 1
+    return sorted(((n, v, counts[n]) for n, v in totals.items()), key=lambda r: -r[1])
+
+
+def _previous_window(start: dt.date, end: dt.date) -> tuple[dt.date, dt.date]:
+    span = end - start
+    prev_end = start - dt.timedelta(days=1)
+    return prev_end - span, prev_end
+
+
+def _is_uncategorised(t: models.Transaction, names: dict[str, str]) -> bool:
+    # A row can be uncategorised either by having no category at all or by sitting in
+    # the seeded "Uncategorised" bucket; both mean the same thing to the user.
+    return t.category_id is None or names.get(t.category_id) == UNCATEGORISED
 
 
 def build_context(
-    db: Session, household: models.Household, privacy_mode: str, today: dt.date | None = None
+    db: Session,
+    household: models.Household,
+    privacy_mode: str,
+    window: periods.ResolvedPeriod | None = None,
 ) -> str:
-    today = today or dt.date.today()
-    start, end = fy_bounds(household, today)
+    """A snapshot of the household's finances for the selected period.
+
+    Follows the app's period picker rather than always describing the financial
+    year, so asking about a past year answers for that year.
+    """
+    today = dt.date.today()
+    if window is None:
+        fy_start, fy_end = fy_bounds(household, today)
+        window = periods.resolve(household, f"fy:{fy_start.year}", today=today)
+    start, end, label = window.start, window.end, window.label
+
+    names = {
+        c.id: c.name
+        for c in db.execute(
+            select(models.Category).where(models.Category.household_id == household.id)
+        )
+        .scalars()
+        .all()
+    }
+    txns = _spendable_leaves(db, household.id, start, end)
     s = summary(db, household, "custom", start, end)
     cb = category_breakdown(db, household, "custom", start, end)
-    series = recurring_service.detect(db, household.id, today=today)
-    committed = sum(x.monthly_amount_cents for x in series if x.active and x.direction == "expense")
-    income = sum(x.monthly_amount_cents for x in series if x.active and x.direction == "income")
-    fc = forecast_service.forecast(db, household.id, days=60, today=today)
 
+    when = (
+        "This period is in progress."
+        if window.is_current
+        else ("This period has ended." if end < today else "This period has not started.")
+    )
     lines = [
-        f"Household: {household.name} — {household.adults} adults, "
+        f"PERIOD: {label} ({start:%d %b %Y} to {end:%d %b %Y}). Today is {today:%d %b %Y}. {when}",
+        f"DATA HELD: {_coverage(db, household.id)}",
+        f"WHAT YOU CAN SEE: {CAPABILITIES.get(privacy_mode, CAPABILITIES['aggregates'])}",
+        "",
+        f"HOUSEHOLD: {household.name} — {household.adults} adults, "
         f"{household.children} children, {household.state or 'AU'}.",
-        f"{fy_label(start, end)} ({start:%d %b %Y}–{end:%d %b %Y}): income {_m(s.income_cents)}, "
-        f"expenses {_m(s.expense_cents)}, net {_m(s.net_cents)}, "
-        f"savings rate {s.savings_rate * 100:.0f}%.",
-        f"Top spending categories in {fy_label(start, end)}:",
+        f"TOTALS FOR {label}: income {_m(s.income_cents)}, expenses {_m(s.expense_cents)}, "
+        f"net {_m(s.net_cents)}, savings rate {s.savings_rate * 100:.0f}%.",
     ]
+
+    prev_start, prev_end = _previous_window(start, end)
+    prev = summary(db, household, "custom", prev_start, prev_end)
+    if prev.expense_cents:
+        change = (s.expense_cents - prev.expense_cents) / prev.expense_cents * 100
+        lines.append(
+            f"VERSUS THE PREVIOUS {(end - start).days + 1} DAYS "
+            f"({prev_start:%d %b %Y}–{prev_end:%d %b %Y}): expenses {_m(prev.expense_cents)} "
+            f"-> {_m(s.expense_cents)} ({change:+.0f}%)."
+        )
+
+    lines.append(f"\nSPENDING BY CATEGORY IN {label}:")
     lines += [
         f"- {it.category_name}: {_m(it.amount_cents)} ({it.pct * 100:.0f}%)"
-        for it in cb.items[:10]
+        for it in cb.items[:MAX_CATEGORIES]
     ]
+    rest = cb.items[MAX_CATEGORIES:]
+    if rest:
+        lines.append(
+            f"- plus {len(rest)} smaller categories totalling "
+            f"{_m(sum(it.amount_cents for it in rest))}"
+        )
+
+    merchants = _merchant_totals(txns)
+    if merchants:
+        if privacy_mode in ("full", "local_only"):
+            lines.append(f"\nTOP MERCHANTS IN {label}:")
+            lines += [
+                f"- {name}: {_m(total)} across {count} transaction(s)"
+                for name, total, count in merchants[:MAX_MERCHANTS]
+            ]
+        else:
+            # A merchant name is the transaction description, tidied up — naming them
+            # would leak exactly what "aggregates only" promises to withhold.
+            lines.append(
+                f"\nMERCHANTS IN {label}: {len(merchants)} distinct merchants. Their "
+                "names are not available in this privacy mode."
+            )
+
+    uncat = [t for t in txns if _is_uncategorised(t, names) and t.amount_cents < 0]
+    if uncat:
+        total = sum(-t.amount_cents for t in uncat)
+        lines.append(
+            f"\nUNCATEGORISED IN {label}: {len(uncat)} transactions totalling {_m(total)}."
+        )
+        if privacy_mode in ("full", "local_only"):
+            # Descriptions are raw transaction data, so only in the permissive modes.
+            lines.append("Largest of them, with their descriptions:")
+            biggest = sorted(uncat, key=lambda t: t.amount_cents)[:MAX_UNCATEGORISED]
+            lines += [
+                f"- {t.txn_date:%d %b %Y} {t.raw_description or t.merchant}: "
+                f"{_m(t.amount_cents)}"
+                for t in biggest
+            ]
+        else:
+            lines.append(
+                "Their descriptions are not available in this privacy mode."
+            )
+
+    points = trends(db, household, "custom", start, end).points
+    if len(points) > 1:
+        lines.append(f"\nMONTH BY MONTH IN {label}:")
+        lines += [
+            f"- {p.period_start:%b %Y}: income {_m(p.income_cents)}, "
+            f"expenses {_m(p.expense_cents)}"
+            for p in points
+        ]
+
+    budgets = [b for b in list_budgets(db, household, window.as_at) if b.status != "ok"]
+    if budgets:
+        lines.append("\nBUDGETS NEEDING ATTENTION:")
+        lines += [
+            f"- {b.category_name}: {_m(b.actual_cents)} of {_m(b.limit_cents)} "
+            f"({b.pct_used * 100:.0f}%, {b.status}) for {b.period_label}"
+            for b in budgets
+        ]
+
+    goals = list_goals(db, household, window.as_at)
+    if goals:
+        lines.append("\nSAVINGS GOALS:")
+        lines += [
+            f"- {g.name}: {_m(g.current_cents)} of {_m(g.target_cents)} "
+            f"({g.pct_complete * 100:.0f}%)"
+            for g in goals
+        ]
+
+    nw = get_net_worth(db, household.id, as_at=window.as_at)
+    if nw.items:
+        lines.append(
+            f"\nNET WORTH: assets {_m(nw.assets_cents)}, liabilities "
+            f"{_m(nw.liabilities_cents)}, net {_m(nw.net_cents)}."
+        )
+
+    series = recurring_service.detect(db, household.id, today=window.as_at)
+    committed = sum(x.monthly_amount_cents for x in series if x.active and x.direction == "expense")
+    income = sum(x.monthly_amount_cents for x in series if x.active and x.direction == "income")
     lines.append(
-        f"Recurring: committed {_m(committed)}/mo of expenses; recurring income {_m(income)}/mo."
-    )
-    lines.append(
-        f"Forecast (60d): balance now {_m(fc.starting_balance_cents)}, "
-        f"projected {_m(fc.end_balance_cents)}, low {_m(fc.low_balance_cents)} "
-        f"around {fc.low_balance_date:%d %b %Y}."
+        f"\nRECURRING: committed {_m(committed)}/mo of expenses; "
+        f"recurring income {_m(income)}/mo."
     )
 
-    if privacy_mode in ("full", "local_only"):
-        recent = sorted(
-            _spendable_leaves(db, household.id, today - dt.timedelta(days=60), today),
-            key=lambda t: t.txn_date,
-            reverse=True,
-        )[:25]
-        if recent:
-            lines.append("Recent transactions:")
+    fc = forecast_service.forecast(db, household.id, days=60, today=window.as_at)
+    lines.append(
+        f"FORECAST (60 days from {window.as_at:%d %b %Y}): balance "
+        f"{_m(fc.starting_balance_cents)}, projected {_m(fc.end_balance_cents)}, "
+        f"low {_m(fc.low_balance_cents)} around {fc.low_balance_date:%d %b %Y}."
+    )
+
+    if privacy_mode in ("full", "local_only") and txns:
+        spend = sorted((t for t in txns if t.amount_cents < 0), key=lambda t: t.amount_cents)
+        if spend:
+            lines.append(f"\nLARGEST TRANSACTIONS IN {label}:")
             lines += [
-                f"- {t.txn_date:%d %b} {t.merchant or t.raw_description}: {_m(t.amount_cents)}"
-                for t in recent
+                f"- {t.txn_date:%d %b %Y} {t.raw_description or t.merchant}: {_m(t.amount_cents)}"
+                for t in spend[:MAX_TRANSACTIONS]
             ]
+        recent = sorted(txns, key=lambda t: t.txn_date, reverse=True)[:MAX_TRANSACTIONS]
+        lines.append(f"\nMOST RECENT TRANSACTIONS IN {label}:")
+        lines += [
+            f"- {t.txn_date:%d %b %Y} {t.raw_description or t.merchant}: {_m(t.amount_cents)}"
+            for t in recent
+        ]
+
     return "\n".join(lines)
+
+
+# Room for a full answer. The old 1024 was too small for the kind of question this
+# is for — "list my uncategorised transactions and say what they look like" needs
+# far more than that — and answers were being cut off mid-sentence.
+MAX_OUTPUT_TOKENS = 4096
+# Gemini 2.5 models reason before answering and charge that thinking to the *same*
+# budget as the visible reply, so a large maxOutputTokens can still yield one
+# sentence. Reserving a slice for thinking leaves the rest for the answer.
+GEMINI_THINKING_BUDGET = 1024
+
+TRUNCATED_NOTE = (
+    "\n\n_[This answer was cut off because it reached the length limit. "
+    "Ask a narrower question, or ask me to continue.]_"
+)
+
+
+def _looks_like_unsupported_tools(exc: ProviderError) -> bool:
+    """Whether a provider rejected the request because it cannot do tool calling."""
+    text = str(exc).lower()
+    return "tool" in text or "function" in text
+
+
+def _note_if_truncated(text: str, stop_reason: str | None) -> str:
+    """Say so when the model ran out of room.
+
+    Every provider reports this differently and none of it used to be read, so a
+    half-finished answer was indistinguishable from a complete one.
+    """
+    truncated = (stop_reason or "").lower() in {"max_tokens", "length", "maxtokens"}
+    return f"{text}{TRUNCATED_NOTE}" if truncated else text
 
 
 def _call_provider(ai: models.AiSettings, system: str, messages: list[dict[str, str]]) -> str:
@@ -130,13 +368,17 @@ def _call_provider(ai: models.AiSettings, system: str, messages: list[dict[str, 
             },
             json={
                 "model": ai.model or "claude-haiku-4-5-20251001",
-                "max_tokens": 1024,
+                "max_tokens": MAX_OUTPUT_TOKENS,
                 "system": system,
                 "messages": messages,
             },
         )
         _raise_for_provider(resp)
-        return str(resp.json()["content"][0]["text"])
+        data = resp.json()
+        blocks = [b for b in data.get("content", []) if b.get("type") == "text"]
+        if not blocks:
+            raise ProviderError("The model returned no text (it may have hit the length limit)")
+        return _note_if_truncated(str(blocks[0]["text"]), data.get("stop_reason"))
     if ai.provider == "openai":  # OpenAI-compatible (OpenAI, Ollama, gateways)
         base = (ai.base_url or "https://api.openai.com/v1").rstrip("/")
         headers = {"content-type": "application/json"}
@@ -149,10 +391,14 @@ def _call_provider(ai: models.AiSettings, system: str, messages: list[dict[str, 
             json={
                 "model": ai.model or "gpt-4o-mini",
                 "messages": [{"role": "system", "content": system}, *messages],
+                "max_tokens": MAX_OUTPUT_TOKENS,
             },
         )
         _raise_for_provider(resp)
-        return str(resp.json()["choices"][0]["message"]["content"])
+        choice = resp.json()["choices"][0]
+        return _note_if_truncated(
+            str(choice["message"]["content"] or ""), choice.get("finish_reason")
+        )
     if ai.provider == "gemini":  # Google Generative Language API
         base = (ai.base_url or "https://generativelanguage.googleapis.com").rstrip("/")
         model = ai.model or "gemini-2.5-flash"
@@ -170,31 +416,285 @@ def _call_provider(ai: models.AiSettings, system: str, messages: list[dict[str, 
             json={
                 "system_instruction": {"parts": [{"text": system}]},
                 "contents": contents,
-                "generationConfig": {"maxOutputTokens": 1024},
+                "generationConfig": {
+                    "maxOutputTokens": MAX_OUTPUT_TOKENS,
+                    "thinkingConfig": {"thinkingBudget": GEMINI_THINKING_BUDGET},
+                },
             },
         )
         _raise_for_provider(resp)
         candidates = resp.json().get("candidates") or []
         if not candidates:
             raise ProviderError("Gemini returned no answer (the prompt may have been blocked)")
-        return str(candidates[0]["content"]["parts"][0]["text"])
+        first = candidates[0]
+        # A 2.5 model that spends its whole budget thinking returns a candidate with
+        # no parts at all; that used to raise a KeyError and surface as a 500.
+        parts = [p for p in (first.get("content") or {}).get("parts", []) if p.get("text")]
+        if not parts:
+            raise ProviderError(
+                "The model used its whole response budget before answering "
+                f"(finish reason: {first.get('finishReason') or 'unknown'}). Try a "
+                "narrower question."
+            )
+        return _note_if_truncated(str(parts[0]["text"]), first.get("finishReason"))
     raise NotConfiguredError("AI is not configured")
+
+
+# --------------------------------------------------------------- tool-calling loop
+#
+# Each provider expresses tool use differently enough that a shared abstraction would
+# obscure more than it saves, so each keeps its own loop over its own message format.
+# All three share the round cap, the executor and the truncation handling.
+
+
+def _anthropic_tools(tools: list[advisor_tools.Tool]) -> list[dict[str, object]]:
+    return [
+        {"name": t.name, "description": t.description, "input_schema": t.parameters}
+        for t in tools
+    ]
+
+
+def _converse_anthropic(
+    ai: models.AiSettings,
+    system: str,
+    messages: list[dict[str, Any]],
+    tools: list[advisor_tools.Tool],
+    execute: Callable[[str, dict[str, Any]], str],
+) -> str:
+    key = crypto.decrypt(ai.api_key_encrypted) if ai.api_key_encrypted else None
+    base = (ai.base_url or "https://api.anthropic.com").rstrip("/")
+    convo: list[dict[str, Any]] = list(messages)
+    for _ in range(advisor_tools.MAX_TOOL_ROUNDS + 1):
+        resp = httpx.post(
+            f"{base}/v1/messages",
+            timeout=90,
+            headers={
+                "x-api-key": key or "",
+                "anthropic-version": "2023-06-01",
+                "content-type": "application/json",
+            },
+            json={
+                "model": ai.model or "claude-haiku-4-5-20251001",
+                "max_tokens": MAX_OUTPUT_TOKENS,
+                "system": system,
+                "messages": convo,
+                "tools": _anthropic_tools(tools),
+            },
+        )
+        _raise_for_provider(resp)
+        data = resp.json()
+        content = data.get("content", [])
+        calls = [b for b in content if b.get("type") == "tool_use"]
+        if not calls:
+            text = next((b["text"] for b in content if b.get("type") == "text"), "")
+            return _note_if_truncated(str(text), data.get("stop_reason"))
+        convo.append({"role": "assistant", "content": content})
+        convo.append(
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": c["id"],
+                        "content": execute(str(c["name"]), dict(c.get("input") or {})),
+                    }
+                    for c in calls
+                ],
+            }
+        )
+    return _ROUND_LIMIT_NOTE
+
+
+def _converse_openai(
+    ai: models.AiSettings,
+    system: str,
+    messages: list[dict[str, Any]],
+    tools: list[advisor_tools.Tool],
+    execute: Callable[[str, dict[str, Any]], str],
+) -> str:
+    key = crypto.decrypt(ai.api_key_encrypted) if ai.api_key_encrypted else None
+    base = (ai.base_url or "https://api.openai.com/v1").rstrip("/")
+    headers = {"content-type": "application/json"}
+    if key:
+        headers["Authorization"] = f"Bearer {key}"
+    convo: list[dict[str, Any]] = [{"role": "system", "content": system}, *messages]
+    schema = [
+        {
+            "type": "function",
+            "function": {
+                "name": t.name,
+                "description": t.description,
+                "parameters": t.parameters,
+            },
+        }
+        for t in tools
+    ]
+    for _ in range(advisor_tools.MAX_TOOL_ROUNDS + 1):
+        resp = httpx.post(
+            f"{base}/chat/completions",
+            timeout=90,
+            headers=headers,
+            json={
+                "model": ai.model or "gpt-4o-mini",
+                "messages": convo,
+                "max_tokens": MAX_OUTPUT_TOKENS,
+                "tools": schema,
+            },
+        )
+        _raise_for_provider(resp)
+        choice = resp.json()["choices"][0]
+        message = choice.get("message") or {}
+        calls = message.get("tool_calls") or []
+        if not calls:
+            return _note_if_truncated(
+                str(message.get("content") or ""), choice.get("finish_reason")
+            )
+        convo.append(message)
+        for call in calls:
+            fn = call.get("function") or {}
+            try:
+                args = json.loads(fn.get("arguments") or "{}")
+            except json.JSONDecodeError:
+                args = {}
+            convo.append(
+                {
+                    "role": "tool",
+                    "tool_call_id": call.get("id"),
+                    "content": execute(str(fn.get("name")), args),
+                }
+            )
+    return _ROUND_LIMIT_NOTE
+
+
+def _converse_gemini(
+    ai: models.AiSettings,
+    system: str,
+    messages: list[dict[str, Any]],
+    tools: list[advisor_tools.Tool],
+    execute: Callable[[str, dict[str, Any]], str],
+) -> str:
+    key = crypto.decrypt(ai.api_key_encrypted) if ai.api_key_encrypted else None
+    base = (ai.base_url or "https://generativelanguage.googleapis.com").rstrip("/")
+    model = ai.model or "gemini-2.5-flash"
+    contents: list[dict[str, Any]] = [
+        {
+            "role": "model" if m["role"] == "assistant" else "user",
+            "parts": [{"text": m["content"]}],
+        }
+        for m in messages
+    ]
+    declarations = [
+        {"name": t.name, "description": t.description, "parameters": t.parameters}
+        for t in tools
+    ]
+    for _ in range(advisor_tools.MAX_TOOL_ROUNDS + 1):
+        resp = httpx.post(
+            f"{base}/v1beta/models/{model}:generateContent",
+            timeout=90,
+            headers={"x-goog-api-key": key or "", "content-type": "application/json"},
+            json={
+                "system_instruction": {"parts": [{"text": system}]},
+                "contents": contents,
+                "tools": [{"functionDeclarations": declarations}],
+                "generationConfig": {
+                    "maxOutputTokens": MAX_OUTPUT_TOKENS,
+                    "thinkingConfig": {"thinkingBudget": GEMINI_THINKING_BUDGET},
+                },
+            },
+        )
+        _raise_for_provider(resp)
+        candidates = resp.json().get("candidates") or []
+        if not candidates:
+            raise ProviderError("Gemini returned no answer (the prompt may have been blocked)")
+        first = candidates[0]
+        parts = (first.get("content") or {}).get("parts") or []
+        calls = [p["functionCall"] for p in parts if p.get("functionCall")]
+        if not calls:
+            text = next((p["text"] for p in parts if p.get("text")), None)
+            if text is None:
+                raise ProviderError(
+                    "The model used its whole response budget before answering "
+                    f"(finish reason: {first.get('finishReason') or 'unknown'}). Try a "
+                    "narrower question."
+                )
+            return _note_if_truncated(str(text), first.get("finishReason"))
+        contents.append({"role": "model", "parts": parts})
+        contents.append(
+            {
+                "role": "user",
+                "parts": [
+                    {
+                        "functionResponse": {
+                            "name": c.get("name"),
+                            "response": {
+                                "result": execute(
+                                    str(c.get("name")), dict(c.get("args") or {})
+                                )
+                            },
+                        }
+                    }
+                    for c in calls
+                ],
+            }
+        )
+    return _ROUND_LIMIT_NOTE
+
+
+_ROUND_LIMIT_NOTE = (
+    "I looked several things up but could not settle on an answer. Please try asking "
+    "something more specific."
+)
+
+_CONVERSATIONS = {
+    "anthropic": _converse_anthropic,
+    "openai": _converse_openai,
+    "gemini": _converse_gemini,
+}
+
+
+def _respond(
+    ai: models.AiSettings,
+    system: str,
+    messages: list[dict[str, Any]],
+    tools: list[advisor_tools.Tool],
+    execute: Callable[[str, dict[str, Any]], str],
+) -> str:
+    """Answer with tools available, falling back to the snapshot alone if the
+    endpoint cannot do tool calling — common with local models, and a degraded
+    answer beats an error."""
+    try:
+        return _CONVERSATIONS[ai.provider](ai, system, messages, tools, execute)
+    except ProviderError as exc:
+        if not _looks_like_unsupported_tools(exc):
+            raise
+        return _call_provider(ai, system, messages)
 
 
 def chat(
     db: Session,
     household: models.Household,
     messages: list[dict[str, str]],
-    as_at: dt.date | None = None,
+    window: periods.ResolvedPeriod | None = None,
 ) -> str:
-    """`as_at` follows the app's period picker, so questions about a past financial
-    year are answered from that year's figures rather than today's."""
+    """`window` follows the app's period picker, so a question asked while viewing a
+    past financial year is answered from that year's figures rather than today's."""
     ai = settings_for(db, household.id)
     if ai.provider not in ("anthropic", "openai", "gemini"):
         raise NotConfiguredError("AI is not configured")
-    context = build_context(db, household, ai.privacy_mode, as_at)
+    if window is None:
+        fy_start, _ = fy_bounds(household, dt.date.today())
+        window = periods.resolve(household, f"fy:{fy_start.year}")
+    context = build_context(db, household, ai.privacy_mode, window)
     system = f"{SYSTEM_PROMPT}\n\nData you may use:\n{context}"
-    return _call_provider(ai, system, messages)
+
+    tools = advisor_tools.tools_for(ai.privacy_mode)
+    calls: list[str] = []
+
+    def execute(name: str, args: dict[str, Any]) -> str:
+        calls.append(name)
+        return advisor_tools.run(db, household, ai.privacy_mode, name, args, window)
+
+    return _respond(ai, system, messages, tools, execute)
 
 
 # Substrings that mark an OpenAI model as not chat-capable (kept out of the picker).

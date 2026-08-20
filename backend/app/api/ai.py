@@ -63,7 +63,7 @@ def chat(
     ai = advisor.settings_for(db, user.household_id)
     messages = [{"role": m.role, "content": m.content} for m in payload.messages]
     try:
-        reply = advisor.chat(db, household, messages, window.as_at if window else None)
+        reply = advisor.chat(db, household, messages, window)
     except advisor.NotConfiguredError as exc:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc)) from exc
     except advisor.ProviderError as exc:

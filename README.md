@@ -49,8 +49,11 @@ Runs in a container, HTTPS‑only.
 - **Alerts** — an in‑app feed (over‑budget categories, unusual spend, upcoming bills, large
   transactions, low projected balance) with opt‑in **email** and weekly/monthly digests.
 - **AI advisor (BYO key)** — ask questions about your own data via Anthropic (Claude),
-  Google Gemini, any OpenAI‑compatible endpoint, or a local **Ollama**, with privacy modes
-  that control what's shared.
+  Google Gemini, any OpenAI‑compatible endpoint, or a local **Ollama**. It can search your
+  transactions and summarise spending by category, merchant or period, and follows the
+  period picker. **Privacy modes** control what it may see: *Aggregates only* withholds
+  individual transactions and their descriptions, and the advisor says so when a question
+  needs them.
 - **Financial‑year PDF report** — a one‑click accountant summary for any financial year.
 
 **Self‑host & operate**

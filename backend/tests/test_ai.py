@@ -37,12 +37,13 @@ def test_chat_requires_configuration(auth_client: TestClient) -> None:
 def _stub_capture(monkeypatch: pytest.MonkeyPatch) -> dict[str, object]:
     captured: dict[str, object] = {}
 
-    def fake_call(ai, system, messages):
+    def fake_respond(ai, system, messages, tools, execute):
         captured["system"] = system
         captured["messages"] = messages
+        captured["tools"] = [t.name for t in tools]
         return "Here is some general guidance."
 
-    monkeypatch.setattr(advisor, "_call_provider", fake_call)
+    monkeypatch.setattr(advisor, "_respond", fake_respond)
     return captured
 
 
@@ -65,7 +66,7 @@ def test_chat_replies_and_audits(auth_client: TestClient, monkeypatch: pytest.Mo
     )
     assert resp.status_code == 200
     assert resp.json()["reply"] == "Here is some general guidance."
-    assert "Top spending categories" in str(captured["system"])
+    assert "SPENDING BY CATEGORY" in str(captured["system"])
 
 
 def test_provider_error_surfaces_message(
@@ -73,10 +74,10 @@ def test_provider_error_surfaces_message(
 ) -> None:
     auth_client.patch("/api/ai/settings", json={"provider": "anthropic", "api_key": "k"})
 
-    def boom(ai, system, messages):
+    def boom(ai, system, messages, tools, execute):
         raise advisor.ProviderError("400 — model: claude-x not found")
 
-    monkeypatch.setattr(advisor, "_call_provider", boom)
+    monkeypatch.setattr(advisor, "_respond", boom)
     resp = auth_client.post("/api/ai/chat", json={"messages": [{"role": "user", "content": "hi"}]})
     assert resp.status_code == 502
     assert "model: claude-x not found" in resp.json()["detail"]
@@ -270,3 +271,263 @@ def test_gemini_list_models_filters_to_chat(monkeypatch: pytest.MonkeyPatch) -> 
     monkeypatch.setattr(advisor.httpx, "get", lambda url, **kw: FakeResp())
     ai = models.AiSettings(household_id="h", provider="gemini")
     assert advisor.list_models(ai) == [{"id": "gemini-1.5-pro", "label": "Gemini 1.5 Pro"}]
+
+
+# ------------------------------------------------------------------- output limits
+
+
+class _Resp:
+    status_code = 200
+
+    def __init__(self, payload: dict) -> None:
+        self._payload = payload
+
+    def json(self) -> dict:
+        return self._payload
+
+
+def _settings(provider: str, model: str | None = None):
+    from app import models
+
+    return models.AiSettings(household_id="h", provider=provider, model=model)
+
+
+def _capture(monkeypatch: pytest.MonkeyPatch, payload: dict) -> dict:
+    sent: dict[str, object] = {}
+
+    def fake_post(url, **kw):
+        sent["url"] = url
+        sent["json"] = kw.get("json")
+        return _Resp(payload)
+
+    monkeypatch.setattr(advisor.httpx, "post", fake_post)
+    return sent
+
+
+def test_anthropic_asks_for_enough_room(monkeypatch: pytest.MonkeyPatch) -> None:
+    """1024 tokens could not hold the answers this assistant is asked for."""
+    sent = _capture(
+        monkeypatch, {"content": [{"type": "text", "text": "hi"}], "stop_reason": "end_turn"}
+    )
+    advisor._call_provider(_settings("anthropic"), "SYS", [{"role": "user", "content": "q"}])
+    assert sent["json"]["max_tokens"] == advisor.MAX_OUTPUT_TOKENS > 1024
+
+
+def test_openai_asks_for_enough_room(monkeypatch: pytest.MonkeyPatch) -> None:
+    sent = _capture(
+        monkeypatch,
+        {"choices": [{"message": {"content": "hi"}, "finish_reason": "stop"}]},
+    )
+    advisor._call_provider(_settings("openai"), "SYS", [{"role": "user", "content": "q"}])
+    assert sent["json"]["max_tokens"] == advisor.MAX_OUTPUT_TOKENS
+
+
+def test_gemini_reserves_a_thinking_budget(monkeypatch: pytest.MonkeyPatch) -> None:
+    """2.5 models charge their reasoning to the same budget as the reply, so without
+    a reserved slice the visible answer can be a single sentence."""
+    sent = _capture(
+        monkeypatch,
+        {"candidates": [{"content": {"parts": [{"text": "hi"}]}, "finishReason": "STOP"}]},
+    )
+    advisor._call_provider(_settings("gemini"), "SYS", [{"role": "user", "content": "q"}])
+    config = sent["json"]["generationConfig"]
+    assert config["maxOutputTokens"] == advisor.MAX_OUTPUT_TOKENS
+    assert 0 < config["thinkingConfig"]["thinkingBudget"] < advisor.MAX_OUTPUT_TOKENS
+
+
+@pytest.mark.parametrize(
+    ("provider", "payload"),
+    [
+        ("anthropic", {"content": [{"type": "text", "text": "cut"}], "stop_reason": "max_tokens"}),
+        ("openai", {"choices": [{"message": {"content": "cut"}, "finish_reason": "length"}]}),
+        (
+            "gemini",
+            {
+                "candidates": [
+                    {"content": {"parts": [{"text": "cut"}]}, "finishReason": "MAX_TOKENS"}
+                ]
+            },
+        ),
+    ],
+)
+def test_truncated_answers_say_so(
+    provider: str, payload: dict, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A cut-off answer used to be indistinguishable from a finished one."""
+    _capture(monkeypatch, payload)
+    out = advisor._call_provider(_settings(provider), "SYS", [{"role": "user", "content": "q"}])
+    assert out.startswith("cut")
+    assert "cut off" in out
+
+
+@pytest.mark.parametrize(
+    ("provider", "payload"),
+    [
+        ("anthropic", {"content": [{"type": "text", "text": "done"}], "stop_reason": "end_turn"}),
+        ("openai", {"choices": [{"message": {"content": "done"}, "finish_reason": "stop"}]}),
+        (
+            "gemini",
+            {"candidates": [{"content": {"parts": [{"text": "done"}]}, "finishReason": "STOP"}]},
+        ),
+    ],
+)
+def test_complete_answers_are_left_alone(
+    provider: str, payload: dict, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _capture(monkeypatch, payload)
+    assert advisor._call_provider(
+        _settings(provider), "SYS", [{"role": "user", "content": "q"}]
+    ) == "done"
+
+
+def test_gemini_spending_its_whole_budget_thinking_is_explained(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """No parts at all used to raise a KeyError and surface as a 500."""
+    _capture(monkeypatch, {"candidates": [{"content": {}, "finishReason": "MAX_TOKENS"}]})
+    with pytest.raises(advisor.ProviderError, match="budget"):
+        advisor._call_provider(_settings("gemini"), "SYS", [{"role": "user", "content": "q"}])
+
+
+def test_anthropic_ignores_non_text_blocks(monkeypatch: pytest.MonkeyPatch) -> None:
+    _capture(
+        monkeypatch,
+        {
+            "content": [{"type": "thinking", "thinking": "…"}, {"type": "text", "text": "answer"}],
+            "stop_reason": "end_turn",
+        },
+    )
+    assert advisor._call_provider(
+        _settings("anthropic"), "SYS", [{"role": "user", "content": "q"}]
+    ) == "answer"
+
+
+# ------------------------------------------------------------------ the data snapshot
+
+
+def _add(client: TestClient, account: dict, date: str, cents: int, desc: str) -> None:
+    resp = client.post(
+        "/api/transactions",
+        json={
+            "account_id": account["id"], "txn_date": date,
+            "amount_cents": cents, "description": desc,
+        },
+    )
+    assert resp.status_code in (200, 201), resp.text
+
+
+def _context_for(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch, **params: str
+) -> str:
+    captured = _stub_capture(monkeypatch)
+    resp = client.post(
+        f"/api/ai/chat{'?' + '&'.join(f'{k}={v}' for k, v in params.items()) if params else ''}",
+        json={"messages": [{"role": "user", "content": "hi"}]},
+    )
+    assert resp.status_code == 200, resp.text
+    return str(captured["system"])
+
+
+def test_snapshot_follows_the_selected_period(
+    auth_client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Asking while viewing a past year must answer for that year, not today."""
+    account = create_account(auth_client)
+    _add(auth_client, account, "2023-09-01", -1000, "OLD SPEND")
+    _add(auth_client, account, "2024-09-01", -2500, "NEWER SPEND")
+    auth_client.patch("/api/ai/settings", json={"provider": "anthropic", "api_key": "k"})
+
+    older = _context_for(auth_client, monkeypatch, period="fy:2023")
+    assert "FY2023–24" in older
+    assert "$10.00" in older and "$25.00" not in older
+
+    newer = _context_for(auth_client, monkeypatch, period="fy:2024")
+    assert "FY2024–25" in newer
+    assert "$25.00" in newer
+
+
+def test_snapshot_states_what_the_model_can_see(
+    auth_client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """So a refusal can name the setting responsible instead of being a dead end."""
+    auth_client.patch(
+        "/api/ai/settings",
+        json={"provider": "anthropic", "api_key": "k", "privacy_mode": "aggregates"},
+    )
+    context = _context_for(auth_client, monkeypatch)
+    assert "WHAT YOU CAN SEE" in context
+    assert "Settings > AI advisor" in context
+
+    auth_client.patch("/api/ai/settings", json={"privacy_mode": "full"})
+    assert "individual transactions" in _context_for(auth_client, monkeypatch)
+
+
+def test_aggregates_mode_withholds_merchant_names(
+    auth_client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A merchant name is the description tidied up, so it is raw transaction data."""
+    account = create_account(auth_client)
+    _add(auth_client, account, TODAY, -4200, "SECRETMERCHANT XYZ")
+    auth_client.patch(
+        "/api/ai/settings",
+        json={"provider": "anthropic", "api_key": "k", "privacy_mode": "aggregates"},
+    )
+    aggregates = _context_for(auth_client, monkeypatch)
+    assert "secretmerchant" not in aggregates.lower()
+    assert "not available in this privacy mode" in aggregates
+
+    auth_client.patch("/api/ai/settings", json={"privacy_mode": "full"})
+    assert "secretmerchant" in _context_for(auth_client, monkeypatch).lower()
+
+
+def test_uncategorised_is_summarised_and_detailed_only_when_permitted(
+    auth_client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The question that prompted this: what are my uncategorised transactions for?"""
+    account = create_account(auth_client)
+    _add(auth_client, account, TODAY, -120000, "TRANSFER TO HELEN SMITH")
+    auth_client.patch(
+        "/api/ai/settings",
+        json={"provider": "anthropic", "api_key": "k", "privacy_mode": "aggregates"},
+    )
+    aggregates = _context_for(auth_client, monkeypatch)
+    assert "UNCATEGORISED" in aggregates
+    assert "$1,200.00" in aggregates  # the total is an aggregate, so it is shown
+    assert "helen" not in aggregates.lower()  # the description is not
+
+    auth_client.patch("/api/ai/settings", json={"privacy_mode": "full"})
+    full = _context_for(auth_client, monkeypatch)
+    assert "HELEN SMITH" in full
+
+
+def test_snapshot_reports_what_data_exists(
+    auth_client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """So the advisor knows the shape of the history even when asked about one period."""
+    account = create_account(auth_client)
+    _add(auth_client, account, "2023-01-05", -500, "FIRST")
+    _add(auth_client, account, "2025-11-20", -700, "LAST")
+    auth_client.patch("/api/ai/settings", json={"provider": "anthropic", "api_key": "k"})
+    context = _context_for(auth_client, monkeypatch)
+    assert "05 Jan 2023" in context and "20 Nov 2025" in context
+    assert "2 transactions" in context
+
+
+def test_snapshot_compares_with_the_previous_period(
+    auth_client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    account = create_account(auth_client)
+    _add(auth_client, account, "2023-09-01", -10000, "LAST YEAR")
+    _add(auth_client, account, "2024-09-01", -20000, "THIS YEAR")
+    auth_client.patch("/api/ai/settings", json={"provider": "anthropic", "api_key": "k"})
+    context = _context_for(auth_client, monkeypatch, period="fy:2024")
+    assert "VERSUS THE PREVIOUS" in context
+    assert "+100%" in context
+
+
+def test_snapshot_survives_an_empty_household(
+    auth_client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    auth_client.patch("/api/ai/settings", json={"provider": "anthropic", "api_key": "k"})
+    context = _context_for(auth_client, monkeypatch)
+    assert "No transactions have been imported yet." in context

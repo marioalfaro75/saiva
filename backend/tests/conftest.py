@@ -78,3 +78,23 @@ def create_account(client: TestClient, name: str = "Everyday", type_: str = "eve
     resp = client.post("/api/accounts", json={"name": name, "type": type_})
     assert resp.status_code == 201, resp.text
     return resp.json()
+
+
+@pytest.fixture(autouse=True)
+def _no_outbound_http(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Fail loudly if a test reaches the internet.
+
+    An advisor test once stubbed the wrong function and the suite quietly called a
+    real provider API with a fake key. Tests that want a canned provider response
+    still patch httpx themselves inside the test body, which takes precedence.
+    """
+    import httpx
+
+    def blocked(*args: object, **kwargs: object) -> None:
+        target = args[0] if args else kwargs.get("url", "?")
+        raise AssertionError(
+            f"Test tried to make a real HTTP request to {target!r}. Stub it instead."
+        )
+
+    for name in ("get", "post", "put", "patch", "delete", "request"):
+        monkeypatch.setattr(httpx, name, blocked)
