@@ -8,23 +8,34 @@ from __future__ import annotations
 import datetime as dt
 
 import httpx
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from .. import models
-from . import crypto
+from ..constants import UNCATEGORISED
+from . import crypto, periods
 from . import forecast as forecast_service
 from . import recurring as recurring_service
-from .dashboard import _spendable_leaves, category_breakdown, summary
-from .periods import fy_bounds, fy_label
+from .budgets import list_budgets
+from .dashboard import _spendable_leaves, category_breakdown, summary, trends
+from .goals import list_goals
+from .networth import get_net_worth
+from .periods import fy_bounds
 
 PROVIDERS = {"none", "anthropic", "openai", "gemini"}
 PRIVACY_MODES = {"local_only", "aggregates", "full"}
 
 SYSTEM_PROMPT = (
     "You are Saiva's financial information assistant for an Australian household. "
-    "Answer using only the data provided below. Be concise and practical. "
-    "Give general information, not personal financial advice, and never recommend "
-    "specific financial products. If the data doesn't cover the question, say so."
+    "Answer using only the data provided below, and quote the figures from it rather "
+    "than estimating. Be concise and practical. Give general information, not "
+    "personal financial advice, and never recommend specific financial products.\n"
+    "The data covers one period, stated below; if asked about another, say which "
+    "period you are looking at and that they can change it with the period selector "
+    "at the top of the app.\n"
+    "If a question needs something you were not given, say plainly what is missing "
+    "and — where the WHAT YOU CAN SEE note explains a privacy setting is the reason "
+    "— tell them which setting to change. Never guess at values you cannot see."
 )
 
 
@@ -68,51 +79,243 @@ def _m(cents: int) -> str:
     return f"${cents / 100:,.2f}"
 
 
+# The snapshot is meant to fit in roughly a page: enough to answer the common
+# questions in one round trip, with detail fetched on demand rather than always sent.
+MAX_CATEGORIES = 15
+MAX_MERCHANTS = 10
+MAX_UNCATEGORISED = 15
+MAX_TRANSACTIONS = 20
+
+# Told to the model so it can explain its own limits accurately. Without this it
+# says only "the provided data does not include…", which leaves the user with no
+# idea that a setting caused it or that they can change it.
+CAPABILITIES = {
+    "aggregates": (
+        "You can see totals and category/merchant summaries, but NOT individual "
+        "transactions or their descriptions — the household chose the 'Aggregates "
+        "only' privacy mode. If a question needs transaction detail, say so and tell "
+        "them they can switch to 'Full detail' in Settings > AI advisor."
+    ),
+    "full": "You can see summaries and individual transactions for this period.",
+    "local_only": "You can see summaries and individual transactions for this period.",
+}
+
+
+def _coverage(db: Session, household_id: str) -> str:
+    """What data exists overall, so the model knows the shape of the history even
+    when the question is about one period."""
+    first, last, count = db.execute(
+        select(
+            func.min(models.Transaction.txn_date),
+            func.max(models.Transaction.txn_date),
+            func.count(models.Transaction.id),
+        ).where(models.Transaction.household_id == household_id)
+    ).one()
+    if first is None:
+        return "No transactions have been imported yet."
+    accounts = db.execute(
+        select(func.count(models.Account.id)).where(
+            models.Account.household_id == household_id
+        )
+    ).scalar_one()
+    return (
+        f"Records span {first:%d %b %Y} to {last:%d %b %Y} — {count:,} transactions "
+        f"across {accounts} account(s)."
+    )
+
+
+def _merchant_totals(txns: list[models.Transaction]) -> list[tuple[str, int, int]]:
+    """Spend per merchant, biggest first."""
+    totals: dict[str, int] = {}
+    counts: dict[str, int] = {}
+    for t in txns:
+        if t.amount_cents >= 0:
+            continue
+        name = t.merchant or t.raw_description or "(no description)"
+        totals[name] = totals.get(name, 0) + -t.amount_cents
+        counts[name] = counts.get(name, 0) + 1
+    return sorted(((n, v, counts[n]) for n, v in totals.items()), key=lambda r: -r[1])
+
+
+def _previous_window(start: dt.date, end: dt.date) -> tuple[dt.date, dt.date]:
+    span = end - start
+    prev_end = start - dt.timedelta(days=1)
+    return prev_end - span, prev_end
+
+
+def _is_uncategorised(t: models.Transaction, names: dict[str, str]) -> bool:
+    # A row can be uncategorised either by having no category at all or by sitting in
+    # the seeded "Uncategorised" bucket; both mean the same thing to the user.
+    return t.category_id is None or names.get(t.category_id) == UNCATEGORISED
+
+
 def build_context(
-    db: Session, household: models.Household, privacy_mode: str, today: dt.date | None = None
+    db: Session,
+    household: models.Household,
+    privacy_mode: str,
+    window: periods.ResolvedPeriod | None = None,
 ) -> str:
-    today = today or dt.date.today()
-    start, end = fy_bounds(household, today)
+    """A snapshot of the household's finances for the selected period.
+
+    Follows the app's period picker rather than always describing the financial
+    year, so asking about a past year answers for that year.
+    """
+    today = dt.date.today()
+    if window is None:
+        fy_start, fy_end = fy_bounds(household, today)
+        window = periods.resolve(household, f"fy:{fy_start.year}", today=today)
+    start, end, label = window.start, window.end, window.label
+
+    names = {
+        c.id: c.name
+        for c in db.execute(
+            select(models.Category).where(models.Category.household_id == household.id)
+        )
+        .scalars()
+        .all()
+    }
+    txns = _spendable_leaves(db, household.id, start, end)
     s = summary(db, household, "custom", start, end)
     cb = category_breakdown(db, household, "custom", start, end)
-    series = recurring_service.detect(db, household.id, today=today)
-    committed = sum(x.monthly_amount_cents for x in series if x.active and x.direction == "expense")
-    income = sum(x.monthly_amount_cents for x in series if x.active and x.direction == "income")
-    fc = forecast_service.forecast(db, household.id, days=60, today=today)
 
+    when = (
+        "This period is in progress."
+        if window.is_current
+        else ("This period has ended." if end < today else "This period has not started.")
+    )
     lines = [
-        f"Household: {household.name} — {household.adults} adults, "
+        f"PERIOD: {label} ({start:%d %b %Y} to {end:%d %b %Y}). Today is {today:%d %b %Y}. {when}",
+        f"DATA HELD: {_coverage(db, household.id)}",
+        f"WHAT YOU CAN SEE: {CAPABILITIES.get(privacy_mode, CAPABILITIES['aggregates'])}",
+        "",
+        f"HOUSEHOLD: {household.name} — {household.adults} adults, "
         f"{household.children} children, {household.state or 'AU'}.",
-        f"{fy_label(start, end)} ({start:%d %b %Y}–{end:%d %b %Y}): income {_m(s.income_cents)}, "
-        f"expenses {_m(s.expense_cents)}, net {_m(s.net_cents)}, "
-        f"savings rate {s.savings_rate * 100:.0f}%.",
-        f"Top spending categories in {fy_label(start, end)}:",
+        f"TOTALS FOR {label}: income {_m(s.income_cents)}, expenses {_m(s.expense_cents)}, "
+        f"net {_m(s.net_cents)}, savings rate {s.savings_rate * 100:.0f}%.",
     ]
+
+    prev_start, prev_end = _previous_window(start, end)
+    prev = summary(db, household, "custom", prev_start, prev_end)
+    if prev.expense_cents:
+        change = (s.expense_cents - prev.expense_cents) / prev.expense_cents * 100
+        lines.append(
+            f"VERSUS THE PREVIOUS {(end - start).days + 1} DAYS "
+            f"({prev_start:%d %b %Y}–{prev_end:%d %b %Y}): expenses {_m(prev.expense_cents)} "
+            f"-> {_m(s.expense_cents)} ({change:+.0f}%)."
+        )
+
+    lines.append(f"\nSPENDING BY CATEGORY IN {label}:")
     lines += [
         f"- {it.category_name}: {_m(it.amount_cents)} ({it.pct * 100:.0f}%)"
-        for it in cb.items[:10]
+        for it in cb.items[:MAX_CATEGORIES]
     ]
+    rest = cb.items[MAX_CATEGORIES:]
+    if rest:
+        lines.append(
+            f"- plus {len(rest)} smaller categories totalling "
+            f"{_m(sum(it.amount_cents for it in rest))}"
+        )
+
+    merchants = _merchant_totals(txns)
+    if merchants:
+        if privacy_mode in ("full", "local_only"):
+            lines.append(f"\nTOP MERCHANTS IN {label}:")
+            lines += [
+                f"- {name}: {_m(total)} across {count} transaction(s)"
+                for name, total, count in merchants[:MAX_MERCHANTS]
+            ]
+        else:
+            # A merchant name is the transaction description, tidied up — naming them
+            # would leak exactly what "aggregates only" promises to withhold.
+            lines.append(
+                f"\nMERCHANTS IN {label}: {len(merchants)} distinct merchants. Their "
+                "names are not available in this privacy mode."
+            )
+
+    uncat = [t for t in txns if _is_uncategorised(t, names) and t.amount_cents < 0]
+    if uncat:
+        total = sum(-t.amount_cents for t in uncat)
+        lines.append(
+            f"\nUNCATEGORISED IN {label}: {len(uncat)} transactions totalling {_m(total)}."
+        )
+        if privacy_mode in ("full", "local_only"):
+            # Descriptions are raw transaction data, so only in the permissive modes.
+            lines.append("Largest of them, with their descriptions:")
+            biggest = sorted(uncat, key=lambda t: t.amount_cents)[:MAX_UNCATEGORISED]
+            lines += [
+                f"- {t.txn_date:%d %b %Y} {t.raw_description or t.merchant}: "
+                f"{_m(t.amount_cents)}"
+                for t in biggest
+            ]
+        else:
+            lines.append(
+                "Their descriptions are not available in this privacy mode."
+            )
+
+    points = trends(db, household, "custom", start, end).points
+    if len(points) > 1:
+        lines.append(f"\nMONTH BY MONTH IN {label}:")
+        lines += [
+            f"- {p.period_start:%b %Y}: income {_m(p.income_cents)}, "
+            f"expenses {_m(p.expense_cents)}"
+            for p in points
+        ]
+
+    budgets = [b for b in list_budgets(db, household, window.as_at) if b.status != "ok"]
+    if budgets:
+        lines.append("\nBUDGETS NEEDING ATTENTION:")
+        lines += [
+            f"- {b.category_name}: {_m(b.actual_cents)} of {_m(b.limit_cents)} "
+            f"({b.pct_used * 100:.0f}%, {b.status}) for {b.period_label}"
+            for b in budgets
+        ]
+
+    goals = list_goals(db, household, window.as_at)
+    if goals:
+        lines.append("\nSAVINGS GOALS:")
+        lines += [
+            f"- {g.name}: {_m(g.current_cents)} of {_m(g.target_cents)} "
+            f"({g.pct_complete * 100:.0f}%)"
+            for g in goals
+        ]
+
+    nw = get_net_worth(db, household.id, as_at=window.as_at)
+    if nw.items:
+        lines.append(
+            f"\nNET WORTH: assets {_m(nw.assets_cents)}, liabilities "
+            f"{_m(nw.liabilities_cents)}, net {_m(nw.net_cents)}."
+        )
+
+    series = recurring_service.detect(db, household.id, today=window.as_at)
+    committed = sum(x.monthly_amount_cents for x in series if x.active and x.direction == "expense")
+    income = sum(x.monthly_amount_cents for x in series if x.active and x.direction == "income")
     lines.append(
-        f"Recurring: committed {_m(committed)}/mo of expenses; recurring income {_m(income)}/mo."
-    )
-    lines.append(
-        f"Forecast (60d): balance now {_m(fc.starting_balance_cents)}, "
-        f"projected {_m(fc.end_balance_cents)}, low {_m(fc.low_balance_cents)} "
-        f"around {fc.low_balance_date:%d %b %Y}."
+        f"\nRECURRING: committed {_m(committed)}/mo of expenses; "
+        f"recurring income {_m(income)}/mo."
     )
 
-    if privacy_mode in ("full", "local_only"):
-        recent = sorted(
-            _spendable_leaves(db, household.id, today - dt.timedelta(days=60), today),
-            key=lambda t: t.txn_date,
-            reverse=True,
-        )[:25]
-        if recent:
-            lines.append("Recent transactions:")
+    fc = forecast_service.forecast(db, household.id, days=60, today=window.as_at)
+    lines.append(
+        f"FORECAST (60 days from {window.as_at:%d %b %Y}): balance "
+        f"{_m(fc.starting_balance_cents)}, projected {_m(fc.end_balance_cents)}, "
+        f"low {_m(fc.low_balance_cents)} around {fc.low_balance_date:%d %b %Y}."
+    )
+
+    if privacy_mode in ("full", "local_only") and txns:
+        spend = sorted((t for t in txns if t.amount_cents < 0), key=lambda t: t.amount_cents)
+        if spend:
+            lines.append(f"\nLARGEST TRANSACTIONS IN {label}:")
             lines += [
-                f"- {t.txn_date:%d %b} {t.merchant or t.raw_description}: {_m(t.amount_cents)}"
-                for t in recent
+                f"- {t.txn_date:%d %b %Y} {t.raw_description or t.merchant}: {_m(t.amount_cents)}"
+                for t in spend[:MAX_TRANSACTIONS]
             ]
+        recent = sorted(txns, key=lambda t: t.txn_date, reverse=True)[:MAX_TRANSACTIONS]
+        lines.append(f"\nMOST RECENT TRANSACTIONS IN {label}:")
+        lines += [
+            f"- {t.txn_date:%d %b %Y} {t.raw_description or t.merchant}: {_m(t.amount_cents)}"
+            for t in recent
+        ]
+
     return "\n".join(lines)
 
 
@@ -231,14 +434,14 @@ def chat(
     db: Session,
     household: models.Household,
     messages: list[dict[str, str]],
-    as_at: dt.date | None = None,
+    window: periods.ResolvedPeriod | None = None,
 ) -> str:
-    """`as_at` follows the app's period picker, so questions about a past financial
-    year are answered from that year's figures rather than today's."""
+    """`window` follows the app's period picker, so a question asked while viewing a
+    past financial year is answered from that year's figures rather than today's."""
     ai = settings_for(db, household.id)
     if ai.provider not in ("anthropic", "openai", "gemini"):
         raise NotConfiguredError("AI is not configured")
-    context = build_context(db, household, ai.privacy_mode, as_at)
+    context = build_context(db, household, ai.privacy_mode, window)
     system = f"{SYSTEM_PROMPT}\n\nData you may use:\n{context}"
     return _call_provider(ai, system, messages)
 
