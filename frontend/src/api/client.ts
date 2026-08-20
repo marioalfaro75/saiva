@@ -49,24 +49,71 @@ export class ApiError extends Error {
   }
 }
 
+const CSRF_COOKIE = "saiva_csrf";
+
 let csrfToken: string | null = null;
 
 function setCsrf(token: string): void {
   csrfToken = token;
 }
 
-async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
+/**
+ * The token to send with a write.
+ *
+ * The cookie is the authority — the server compares the header against it — so read
+ * it fresh on every request rather than trusting a value cached at startup. Caching
+ * it meant that anything which changed the cookie (another tab bootstrapping, a
+ * re-login elsewhere) left this tab sending a stale token and failing every write
+ * until it was reloaded. The cookie is deliberately not http-only so this can work.
+ */
+function currentCsrf(): string | null {
+  const match =
+    typeof document !== "undefined"
+      ? new RegExp(`(?:^|;\\s*)${CSRF_COOKIE}=([^;]*)`).exec(document.cookie)
+      : null;
+  return match ? decodeURIComponent(match[1]) : csrfToken;
+}
+
+function isCsrfRejection(status: number, detail: string): boolean {
+  return status === 403 && detail.toLowerCase().includes("csrf");
+}
+
+async function send(path: string, options: RequestInit): Promise<Response> {
   const method = (options.method ?? "GET").toUpperCase();
   const headers = new Headers(options.headers);
-  if (method !== "GET" && method !== "HEAD" && csrfToken) {
-    headers.set("X-CSRF-Token", csrfToken);
+  const token = currentCsrf();
+  if (method !== "GET" && method !== "HEAD" && token) {
+    headers.set("X-CSRF-Token", token);
   }
   const isForm = options.body instanceof FormData;
   if (options.body && !isForm) {
     headers.set("Content-Type", "application/json");
   }
+  return fetch(`/api${path}`, { ...options, headers, credentials: "same-origin" });
+}
 
-  const res = await fetch(`/api${path}`, { ...options, headers, credentials: "same-origin" });
+async function request<T>(path: string, options: RequestInit = {}, retry = true): Promise<T> {
+  let res = await send(path, options);
+
+  if (!res.ok && res.status === 403 && retry && path !== "/auth/csrf") {
+    // No usable token — most likely the cookie was never set for this tab. Ask for
+    // one and try once more, so a write does not fail for a recoverable reason.
+    const peek = await res.clone().json().catch(() => null);
+    const reason =
+      typeof peek === "object" && peek !== null && "detail" in peek
+        ? String((peek as { detail: unknown }).detail)
+        : "";
+    if (isCsrfRejection(403, reason)) {
+      try {
+        const refreshed = await request<{ csrf_token: string }>("/auth/csrf", {}, false);
+        setCsrf(refreshed.csrf_token);
+        res = await send(path, options);
+      } catch {
+        // Fall through and report the original rejection.
+      }
+    }
+  }
+
   if (res.status === 204) {
     return undefined as T;
   }
