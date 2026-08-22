@@ -9,6 +9,7 @@ import { FilterRow, FilterToggle } from "../table/FilterRow";
 import { SortHeader } from "../table/SortHeader";
 import type { ColumnSpec } from "../table/sorting";
 import { useTable } from "../table/useTable";
+import { TABLE_MIN, TableWrap } from "../table/TableWrap";
 import { formatCents } from "../format";
 
 const ACCOUNT_TYPES = [
@@ -74,49 +75,51 @@ export function Accounts() {
                 <span />
                 <FilterToggle table={table} />
               </div>
-              <table>
-                <thead>
-                  <tr>
-                    <SortHeader table={table} col="name">
-                      Name
-                    </SortHeader>
-                    <SortHeader table={table} col="type">
-                      Type
-                    </SortHeader>
-                    <SortHeader table={table} col="institution">
-                      Institution
-                    </SortHeader>
-                    <SortHeader table={table} col="balance" numeric>
-                      Balance
-                    </SortHeader>
-                    <SortHeader table={table} col="txns" numeric>
-                      Txns
-                    </SortHeader>
-                  </tr>
-                  <FilterRow
-                    table={table}
-                    labels={ACCOUNT_LABELS}
-                    columns={["name", "type", "institution", "balance", "txns"]}
-                  />
-                </thead>
-                <tbody>
-                  {table.rows.map((a) => (
-                    <tr key={a.id}>
-                      <td>
-                        <Link to={`/transactions?account_id=${a.id}`}>{a.name}</Link>
-                      </td>
-                      <td>
-                        <span className="tag">{a.type.replace(/_/g, " ")}</span>
-                      </td>
-                      <td className="muted">{a.institution ?? "—"}</td>
-                      <td className={`num ${a.balance_cents < 0 ? "negative" : ""}`}>
-                        {formatCents(a.balance_cents)}
-                      </td>
-                      <td className="num muted">{a.txn_count}</td>
+              <TableWrap min={TABLE_MIN.accounts} label="Accounts">
+                <table>
+                  <thead>
+                    <tr>
+                      <SortHeader table={table} col="name">
+                        Name
+                      </SortHeader>
+                      <SortHeader table={table} col="type">
+                        Type
+                      </SortHeader>
+                      <SortHeader table={table} col="institution">
+                        Institution
+                      </SortHeader>
+                      <SortHeader table={table} col="balance" numeric>
+                        Balance
+                      </SortHeader>
+                      <SortHeader table={table} col="txns" numeric>
+                        Txns
+                      </SortHeader>
                     </tr>
-                  ))}
-                </tbody>
-              </table>
+                    <FilterRow
+                      table={table}
+                      labels={ACCOUNT_LABELS}
+                      columns={["name", "type", "institution", "balance", "txns"]}
+                    />
+                  </thead>
+                  <tbody>
+                    {table.rows.map((a) => (
+                      <tr key={a.id}>
+                        <td>
+                          <Link to={`/transactions?account_id=${a.id}`}>{a.name}</Link>
+                        </td>
+                        <td>
+                          <span className="tag">{a.type.replace(/_/g, " ")}</span>
+                        </td>
+                        <td className="muted">{a.institution ?? "—"}</td>
+                        <td className={`num ${a.balance_cents < 0 ? "negative" : ""}`}>
+                          {formatCents(a.balance_cents)}
+                        </td>
+                        <td className="num muted">{a.txn_count}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </TableWrap>
             </>
           ) : (
             <p className="muted">No accounts yet. Add one below, then import a statement.</p>

@@ -2,6 +2,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { type FormEvent, useState } from "react";
 import { Line, LineChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
 
+import { TABLE_MIN, TableWrap } from "../table/TableWrap";
 import { api } from "../api/client";
 import type { NetWorth as NetWorthData, NetWorthItem } from "../api/types";
 import { dollarsToCents, formatCents } from "../format";
@@ -125,27 +126,29 @@ function ItemTable({
             <span />
             <FilterToggle table={table} />
           </div>
-          <table>
-            {/* This list had no header row; it needs one for the columns to be
-                sortable, and the empty cell keeps the actions column aligned. */}
-            <thead>
-              <tr>
-                <SortHeader table={table} col="name">
-                  Name
-                </SortHeader>
-                <SortHeader table={table} col="value" numeric>
-                  Value
-                </SortHeader>
-                <th className="actions"></th>
-              </tr>
-              <FilterRow table={table} labels={ITEM_LABELS} columns={["name", "value", null]} />
-            </thead>
-            <tbody>
-              {table.rows.map((i) => (
-                <ItemRow key={i.id} item={i} onSave={onSave} onRemove={onRemove} busy={busy} />
-              ))}
-            </tbody>
-          </table>
+          <TableWrap min={TABLE_MIN.netWorthItems} label="Items">
+            <table>
+              {/* This list had no header row; it needs one for the columns to be
+                  sortable, and the empty cell keeps the actions column aligned. */}
+              <thead>
+                <tr>
+                  <SortHeader table={table} col="name">
+                    Name
+                  </SortHeader>
+                  <SortHeader table={table} col="value" numeric>
+                    Value
+                  </SortHeader>
+                  <th className="actions"></th>
+                </tr>
+                <FilterRow table={table} labels={ITEM_LABELS} columns={["name", "value", null]} />
+              </thead>
+              <tbody>
+                {table.rows.map((i) => (
+                  <ItemRow key={i.id} item={i} onSave={onSave} onRemove={onRemove} busy={busy} />
+                ))}
+              </tbody>
+            </table>
+          </TableWrap>
         </>
       ) : (
         <p className="muted">None yet.</p>

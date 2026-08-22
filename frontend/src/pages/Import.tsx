@@ -10,6 +10,7 @@ import type {
   PreviewRow,
   SniffResult,
 } from "../api/types";
+import { TABLE_MIN, TableWrap } from "../table/TableWrap";
 import { formatCents, formatDate } from "../format";
 import { SortHeader } from "../table/SortHeader";
 import type { ColumnSpec } from "../table/sorting";
@@ -372,100 +373,102 @@ export function ImportPage() {
                       Point each value from that column at an account. Anything left
                       unchosen is not imported.
                     </p>
-                    <table>
-                      <thead>
-                        <tr>
-                          <SortHeader table={scanTable} col="value">
-                            Value in file
-                          </SortHeader>
-                          <SortHeader table={scanTable} col="rows" numeric>
-                            Rows
-                          </SortHeader>
-                          <th>Import into</th>
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {scanTable.rows.map((s) => {
-                          const c = choices[s.value] ?? { mode: "" };
-                          return (
-                            <tr key={s.value}>
-                              <td>
-                                {s.value}
-                                {s.sample_description && (
-                                  <div className="muted" style={{ fontSize: 12 }}>
-                                    e.g. {s.sample_description}
-                                  </div>
-                                )}
-                              </td>
-                              <td className="num muted">{s.row_count}</td>
-                              <td>
-                                <select
-                                  value={
-                                    c.mode === "account"
-                                      ? c.accountId
-                                      : c.mode === "create"
-                                        ? "__create__"
-                                        : c.mode === "skip"
-                                          ? "__skip__"
-                                          : ""
-                                  }
-                                  onChange={(e) => {
-                                    const v = e.target.value;
-                                    const next: Choice =
-                                      v === "__create__"
-                                        ? { mode: "create", name: s.value, type: "everyday" }
-                                        : v === "__skip__"
-                                          ? { mode: "skip" }
-                                          : v === ""
-                                            ? { mode: "" }
-                                            : { mode: "account", accountId: v };
-                                    setChoices((prev) => ({ ...prev, [s.value]: next }));
-                                  }}
-                                >
-                                  <option value="">Choose…</option>
-                                  {accounts.data?.map((a) => (
-                                    <option key={a.id} value={a.id}>
-                                      {a.name}
-                                    </option>
-                                  ))}
-                                  <option value="__create__">Create new account…</option>
-                                  <option value="__skip__">Don’t import these</option>
-                                </select>
-                                {c.mode === "create" && (
-                                  <div className="row" style={{ marginTop: 6 }}>
-                                    <input
-                                      value={c.name}
-                                      placeholder="Account name"
-                                      onChange={(e) =>
-                                        setChoices((prev) => ({
-                                          ...prev,
-                                          [s.value]: { ...c, name: e.target.value },
-                                        }))
-                                      }
-                                    />
-                                    <select
-                                      value={c.type}
-                                      onChange={(e) =>
-                                        setChoices((prev) => ({
-                                          ...prev,
-                                          [s.value]: { ...c, type: e.target.value },
-                                        }))
-                                      }
-                                    >
-                                      {ACCOUNT_TYPES.map((t) => (
-                                        <option key={t} value={t}>
-                                          {t.replace(/_/g, " ")}
-                                        </option>
-                                      ))}
-                                    </select>
-                                  </div>
-                                )}
-                              </td>
-                            </tr>
-                          );
-                        })}
-                      </tbody>
-                    </table>
+                    <TableWrap min={TABLE_MIN.importAccounts} label="Accounts found in the file">
+                      <table>
+                        <thead>
+                          <tr>
+                            <SortHeader table={scanTable} col="value">
+                              Value in file
+                            </SortHeader>
+                            <SortHeader table={scanTable} col="rows" numeric>
+                              Rows
+                            </SortHeader>
+                            <th>Import into</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {scanTable.rows.map((s) => {
+                            const c = choices[s.value] ?? { mode: "" };
+                            return (
+                              <tr key={s.value}>
+                                <td>
+                                  {s.value}
+                                  {s.sample_description && (
+                                    <div className="muted" style={{ fontSize: 12 }}>
+                                      e.g. {s.sample_description}
+                                    </div>
+                                  )}
+                                </td>
+                                <td className="num muted">{s.row_count}</td>
+                                <td>
+                                  <select
+                                    value={
+                                      c.mode === "account"
+                                        ? c.accountId
+                                        : c.mode === "create"
+                                          ? "__create__"
+                                          : c.mode === "skip"
+                                            ? "__skip__"
+                                            : ""
+                                    }
+                                    onChange={(e) => {
+                                      const v = e.target.value;
+                                      const next: Choice =
+                                        v === "__create__"
+                                          ? { mode: "create", name: s.value, type: "everyday" }
+                                          : v === "__skip__"
+                                            ? { mode: "skip" }
+                                            : v === ""
+                                              ? { mode: "" }
+                                              : { mode: "account", accountId: v };
+                                      setChoices((prev) => ({ ...prev, [s.value]: next }));
+                                    }}
+                                  >
+                                    <option value="">Choose…</option>
+                                    {accounts.data?.map((a) => (
+                                      <option key={a.id} value={a.id}>
+                                        {a.name}
+                                      </option>
+                                    ))}
+                                    <option value="__create__">Create new account…</option>
+                                    <option value="__skip__">Don’t import these</option>
+                                  </select>
+                                  {c.mode === "create" && (
+                                    <div className="row" style={{ marginTop: 6 }}>
+                                      <input
+                                        value={c.name}
+                                        placeholder="Account name"
+                                        onChange={(e) =>
+                                          setChoices((prev) => ({
+                                            ...prev,
+                                            [s.value]: { ...c, name: e.target.value },
+                                          }))
+                                        }
+                                      />
+                                      <select
+                                        value={c.type}
+                                        onChange={(e) =>
+                                          setChoices((prev) => ({
+                                            ...prev,
+                                            [s.value]: { ...c, type: e.target.value },
+                                          }))
+                                        }
+                                      >
+                                        {ACCOUNT_TYPES.map((t) => (
+                                          <option key={t} value={t}>
+                                            {t.replace(/_/g, " ")}
+                                          </option>
+                                        ))}
+                                      </select>
+                                    </div>
+                                  )}
+                                </td>
+                              </tr>
+                            );
+                          })}
+                        </tbody>
+                      </table>
+                    </TableWrap>
                     {unchosen > 0 && (
                       <div className="notice">
                         {unchosen} value{unchosen === 1 ? "" : "s"} still to be assigned —
@@ -528,85 +531,87 @@ export function ImportPage() {
               assigned, and will not be imported.
             </div>
           )}
-          <table>
-            <thead>
-              <tr>
-                <th style={{ width: 32 }}>
-                  <span className="sr-only">Import</span>
-                </th>
-                <SortHeader table={previewTable} col="date">
-                  Date
-                </SortHeader>
-                <SortHeader table={previewTable} col="description">
-                  Description
-                </SortHeader>
-                {multiAccount && (
-                  <SortHeader table={previewTable} col="account">
-                    Account
+          <TableWrap min={TABLE_MIN.importPreview} label="Import preview">
+            <table>
+              <thead>
+                <tr>
+                  <th style={{ width: 32 }}>
+                    <span className="sr-only">Import</span>
+                  </th>
+                  <SortHeader table={previewTable} col="date">
+                    Date
                   </SortHeader>
-                )}
-                <SortHeader table={previewTable} col="category">
-                  Suggested category
-                </SortHeader>
-                <SortHeader table={previewTable} col="amount" numeric>
-                  Amount
-                </SortHeader>
-                <SortHeader table={previewTable} col="status">
-                  Status
-                </SortHeader>
-              </tr>
-            </thead>
-            <tbody>
-              {previewTable.rows.slice(0, 200).map((r) => (
-                <tr key={r.row_index} style={{ opacity: willImport(r) ? 1 : 0.55 }}>
-                  <td>
-                    <input
-                      type="checkbox"
-                      checked={willImport(r)}
-                      disabled={!canDecide(r)}
-                      title={
-                        canDecide(r)
-                          ? "Import this row"
-                          : "Already imported — importing it again would create a duplicate"
-                      }
-                      onChange={(e) =>
-                        setDecisions((d) => ({ ...d, [r.row_index]: e.target.checked }))
-                      }
-                    />
-                  </td>
-                  <td className="muted">{formatDate(r.txn_date)}</td>
-                  <td>{r.merchant ?? r.raw_description}</td>
-                  {multiAccount && <td className="muted">{r.account_name ?? "—"}</td>}
-                  <td className="muted">{r.suggested_category_name ?? "—"}</td>
-                  <td className={`num ${r.amount_cents < 0 ? "negative" : "positive"}`}>
-                    {formatCents(r.amount_cents)}
-                  </td>
-                  <td>
-                    {r.status === "new" ? (
-                      <span className="muted">New</span>
-                    ) : r.status === "unassigned" ? (
-                      <span className="tag">No account</span>
-                    ) : r.status === "duplicate_probable" ? (
-                      <span
-                        className="status-pill warning"
-                        title={
-                          r.matched_date
-                            ? `Matches ${formatDate(r.matched_date)} — ${r.matched_description ?? ""}`
-                            : undefined
-                        }
-                      >
-                        Possible duplicate
-                      </span>
-                    ) : (
-                      <span className="tag" title={r.duplicate_reason ?? undefined}>
-                        Already imported
-                      </span>
-                    )}
-                  </td>
+                  <SortHeader table={previewTable} col="description">
+                    Description
+                  </SortHeader>
+                  {multiAccount && (
+                    <SortHeader table={previewTable} col="account">
+                      Account
+                    </SortHeader>
+                  )}
+                  <SortHeader table={previewTable} col="category">
+                    Suggested category
+                  </SortHeader>
+                  <SortHeader table={previewTable} col="amount" numeric>
+                    Amount
+                  </SortHeader>
+                  <SortHeader table={previewTable} col="status">
+                    Status
+                  </SortHeader>
                 </tr>
-              ))}
-            </tbody>
-          </table>
+              </thead>
+              <tbody>
+                {previewTable.rows.slice(0, 200).map((r) => (
+                  <tr key={r.row_index} style={{ opacity: willImport(r) ? 1 : 0.55 }}>
+                    <td>
+                      <input
+                        type="checkbox"
+                        checked={willImport(r)}
+                        disabled={!canDecide(r)}
+                        title={
+                          canDecide(r)
+                            ? "Import this row"
+                            : "Already imported — importing it again would create a duplicate"
+                        }
+                        onChange={(e) =>
+                          setDecisions((d) => ({ ...d, [r.row_index]: e.target.checked }))
+                        }
+                      />
+                    </td>
+                    <td className="muted">{formatDate(r.txn_date)}</td>
+                    <td>{r.merchant ?? r.raw_description}</td>
+                    {multiAccount && <td className="muted">{r.account_name ?? "—"}</td>}
+                    <td className="muted">{r.suggested_category_name ?? "—"}</td>
+                    <td className={`num ${r.amount_cents < 0 ? "negative" : "positive"}`}>
+                      {formatCents(r.amount_cents)}
+                    </td>
+                    <td>
+                      {r.status === "new" ? (
+                        <span className="muted">New</span>
+                      ) : r.status === "unassigned" ? (
+                        <span className="tag">No account</span>
+                      ) : r.status === "duplicate_probable" ? (
+                        <span
+                          className="status-pill warning"
+                          title={
+                            r.matched_date
+                              ? `Matches ${formatDate(r.matched_date)} — ${r.matched_description ?? ""}`
+                              : undefined
+                          }
+                        >
+                          Possible duplicate
+                        </span>
+                      ) : (
+                        <span className="tag" title={r.duplicate_reason ?? undefined}>
+                          Already imported
+                        </span>
+                      )}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </TableWrap>
           {preview.rows.length > 200 && (
             <p className="muted">Showing the first 200 of {preview.rows.length} rows.</p>
           )}

@@ -2,6 +2,7 @@ import { useQuery } from "@tanstack/react-query";
 
 import { api } from "../api/client";
 import type { RecurringSeries, UpcomingBill } from "../api/types";
+import { TABLE_MIN, TableWrap } from "../table/TableWrap";
 import { formatCents, formatDate } from "../format";
 import { usePeriod } from "../period/context";
 import { FilterRow, FilterToggle } from "../table/FilterRow";
@@ -135,43 +136,45 @@ export function Bills() {
             <span />
             <FilterToggle table={upcomingTable} />
           </div>
-          <table>
-            <thead>
-              <tr>
-                <SortHeader table={upcomingTable} col="due">
-                  Due
-                </SortHeader>
-                <SortHeader table={upcomingTable} col="merchant">
-                  Merchant
-                </SortHeader>
-                <SortHeader table={upcomingTable} col="category">
-                  Category
-                </SortHeader>
-                <SortHeader table={upcomingTable} col="cadence">
-                  Cadence
-                </SortHeader>
-                <SortHeader table={upcomingTable} col="amount" numeric>
-                  Amount
-                </SortHeader>
-              </tr>
-              <FilterRow
-                table={upcomingTable}
-                labels={UPCOMING_LABELS}
-                columns={["due", "merchant", "category", "cadence", "amount"]}
-              />
-            </thead>
-            <tbody>
-              {upcomingTable.rows.map((b, i) => (
-                <tr key={`${b.merchant}-${b.due_date}-${i}`}>
-                  <td>{formatDate(b.due_date)}</td>
-                  <td>{b.merchant}</td>
-                  <td className="muted">{b.category_name ?? "—"}</td>
-                  <td className="muted">{cap(b.cadence)}</td>
-                  <td className="num negative">{formatCents(-b.amount_cents)}</td>
+          <TableWrap min={TABLE_MIN.billsUpcoming} label="Upcoming bills">
+            <table>
+              <thead>
+                <tr>
+                  <SortHeader table={upcomingTable} col="due">
+                    Due
+                  </SortHeader>
+                  <SortHeader table={upcomingTable} col="merchant">
+                    Merchant
+                  </SortHeader>
+                  <SortHeader table={upcomingTable} col="category">
+                    Category
+                  </SortHeader>
+                  <SortHeader table={upcomingTable} col="cadence">
+                    Cadence
+                  </SortHeader>
+                  <SortHeader table={upcomingTable} col="amount" numeric>
+                    Amount
+                  </SortHeader>
                 </tr>
-              ))}
-            </tbody>
-          </table>
+                <FilterRow
+                  table={upcomingTable}
+                  labels={UPCOMING_LABELS}
+                  columns={["due", "merchant", "category", "cadence", "amount"]}
+                />
+              </thead>
+              <tbody>
+                {upcomingTable.rows.map((b, i) => (
+                  <tr key={`${b.merchant}-${b.due_date}-${i}`}>
+                    <td>{formatDate(b.due_date)}</td>
+                    <td>{b.merchant}</td>
+                    <td className="muted">{b.category_name ?? "—"}</td>
+                    <td className="muted">{cap(b.cadence)}</td>
+                    <td className="num negative">{formatCents(-b.amount_cents)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </TableWrap>
           </>
         ) : (
           <p className="muted">No upcoming bills detected yet.</p>
@@ -186,62 +189,64 @@ export function Bills() {
             <span />
             <FilterToggle table={seriesTable} />
           </div>
-          <table>
-            <thead>
-              <tr>
-                <SortHeader table={seriesTable} col="merchant">
-                  Merchant
-                </SortHeader>
-                <SortHeader table={seriesTable} col="cadence">
-                  Cadence
-                </SortHeader>
-                <SortHeader table={seriesTable} col="category">
-                  Category
-                </SortHeader>
-                <SortHeader table={seriesTable} col="typical" numeric>
-                  Typical
-                </SortHeader>
-                <SortHeader table={seriesTable} col="monthly" numeric>
-                  Monthly
-                </SortHeader>
-                <SortHeader table={seriesTable} col="last">
-                  Last seen
-                </SortHeader>
-                <SortHeader table={seriesTable} col="next">
-                  Next due
-                </SortHeader>
-                <SortHeader table={seriesTable} col="kind">
-                  Kind
-                </SortHeader>
-              </tr>
-              <FilterRow
-                table={seriesTable}
-                labels={SERIES_LABELS}
-                columns={[
-                  "merchant", "cadence", "category", "typical",
-                  "monthly", "last", "next", "kind",
-                ]}
-              />
-            </thead>
-            <tbody>
-              {seriesTable.rows.map((s) => (
-                <tr key={`${s.merchant}-${s.cadence}`} style={{ opacity: s.active ? 1 : 0.55 }}>
-                  <td>{s.merchant}</td>
-                  <td className="muted">{cap(s.cadence)}</td>
-                  <td className="muted">{s.category_name ?? "—"}</td>
-                  <td className={`num ${s.direction === "income" ? "positive" : ""}`}>
-                    {formatCents(
-                      s.direction === "income" ? s.typical_amount_cents : -s.typical_amount_cents,
-                    )}
-                  </td>
-                  <td className="num muted">{formatCents(s.monthly_amount_cents)}</td>
-                  <td className="muted">{formatDate(s.last_date)}</td>
-                  <td className="muted">{formatDate(s.next_due)}</td>
-                  <td>{tagFor(s)}</td>
+          <TableWrap min={TABLE_MIN.billsRecurring} label="Recurring transactions">
+            <table>
+              <thead>
+                <tr>
+                  <SortHeader table={seriesTable} col="merchant">
+                    Merchant
+                  </SortHeader>
+                  <SortHeader table={seriesTable} col="cadence">
+                    Cadence
+                  </SortHeader>
+                  <SortHeader table={seriesTable} col="category">
+                    Category
+                  </SortHeader>
+                  <SortHeader table={seriesTable} col="typical" numeric>
+                    Typical
+                  </SortHeader>
+                  <SortHeader table={seriesTable} col="monthly" numeric>
+                    Monthly
+                  </SortHeader>
+                  <SortHeader table={seriesTable} col="last">
+                    Last seen
+                  </SortHeader>
+                  <SortHeader table={seriesTable} col="next">
+                    Next due
+                  </SortHeader>
+                  <SortHeader table={seriesTable} col="kind">
+                    Kind
+                  </SortHeader>
                 </tr>
-              ))}
-            </tbody>
-          </table>
+                <FilterRow
+                  table={seriesTable}
+                  labels={SERIES_LABELS}
+                  columns={[
+                    "merchant", "cadence", "category", "typical",
+                    "monthly", "last", "next", "kind",
+                  ]}
+                />
+              </thead>
+              <tbody>
+                {seriesTable.rows.map((s) => (
+                  <tr key={`${s.merchant}-${s.cadence}`} style={{ opacity: s.active ? 1 : 0.55 }}>
+                    <td>{s.merchant}</td>
+                    <td className="muted">{cap(s.cadence)}</td>
+                    <td className="muted">{s.category_name ?? "—"}</td>
+                    <td className={`num ${s.direction === "income" ? "positive" : ""}`}>
+                      {formatCents(
+                        s.direction === "income" ? s.typical_amount_cents : -s.typical_amount_cents,
+                      )}
+                    </td>
+                    <td className="num muted">{formatCents(s.monthly_amount_cents)}</td>
+                    <td className="muted">{formatDate(s.last_date)}</td>
+                    <td className="muted">{formatDate(s.next_due)}</td>
+                    <td>{tagFor(s)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </TableWrap>
           </>
         ) : (
           <p className="muted">

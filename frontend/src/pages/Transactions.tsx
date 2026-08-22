@@ -11,6 +11,7 @@ import { useServerTable } from "../table/useServerTable";
 import { useTable } from "../table/useTable";
 import { CategoriseDialog } from "../components/CategoriseDialog";
 import { RulesManager } from "../components/RulesManager";
+import { TABLE_MIN, TableWrap } from "../table/TableWrap";
 import { formatCents, formatDate } from "../format";
 import type { Transaction, TxnGroup } from "../api/types";
 
@@ -31,15 +32,15 @@ const GROUP_COLUMNS: ColumnSpec<TxnGroup>[] = [
   { key: "total", sort: (g) => g.total_cents, text: (g) => formatCents(g.total_cents) },
 ];
 
-type Tab = "transactions" | "rules";
-type View = "list" | "groups";
+type Tab = "transactions" | "groups" | "rules";
 type GroupBy = "merchant" | "description";
 
 export function Transactions() {
   const qc = useQueryClient();
   const [searchParams] = useSearchParams();
   const [tab, setTab] = useState<Tab>("transactions");
-  const [view, setView] = useState<View>("list");
+  // Group review is a third view of the same data, not a mode within the list.
+  const view = tab === "groups" ? "groups" : "list";
   const [groupBy, setGroupBy] = useState<GroupBy>("merchant");
   const [q, setQ] = useState(searchParams.get("q") ?? "");
   const [accountId, setAccountId] = useState(searchParams.get("account_id") ?? "");
@@ -75,12 +76,12 @@ export function Transactions() {
         page_size: 50,
         ...server.params,
       }),
-    enabled: tab === "transactions" && view === "list",
+    enabled: tab === "transactions",
   });
   const groups = useQuery({
     queryKey: ["txn-groups", groupBy],
     queryFn: () => api.transactionGroups(groupBy, true),
-    enabled: tab === "transactions" && view === "groups",
+    enabled: tab === "groups",
   });
   // Group review is fully loaded, so it sorts and filters in the browser.
   const groupTable = useTable(groups.data?.groups ?? [], GROUP_COLUMNS, {
@@ -185,6 +186,15 @@ export function Transactions() {
         >
           Transactions
         </button>
+        <button
+          className={`tab ${tab === "groups" ? "active" : ""}`}
+          onClick={() => {
+            setTab("groups");
+            setSelected(new Set());
+          }}
+        >
+          Group review
+        </button>
         <button className={`tab ${tab === "rules" ? "active" : ""}`} onClick={() => setTab("rules")}>
           Rules
         </button>
@@ -197,22 +207,6 @@ export function Transactions() {
       ) : (
         <>
           <div className="toolbar">
-            <button
-              className={`btn ${view === "list" ? "btn-primary" : "btn-ghost"}`}
-              onClick={() => setView("list")}
-            >
-              List
-            </button>
-            <button
-              className={`btn ${view === "groups" ? "btn-primary" : "btn-ghost"}`}
-              onClick={() => {
-                setView("groups");
-                setSelected(new Set());
-              }}
-            >
-              Group review
-            </button>
-
             {view === "list" ? (
               <>
                 <input
@@ -276,7 +270,10 @@ export function Transactions() {
                   <option value="merchant">Group by merchant</option>
                   <option value="description">Group by description</option>
                 </select>
-                <span className="muted">Uncategorised transactions, most common first.</span>
+                <span className="muted">
+                  Uncategorised transactions across all time, most common first — this list
+                  ignores the selected period.
+                </span>
               </>
             )}
           </div>
@@ -287,94 +284,96 @@ export function Transactions() {
                 <span />
                 <FilterToggle table={server} count={txns.data?.total} />
               </div>
-              <table>
-                <thead>
-                  <tr>
-                    <th className="pick">
-                      <input
-                        type="checkbox"
-                        style={{ width: "auto" }}
-                        checked={allOnPageSelected}
-                        onChange={toggleAllOnPage}
-                      />
-                    </th>
-                    <SortHeader table={server} col="date">
-                      Date
-                    </SortHeader>
-                    <SortHeader table={server} col="description">
-                      Description
-                    </SortHeader>
-                    <SortHeader table={server} col="account">
-                      Account
-                    </SortHeader>
-                    <SortHeader table={server} col="category">
-                      Category
-                    </SortHeader>
-                    <SortHeader table={server} col="amount" numeric>
-                      Amount
-                    </SortHeader>
-                    <th className="actions"></th>
-                  </tr>
-                  <FilterRow
-                    table={server}
-                    labels={TXN_LABELS}
-                    columns={[null, "date", "description", "account", "category", "amount", null]}
-                  />
-                </thead>
-                <tbody>
-                  {pageItems.map((t) => (
-                    <tr key={t.id}>
-                      <td className="pick">
+              <TableWrap min={TABLE_MIN.transactions} label="Transactions">
+                <table>
+                  <thead>
+                    <tr>
+                      <th className="pick">
                         <input
                           type="checkbox"
                           style={{ width: "auto" }}
-                          checked={selected.has(t.id)}
-                          onChange={() => toggleSel(t.id)}
+                          checked={allOnPageSelected}
+                          onChange={toggleAllOnPage}
                         />
-                      </td>
-                      <td className="muted">{formatDate(t.txn_date)}</td>
-                      <td>
-                        {t.merchant ?? t.raw_description}
-                        {t.is_transfer && (
-                          <span className="tag transfer" style={{ marginLeft: 6 }}>
-                            transfer
-                          </span>
-                        )}
-                      </td>
-                      <td className="muted">{t.account_name}</td>
-                      <td>
-                        <select
-                          className="pill-select"
-                          value={t.category_id ?? ""}
-                          onChange={(e) => quickCat.mutate({ id: t.id, categoryId: e.target.value })}
-                        >
-                          <option value="">Uncategorised</option>
-                          {categoryOptions}
-                        </select>
-                      </td>
-                      <td className={`num ${t.amount_cents < 0 ? "negative" : "positive"}`}>
-                        {formatCents(t.amount_cents)}
-                      </td>
-                      <td className="actions">
-                        <button
-                          className={`icon-btn ${t.category_locked ? "on" : ""}`}
-                          title={t.category_locked ? "Locked — click to unlock" : "Lock"}
-                          onClick={() => lockToggle.mutate({ id: t.id, locked: !t.category_locked })}
-                        >
-                          {t.category_locked ? "🔒" : "🔓"}
-                        </button>
-                        <button
-                          className="icon-btn"
-                          title="Apply to similar, make a rule…"
-                          onClick={() => setDialogTxn(t)}
-                        >
-                          ⋯
-                        </button>
-                      </td>
+                      </th>
+                      <SortHeader table={server} col="date">
+                        Date
+                      </SortHeader>
+                      <SortHeader table={server} col="description">
+                        Description
+                      </SortHeader>
+                      <SortHeader table={server} col="account">
+                        Account
+                      </SortHeader>
+                      <SortHeader table={server} col="category">
+                        Category
+                      </SortHeader>
+                      <SortHeader table={server} col="amount" numeric>
+                        Amount
+                      </SortHeader>
+                      <th className="actions"></th>
                     </tr>
-                  ))}
-                </tbody>
-              </table>
+                    <FilterRow
+                      table={server}
+                      labels={TXN_LABELS}
+                      columns={[null, "date", "description", "account", "category", "amount", null]}
+                    />
+                  </thead>
+                  <tbody>
+                    {pageItems.map((t) => (
+                      <tr key={t.id}>
+                        <td className="pick">
+                          <input
+                            type="checkbox"
+                            style={{ width: "auto" }}
+                            checked={selected.has(t.id)}
+                            onChange={() => toggleSel(t.id)}
+                          />
+                        </td>
+                        <td className="muted">{formatDate(t.txn_date)}</td>
+                        <td>
+                          {t.merchant ?? t.raw_description}
+                          {t.is_transfer && (
+                            <span className="tag transfer" style={{ marginLeft: 6 }}>
+                              transfer
+                            </span>
+                          )}
+                        </td>
+                        <td className="muted">{t.account_name}</td>
+                        <td>
+                          <select
+                            className="pill-select"
+                            value={t.category_id ?? ""}
+                            onChange={(e) => quickCat.mutate({ id: t.id, categoryId: e.target.value })}
+                          >
+                            <option value="">Uncategorised</option>
+                            {categoryOptions}
+                          </select>
+                        </td>
+                        <td className={`num ${t.amount_cents < 0 ? "negative" : "positive"}`}>
+                          {formatCents(t.amount_cents)}
+                        </td>
+                        <td className="actions">
+                          <button
+                            className={`icon-btn ${t.category_locked ? "on" : ""}`}
+                            title={t.category_locked ? "Locked — click to unlock" : "Lock"}
+                            onClick={() => lockToggle.mutate({ id: t.id, locked: !t.category_locked })}
+                          >
+                            {t.category_locked ? "🔒" : "🔓"}
+                          </button>
+                          <button
+                            className="icon-btn"
+                            title="Apply to similar, make a rule…"
+                            onClick={() => setDialogTxn(t)}
+                          >
+                            ⋯
+                          </button>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </TableWrap>
               {txns.data && pageItems.length === 0 && (
                 <p className="muted">No transactions match your filters.</p>
               )}
@@ -441,50 +440,52 @@ export function Transactions() {
                 <span />
                 <FilterToggle table={groupTable} />
               </div>
-              <table>
-                <thead>
-                  <tr>
-                    <SortHeader table={groupTable} col="label">
-                      {groupBy === "merchant" ? "Merchant" : "Description"}
-                    </SortHeader>
-                    <SortHeader table={groupTable} col="count" numeric>
-                      Count
-                    </SortHeader>
-                    <SortHeader table={groupTable} col="total" numeric>
-                      Total
-                    </SortHeader>
-                    <th>Categorise all as</th>
-                  </tr>
-                  <FilterRow
-                    table={groupTable}
-                    labels={GROUP_LABELS}
-                    columns={["label", "count", "total", null]}
-                  />
-                </thead>
-                <tbody>
-                  {groupTable.rows.map((g) => (
-                    <tr key={g.key}>
-                      <td>{g.sample_description || g.key}</td>
-                      <td className="num">{g.count}</td>
-                      <td className="num">{formatCents(g.total_cents)}</td>
-                      <td>
-                        <select
-                          className="pill-select"
-                          value=""
-                          disabled={groupApply.isPending}
-                          onChange={(e) => {
-                            if (e.target.value)
-                              groupApply.mutate({ sampleId: g.sample_id, categoryId: e.target.value });
-                          }}
-                        >
-                          <option value="">Choose…</option>
-                          {categoryOptions}
-                        </select>
-                      </td>
+              <TableWrap min={TABLE_MIN.txnGroups} label="Grouped transactions">
+                <table>
+                  <thead>
+                    <tr>
+                      <SortHeader table={groupTable} col="label">
+                        {groupBy === "merchant" ? "Merchant" : "Description"}
+                      </SortHeader>
+                      <SortHeader table={groupTable} col="count" numeric>
+                        Count
+                      </SortHeader>
+                      <SortHeader table={groupTable} col="total" numeric>
+                        Total
+                      </SortHeader>
+                      <th>Categorise all as</th>
                     </tr>
-                  ))}
-                </tbody>
-              </table>
+                    <FilterRow
+                      table={groupTable}
+                      labels={GROUP_LABELS}
+                      columns={["label", "count", "total", null]}
+                    />
+                  </thead>
+                  <tbody>
+                    {groupTable.rows.map((g) => (
+                      <tr key={g.key}>
+                        <td>{g.sample_description || g.key}</td>
+                        <td className="num">{g.count}</td>
+                        <td className="num">{formatCents(g.total_cents)}</td>
+                        <td>
+                          <select
+                            className="pill-select"
+                            value=""
+                            disabled={groupApply.isPending}
+                            onChange={(e) => {
+                              if (e.target.value)
+                                groupApply.mutate({ sampleId: g.sample_id, categoryId: e.target.value });
+                            }}
+                          >
+                            <option value="">Choose…</option>
+                            {categoryOptions}
+                          </select>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </TableWrap>
               {groups.data && groups.data.groups.length === 0 && (
                 <p className="muted">Nothing left to review — all transactions are categorised.</p>
               )}

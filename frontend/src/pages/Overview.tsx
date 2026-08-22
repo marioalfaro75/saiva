@@ -20,6 +20,7 @@ import { FilterRow, FilterToggle } from "../table/FilterRow";
 import { SortHeader } from "../table/SortHeader";
 import type { ColumnSpec } from "../table/sorting";
 import { useTable } from "../table/useTable";
+import { TABLE_MIN, TableWrap } from "../table/TableWrap";
 import { formatCents, formatPct } from "../format";
 
 // A categorical scale: each entry is one pie slice, not a meaning. Two of these
@@ -161,41 +162,43 @@ export function Overview() {
               <span />
               <FilterToggle table={table} />
             </div>
-            <table>
-            <thead>
-              <tr>
-                <SortHeader table={table} col="category">
-                  Category
-                </SortHeader>
-                <SortHeader table={table} col="parent">
-                  Parent
-                </SortHeader>
-                <SortHeader table={table} col="spent" numeric>
-                  Spent
-                </SortHeader>
-                <SortHeader table={table} col="share" numeric>
-                  Share
-                </SortHeader>
-              </tr>
-              <FilterRow
-                table={table}
-                labels={BREAKDOWN_LABELS}
-                columns={["category", "parent", "spent", "share"]}
-              />
-            </thead>
-            <tbody>
-              {table.rows.map((i) => (
-                <tr key={i.category_id ?? "uncat"}>
-                  <td>
-                    <Link to={transactionsFor(i.category_id, period)}>{i.category_name}</Link>
-                  </td>
-                  <td className="muted">{i.parent_name ?? "—"}</td>
-                  <td className="num">{formatCents(i.amount_cents)}</td>
-                  <td className="num muted">{formatPct(i.pct)}</td>
+            <TableWrap min={TABLE_MIN.overviewBreakdown} label="Spending by category">
+              <table>
+              <thead>
+                <tr>
+                  <SortHeader table={table} col="category">
+                    Category
+                  </SortHeader>
+                  <SortHeader table={table} col="parent">
+                    Parent
+                  </SortHeader>
+                  <SortHeader table={table} col="spent" numeric>
+                    Spent
+                  </SortHeader>
+                  <SortHeader table={table} col="share" numeric>
+                    Share
+                  </SortHeader>
                 </tr>
-              ))}
-            </tbody>
-            </table>
+                <FilterRow
+                  table={table}
+                  labels={BREAKDOWN_LABELS}
+                  columns={["category", "parent", "spent", "share"]}
+                />
+              </thead>
+              <tbody>
+                {table.rows.map((i) => (
+                  <tr key={i.category_id ?? "uncat"}>
+                    <td>
+                      <Link to={transactionsFor(i.category_id, period)}>{i.category_name}</Link>
+                    </td>
+                    <td className="muted">{i.parent_name ?? "—"}</td>
+                    <td className="num">{formatCents(i.amount_cents)}</td>
+                    <td className="num muted">{formatPct(i.pct)}</td>
+                  </tr>
+                ))}
+              </tbody>
+              </table>
+            </TableWrap>
           </>
         ) : (
           <p className="muted">Nothing to show yet.</p>

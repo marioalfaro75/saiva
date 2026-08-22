@@ -4,6 +4,7 @@ import { type FormEvent, useState } from "react";
 import { api } from "../api/client";
 import type { BenchmarkItem } from "../api/types";
 import { useAuth } from "../auth/AuthContext";
+import { TABLE_MIN, TableWrap } from "../table/TableWrap";
 import { formatCents } from "../format";
 import { usePeriod } from "../period/context";
 import { FilterRow, FilterToggle } from "../table/FilterRow";
@@ -151,37 +152,39 @@ export function Benchmarks() {
           <span />
           <FilterToggle table={table} />
         </div>
-        <table>
-          <thead>
-            <tr>
-              <SortHeader table={table} col="category">
-                Category
-              </SortHeader>
-              <SortHeader table={table} col="yours" numeric>
-                You / wk
-              </SortHeader>
-              <SortHeader table={table} col="typical" numeric>
-                Typical / wk
-              </SortHeader>
-              <SortHeader table={table} col="ratio">
-                vs typical
-              </SortHeader>
-              <SortHeader table={table} col="difference" numeric>
-                Difference
-              </SortHeader>
-            </tr>
-            <FilterRow
-              table={table}
-              labels={BENCHMARK_LABELS}
-              columns={["category", "yours", "typical", "ratio", "difference"]}
-            />
-          </thead>
-          <tbody>
-            {table.rows.map((i) => (
-              <Row key={i.category} item={i} />
-            ))}
-          </tbody>
-        </table>
+        <TableWrap min={TABLE_MIN.benchmarks} label="Spending vs typical household">
+          <table>
+            <thead>
+              <tr>
+                <SortHeader table={table} col="category">
+                  Category
+                </SortHeader>
+                <SortHeader table={table} col="yours" numeric>
+                  You / wk
+                </SortHeader>
+                <SortHeader table={table} col="typical" numeric>
+                  Typical / wk
+                </SortHeader>
+                <SortHeader table={table} col="ratio">
+                  vs typical
+                </SortHeader>
+                <SortHeader table={table} col="difference" numeric>
+                  Difference
+                </SortHeader>
+              </tr>
+              <FilterRow
+                table={table}
+                labels={BENCHMARK_LABELS}
+                columns={["category", "yours", "typical", "ratio", "difference"]}
+              />
+            </thead>
+            <tbody>
+              {table.rows.map((i) => (
+                <Row key={i.category} item={i} />
+              ))}
+            </tbody>
+          </table>
+        </TableWrap>
         {data && data.your_total_weekly_cents === 0 && (
           <p className="muted">
             No spending yet to compare. Import a few months of transactions (or load demo data from

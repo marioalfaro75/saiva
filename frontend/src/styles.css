@@ -481,6 +481,18 @@ th.num {
   font-variant-numeric: tabular-nums;
 }
 
+/* A wide table scrolls inside its card rather than squashing or pushing the page
+   sideways. Note: overflow-x: auto makes overflow-y compute to auto too, so this is
+   a scroll container on both axes — a future sticky thead or a cell overlay would be
+   clipped to it. */
+.table-wrap {
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+}
+.table-wrap > table {
+  min-width: var(--tw-min, 0);
+}
+
 /* ---- Sortable / filterable tables ---- */
 th.sortable {
   padding: 0;

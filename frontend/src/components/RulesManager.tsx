@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
+import { TABLE_MIN, TableWrap } from "../table/TableWrap";
 import { api } from "../api/client";
 import { FilterRow, FilterToggle } from "../table/FilterRow";
 import { SortHeader } from "../table/SortHeader";
@@ -168,110 +169,112 @@ export function RulesManager({ categories, onFlash }: Props) {
             <span />
             <FilterToggle table={table} />
           </div>
-          <table>
-            <thead>
-              <tr>
-                <SortHeader table={table} col="active">
-                  Active
-                </SortHeader>
-                <SortHeader table={table} col="when">
-                  When
-                </SortHeader>
-                <SortHeader table={table} col="pattern">
-                  Matches
-                </SortHeader>
-                <SortHeader table={table} col="category">
-                  Category
-                </SortHeader>
-                <SortHeader table={table} col="source">
-                  Source
-                </SortHeader>
-                <th className="actions"></th>
-              </tr>
-              <FilterRow
-                table={table}
-                labels={RULE_LABELS}
-                columns={["active", "when", "pattern", "category", "source", null]}
-              />
-            </thead>
-            <tbody>
-              {table.rows.map((r) => (
-                <tr key={r.id}>
-                  <td>
-                    <input
-                      type="checkbox"
-                      style={{ width: "auto" }}
-                      checked={r.is_active}
-                      onChange={(e) =>
-                        update.mutate({ id: r.id, patch: { is_active: e.target.checked } })
-                      }
-                    />
-                  </td>
-                  <td>
-                    <select
-                      className="pill-select"
-                      value={r.match_type}
-                      onChange={(e) =>
-                        update.mutate({
-                          id: r.id,
-                          patch: { match_type: e.target.value as MatchType },
-                        })
-                      }
-                    >
-                      {MATCH_TYPES.map((m) => (
-                        <option key={m} value={m}>
-                          {m.replace("_", " ")}
-                        </option>
-                      ))}
-                    </select>
-                  </td>
-                  <td>
-                    <input
-                      defaultValue={r.pattern}
-                      style={{ minWidth: 140 }}
-                      onBlur={(e) => {
-                        const v = e.target.value.trim();
-                        if (v && v !== r.pattern) update.mutate({ id: r.id, patch: { pattern: v } });
-                      }}
-                    />
-                  </td>
-                  <td>
-                    <select
-                      className="pill-select"
-                      value={r.category_id}
-                      onChange={(e) =>
-                        update.mutate({ id: r.id, patch: { category_id: e.target.value } })
-                      }
-                    >
-                      {subcategories.map((c) => (
-                        <option key={c.id} value={c.id}>
-                          {c.name}
-                        </option>
-                      ))}
-                    </select>
-                  </td>
-                  <td className="muted">{r.source}</td>
-                  <td className="actions">
-                    <button
-                      className="btn btn-ghost"
-                      disabled={apply.isPending}
-                      onClick={() => apply.mutate(r.id)}
-                    >
-                      Apply now
-                    </button>
-                    <button
-                      className="btn btn-ghost"
-                      onClick={() => {
-                        if (window.confirm("Delete this rule?")) remove.mutate(r.id);
-                      }}
-                    >
-                      Delete
-                    </button>
-                  </td>
+          <TableWrap min={TABLE_MIN.rules} label="Categorisation rules">
+            <table>
+              <thead>
+                <tr>
+                  <SortHeader table={table} col="active">
+                    Active
+                  </SortHeader>
+                  <SortHeader table={table} col="when">
+                    When
+                  </SortHeader>
+                  <SortHeader table={table} col="pattern">
+                    Matches
+                  </SortHeader>
+                  <SortHeader table={table} col="category">
+                    Category
+                  </SortHeader>
+                  <SortHeader table={table} col="source">
+                    Source
+                  </SortHeader>
+                  <th className="actions"></th>
                 </tr>
-              ))}
-            </tbody>
-          </table>
+                <FilterRow
+                  table={table}
+                  labels={RULE_LABELS}
+                  columns={["active", "when", "pattern", "category", "source", null]}
+                />
+              </thead>
+              <tbody>
+                {table.rows.map((r) => (
+                  <tr key={r.id}>
+                    <td>
+                      <input
+                        type="checkbox"
+                        style={{ width: "auto" }}
+                        checked={r.is_active}
+                        onChange={(e) =>
+                          update.mutate({ id: r.id, patch: { is_active: e.target.checked } })
+                        }
+                      />
+                    </td>
+                    <td>
+                      <select
+                        className="pill-select"
+                        value={r.match_type}
+                        onChange={(e) =>
+                          update.mutate({
+                            id: r.id,
+                            patch: { match_type: e.target.value as MatchType },
+                          })
+                        }
+                      >
+                        {MATCH_TYPES.map((m) => (
+                          <option key={m} value={m}>
+                            {m.replace("_", " ")}
+                          </option>
+                        ))}
+                      </select>
+                    </td>
+                    <td>
+                      <input
+                        defaultValue={r.pattern}
+                        style={{ minWidth: 140 }}
+                        onBlur={(e) => {
+                          const v = e.target.value.trim();
+                          if (v && v !== r.pattern) update.mutate({ id: r.id, patch: { pattern: v } });
+                        }}
+                      />
+                    </td>
+                    <td>
+                      <select
+                        className="pill-select"
+                        value={r.category_id}
+                        onChange={(e) =>
+                          update.mutate({ id: r.id, patch: { category_id: e.target.value } })
+                        }
+                      >
+                        {subcategories.map((c) => (
+                          <option key={c.id} value={c.id}>
+                            {c.name}
+                          </option>
+                        ))}
+                      </select>
+                    </td>
+                    <td className="muted">{r.source}</td>
+                    <td className="actions">
+                      <button
+                        className="btn btn-ghost"
+                        disabled={apply.isPending}
+                        onClick={() => apply.mutate(r.id)}
+                      >
+                        Apply now
+                      </button>
+                      <button
+                        className="btn btn-ghost"
+                        onClick={() => {
+                          if (window.confirm("Delete this rule?")) remove.mutate(r.id);
+                        }}
+                      >
+                        Delete
+                      </button>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </TableWrap>
           </>
         )}
       </div>
