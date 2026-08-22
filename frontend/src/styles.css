@@ -1,4 +1,8 @@
 :root {
+  /* Native selects, date pickers and scrollbars render in the OS light theme on a
+     dark app without this. One line, every native control. */
+  color-scheme: dark;
+
   --bg: #0b1220;
   --surface: #131c2e;
   --surface-2: #1b2740;
@@ -11,6 +15,48 @@
   --negative: #f87171;
   --radius: 12px;
   --shadow: 0 6px 24px rgba(0, 0, 0, 0.25);
+  /* Semantic colours, previously hardcoded at each use. Deliberately NOT applied to
+     the categorical chart palette in Overview.tsx, where the same hex is series
+     colour rather than a warning. */
+  --warning: #f59e0b;
+  --info: #60a5fa;
+}
+
+/* Keyboard users had no visible focus anywhere: the only focus rule in the file
+   removed the outline from inputs and selects, and everything else fell back to
+   whatever the browser drew on a near-black ground. */
+:where(a, button, select, input, textarea, summary, [tabindex]):focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: 6px;
+}
+
+/* The drawer is the app's first real motion; this also covers the budget bar. */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+/* Lets a keyboard reach the page without tabbing the whole navigation. */
+.skip-link {
+  position: absolute;
+  left: -9999px;
+  z-index: 100;
+}
+.skip-link:focus {
+  left: 12px;
+  top: 12px;
+  padding: 8px 14px;
+  background: var(--surface-2);
+  border: 1px solid var(--accent);
+  border-radius: 8px;
+  color: var(--text);
 }
 
 * {
@@ -21,7 +67,7 @@ body {
   margin: 0;
   background: var(--bg);
   color: var(--text);
-  font-family: "Inter", system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
   font-size: 15px;
   line-height: 1.5;
 }
@@ -120,6 +166,13 @@ a {
   display: grid;
   gap: 16px;
 }
+/* Two hard-coded "1fr 1fr" grids used to crush a 200px donut and two editable
+   tables into 131px boxes on a phone. auto-fit collapses them with no breakpoint. */
+.split {
+  display: grid;
+  gap: 16px;
+  grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+}
 .cards {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
@@ -208,9 +261,8 @@ select {
   border-radius: 9px;
   font-size: 14px;
 }
-input:focus,
-select:focus {
-  outline: none;
+input:focus-visible,
+select:focus-visible {
   border-color: var(--accent);
 }
 .field {
@@ -499,7 +551,7 @@ th.actions {
   transition: width 0.3s ease;
 }
 .budget-bar > span.warning {
-  background: #f59e0b;
+  background: var(--warning);
 }
 .budget-bar > span.over {
   background: var(--negative);
@@ -518,7 +570,7 @@ th.actions {
 }
 .status-pill.warning {
   background: rgba(245, 158, 11, 0.15);
-  color: #f59e0b;
+  color: var(--warning);
 }
 .status-pill.over {
   background: rgba(248, 113, 113, 0.15);
@@ -526,7 +578,7 @@ th.actions {
 }
 .status-pill.info {
   background: rgba(96, 165, 250, 0.15);
-  color: #60a5fa;
+  color: var(--info);
 }
 
 /* ---- Insights ---- */
@@ -537,7 +589,7 @@ th.actions {
   border-left-color: var(--negative);
 }
 .insight-warn {
-  border-left-color: #f59e0b;
+  border-left-color: var(--warning);
 }
 .insight-info {
   border-left-color: #2dd4bf;
@@ -567,7 +619,7 @@ th.actions {
   gap: 8px;
   padding: 8px 20px;
   background: rgba(245, 158, 11, 0.15);
-  color: #f59e0b;
+  color: var(--warning);
   font-size: 13px;
 }
 .period-picker {

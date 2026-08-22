@@ -245,7 +245,7 @@ export function NetWorth() {
         </div>
       )}
 
-      <div className="grid" style={{ gridTemplateColumns: "1fr 1fr", marginTop: 16 }}>
+      <div className="split" style={{ marginTop: 16 }}>
         <ItemTable
           title="Assets"
           tableId="networth-assets"

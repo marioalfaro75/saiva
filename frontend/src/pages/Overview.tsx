@@ -11,6 +11,8 @@ import {
   YAxis,
 } from "recharts";
 
+import { Link } from "react-router-dom";
+
 import { api } from "../api/client";
 import type { CategoryBreakdownItem } from "../api/types";
 import { usePeriod } from "../period/context";
@@ -20,6 +22,9 @@ import type { ColumnSpec } from "../table/sorting";
 import { useTable } from "../table/useTable";
 import { formatCents, formatPct } from "../format";
 
+// A categorical scale: each entry is one pie slice, not a meaning. Two of these
+// hexes match --warning and --info, and sweeping them into those tokens would
+// recolour chart series whenever a semantic colour is retuned.
 const COLORS = [
   "#2dd4bf", "#60a5fa", "#f59e0b", "#f472b6", "#a78bfa",
   "#34d399", "#fb7185", "#38bdf8", "#fbbf24", "#c084fc",
@@ -47,6 +52,14 @@ const BREAKDOWN_COLUMNS: ColumnSpec<CategoryBreakdownItem>[] = [
   { key: "spent", sort: (i) => i.amount_cents, text: (i) => formatCents(i.amount_cents) },
   { key: "share", sort: (i) => i.pct, text: (i) => formatPct(i.pct) },
 ];
+
+/** A filtered Transactions view for one category in the period being viewed. */
+function transactionsFor(categoryId: string | null, period: string): string {
+  const params = new URLSearchParams({ period });
+  if (categoryId) params.set("category_id", categoryId);
+  else params.set("uncategorised", "true");
+  return `/transactions?${params.toString()}`;
+}
 
 export function Overview() {
   const { period, resolved } = usePeriod();
@@ -81,7 +94,8 @@ export function Overview() {
 
       {summary.data?.txn_count === 0 && (
         <div className="notice">
-          No transactions in this period yet — import a statement, or load demo data from Settings.
+          No transactions in this period yet — <Link to="/import">import a statement</Link>, or
+          load demo data from <Link to="/settings">Settings</Link>.
         </div>
       )}
 
@@ -95,7 +109,7 @@ export function Overview() {
         />
       </div>
 
-      <div className="grid" style={{ gridTemplateColumns: "1fr 1fr", marginTop: 16 }}>
+      <div className="split" style={{ marginTop: 16 }}>
         <div className="card">
           <h2>Where the money goes</h2>
           {pie.length ? (
@@ -172,7 +186,9 @@ export function Overview() {
             <tbody>
               {table.rows.map((i) => (
                 <tr key={i.category_id ?? "uncat"}>
-                  <td>{i.category_name}</td>
+                  <td>
+                    <Link to={transactionsFor(i.category_id, period)}>{i.category_name}</Link>
+                  </td>
                   <td className="muted">{i.parent_name ?? "—"}</td>
                   <td className="num">{formatCents(i.amount_cents)}</td>
                   <td className="num muted">{formatPct(i.pct)}</td>

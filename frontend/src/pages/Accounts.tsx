@@ -1,6 +1,8 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { type FormEvent, useState } from "react";
 
+import { Link } from "react-router-dom";
+
 import { api } from "../api/client";
 import type { Account } from "../api/types";
 import { FilterRow, FilterToggle } from "../table/FilterRow";
@@ -100,7 +102,9 @@ export function Accounts() {
                 <tbody>
                   {table.rows.map((a) => (
                     <tr key={a.id}>
-                      <td>{a.name}</td>
+                      <td>
+                        <Link to={`/transactions?account_id=${a.id}`}>{a.name}</Link>
+                      </td>
                       <td>
                         <span className="tag">{a.type.replace(/_/g, " ")}</span>
                       </td>

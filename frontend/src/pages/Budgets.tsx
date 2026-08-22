@@ -1,6 +1,8 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { type FormEvent, useMemo, useState } from "react";
 
+import { Link } from "react-router-dom";
+
 import { api } from "../api/client";
 import type { Budget, Category } from "../api/types";
 import { dollarsToCents, formatCents, formatPct } from "../format";
@@ -56,7 +58,9 @@ function BudgetCard({
     <div className="card">
       <div className="spread">
         <div>
-          <strong>{budget.category_name}</strong>
+          <Link to={`/transactions?category_id=${budget.category_id}`}>
+            <strong>{budget.category_name}</strong>
+          </Link>
           {budget.parent_name && (
             <div className="muted" style={{ fontSize: 12 }}>
               {budget.parent_name}

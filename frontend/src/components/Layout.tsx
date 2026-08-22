@@ -57,6 +57,7 @@ export function Layout({ children }: { children: ReactNode }) {
 
   return (
     <div className="app">
+      <a className="skip-link" href="#content">Skip to content</a>
       <header className="topbar">
         <div className="brand">
           <span className="brand-mark">≈</span> Saiva
@@ -101,7 +102,7 @@ export function Layout({ children }: { children: ReactNode }) {
         </div>
       )}
 
-      <main className="content">{children}</main>
+      <main id="content" className="content">{children}</main>
     </div>
   );
 }
