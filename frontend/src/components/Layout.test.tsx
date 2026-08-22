@@ -1,6 +1,7 @@
 import { screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
+import { setViewport } from "../setupTests";
 import { renderShell, stubApi } from "../testing/harness";
 import { SPA_VERSION } from "../version";
 import { Layout } from "./Layout";
@@ -48,53 +49,79 @@ function stubShell(over: Record<string, unknown> = {}) {
   });
 }
 
-afterEach(() => vi.unstubAllGlobals());
+afterEach(() => {
+  vi.unstubAllGlobals();
+  setViewport(800);
+});
 
-const DESTINATIONS = [
-  ["Overview", "/"],
-  ["Insights", "/insights"],
-  ["Advisor", "/advisor"],
-  ["Alerts", "/alerts"],
-  ["Transactions", "/transactions"],
-  ["Accounts", "/accounts"],
-  ["Budgets", "/budgets"],
-  ["Bills", "/bills"],
-  ["Forecast", "/forecast"],
-  ["Net worth", "/net-worth"],
-  ["Goals", "/goals"],
-  ["Benchmarks", "/benchmarks"],
-  ["Import", "/import"],
-  ["Settings", "/settings"],
-] as const;
+/** Routes, not labels: the wording may differ between shells, reachability may not. */
+const ROUTES = [
+  "/",
+  "/insights",
+  "/advisor",
+  "/alerts",
+  "/transactions",
+  "/accounts",
+  "/budgets",
+  "/bills",
+  "/forecast",
+  "/net-worth",
+  "/goals",
+  "/benchmarks",
+  "/import",
+  "/settings",
+];
 
-describe("app shell", () => {
-  it("offers every destination, whatever shape the navigation takes", async () => {
+// Every guarantee below has to hold in both shells, so the suite runs twice: once
+// narrow, where the original top bar renders, and once wide, where the sidebar does.
+describe.each([
+  ["top bar", 800, ".topbar"],
+  ["sidebar", 1280, ".sidebar"],
+])("app shell (%s)", (_name, width, shellSelector) => {
+  it("renders the shell this viewport calls for, and only that one", async () => {
+    setViewport(width);
     stubShell();
-    renderShell(<Layout>content</Layout>);
-    for (const [label, href] of DESTINATIONS) {
-      const link = await screen.findByRole("link", { name: new RegExp(`^${label}`) });
-      expect(link).toHaveAttribute("href", href);
+    const { container } = renderShell(<Layout>content</Layout>);
+    await screen.findByLabelText("Period");
+    expect(container.querySelector(shellSelector)).not.toBeNull();
+    // Both shells at once would duplicate every link and announce two navigations.
+    expect(container.querySelectorAll("nav")).toHaveLength(1);
+  });
+
+  it("offers every destination exactly once", async () => {
+    setViewport(width);
+    stubShell();
+    const { container } = renderShell(<Layout>content</Layout>);
+    await screen.findByLabelText("Period");
+    for (const href of ROUTES) {
+      expect(container.querySelectorAll(`a[href="${href}"]`)).toHaveLength(1);
     }
   });
 
   it("marks the destination you are on", async () => {
+    setViewport(width);
     stubShell();
-    renderShell(<Layout>content</Layout>, { route: "/budgets" });
-    const link = await screen.findByRole("link", { name: /^Budgets/ });
-    expect(link).toHaveAttribute("aria-current", "page");
+    const { container } = renderShell(<Layout>content</Layout>, { route: "/budgets" });
+    await screen.findByLabelText("Period");
+    expect(container.querySelector('a[href="/budgets"]')).toHaveAttribute(
+      "aria-current",
+      "page",
+    );
   });
 
   it("keeps the global period control mounted", async () => {
+    setViewport(width);
     stubShell();
     renderShell(<Layout>content</Layout>);
-    // Whether it lives in a top bar or an app bar, it must always be reachable.
     expect(await screen.findByLabelText("Period")).toBeInTheDocument();
   });
 
-  it("renders the page content", async () => {
+  it("renders the page content and a way to sign out", async () => {
+    setViewport(width);
     stubShell();
     renderShell(<Layout>the page</Layout>);
     expect(await screen.findByText("the page")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Sign out" })).toBeInTheDocument();
   });
 });
 
@@ -102,21 +129,24 @@ describe("status signals", () => {
   it("flags unread alerts, and stays quiet when there are none", async () => {
     stubShell({ "/notifications": { unread: 3, items: [] } });
     const { unmount } = renderShell(<Layout>c</Layout>);
-    const alerts = await screen.findByRole("link", { name: /^Alerts/ });
+    await screen.findByLabelText("Period");
+    const alerts = document.querySelector('a[href="/alerts"]')!;
     await waitFor(() => expect(alerts.querySelector(".dot, .badge")).not.toBeNull());
     unmount();
 
     vi.unstubAllGlobals();
     stubShell();
     renderShell(<Layout>c</Layout>);
-    const quiet = await screen.findByRole("link", { name: /^Alerts/ });
+    await screen.findByLabelText("Period");
+    const quiet = document.querySelector('a[href="/alerts"]')!;
     await waitFor(() => expect(quiet.querySelector(".dot, .badge")).toBeNull());
   });
 
   it("flags an available update on the Settings destination", async () => {
     stubShell({ "/admin/update-check": { update_available: true, latest: "v1.0.0" } });
     renderShell(<Layout>c</Layout>);
-    const settings = await screen.findByRole("link", { name: /^Settings/ });
+    await screen.findByLabelText("Period");
+    const settings = document.querySelector('a[href="/settings"]')!;
     await waitFor(() => expect(settings.querySelector(".dot, .badge")).not.toBeNull());
   });
 

@@ -1,0 +1,28 @@
+import { useEffect, useState } from "react";
+
+/**
+ * Tracks a media query in JS.
+ *
+ * Used where the two layouts differ structurally rather than cosmetically: the
+ * alternative is rendering both shells and hiding one with CSS, which would put
+ * every navigation link in the document twice and announce them twice.
+ */
+export function useMediaQuery(query: string): boolean {
+  const [matches, setMatches] = useState(
+    () => typeof window !== "undefined" && window.matchMedia?.(query).matches === true,
+  );
+
+  useEffect(() => {
+    const mql = window.matchMedia?.(query);
+    if (!mql) return;
+    setMatches(mql.matches);
+    const onChange = (e: MediaQueryListEvent) => setMatches(e.matches);
+    mql.addEventListener("change", onChange);
+    return () => mql.removeEventListener("change", onChange);
+  }, [query]);
+
+  return matches;
+}
+
+/** Width at which the navigation becomes a persistent sidebar. */
+export const WIDE = "(min-width: 1080px)";

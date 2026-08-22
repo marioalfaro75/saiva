@@ -7,7 +7,9 @@ import { useAuth } from "../auth/AuthContext";
 import { formatDate } from "../format";
 import { usePeriod } from "../period/context";
 import { PeriodPicker } from "../period/PeriodPicker";
+import { useMediaQuery, WIDE } from "../hooks/useMediaQuery";
 import { SPA_VERSION } from "../version";
+import { Sidebar } from "./Sidebar";
 
 const NAV = [
   { to: "/", label: "Overview", end: true },
@@ -54,6 +56,58 @@ export function Layout({ children }: { children: ReactNode }) {
   const reloadNeeded = !!meta.data && meta.data.version !== SPA_VERSION;
   const updateAvailable = !!update.data?.update_available;
   const unread = notifs.data?.unread ?? 0;
+  const wide = useMediaQuery(WIDE);
+
+  // The banners are identical in both shells; only the navigation differs.
+  const banners = (
+    <>
+      {isPast && resolved && (
+        // Past and future windows look identical to the current one at a glance, so
+        // say plainly that these figures are not today's.
+        <div className="period-bar">
+          Viewing <strong>{resolved.label}</strong> ({formatDate(resolved.start)} –{" "}
+          {formatDate(resolved.end)}) — not the current period.
+        </div>
+      )}
+
+      {reloadNeeded && (
+        <div className="update-bar">
+          A new version of Saiva is ready.
+          <button className="btn btn-primary" onClick={() => window.location.reload()}>
+            Reload
+          </button>
+        </div>
+      )}
+    </>
+  );
+
+  // One shell at a time, chosen in JS: rendering both and hiding one with CSS would
+  // put all fourteen links in the document twice. Below 1080px the original top bar
+  // is untouched — the drawer that replaces it lands in its own step.
+  if (wide) {
+    return (
+      <div className="app app-wide">
+        <a className="skip-link" href="#content">
+          Skip to content
+        </a>
+        <Sidebar
+          unread={unread}
+          updateAvailable={updateAvailable}
+          household={me?.household.name}
+          onSignOut={() => void logout()}
+        />
+        <div className="main">
+          <header className="appbar">
+            <PeriodPicker />
+          </header>
+          {banners}
+          <main id="content" className="content">
+            {children}
+          </main>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="app">
@@ -84,23 +138,7 @@ export function Layout({ children }: { children: ReactNode }) {
         </div>
       </header>
 
-      {isPast && resolved && (
-        // Past and future windows look identical to the current one at a glance, so
-        // say plainly that these figures are not today's.
-        <div className="period-bar">
-          Viewing <strong>{resolved.label}</strong> ({formatDate(resolved.start)} –{" "}
-          {formatDate(resolved.end)}) — not the current period.
-        </div>
-      )}
-
-      {reloadNeeded && (
-        <div className="update-bar">
-          A new version of Saiva is ready.
-          <button className="btn btn-primary" onClick={() => window.location.reload()}>
-            Reload
-          </button>
-        </div>
-      )}
+      {banners}
 
       <main id="content" className="content">{children}</main>
     </div>

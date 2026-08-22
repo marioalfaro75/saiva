@@ -108,6 +108,120 @@ a {
 .app {
   min-height: 100vh;
 }
+
+/* Sidebar shell, >=1080px. The sidebar is in flow and sticky rather than fixed with
+   a margin on the content: an internally-scrolling <main> would break browser scroll
+   restoration, iOS pull-to-refresh and the mobile URL-bar collapse. The document
+   scrolls; nothing inside does.
+
+   minmax(0, 1fr) is load-bearing — without it a wide table blows the track out and
+   brings back horizontal page scroll. */
+.app-wide {
+  display: grid;
+  grid-template-columns: var(--nav-w, 240px) minmax(0, 1fr);
+}
+.sidebar {
+  position: sticky;
+  top: 0;
+  height: 100dvh;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 8px 10px 10px;
+  background: var(--surface);
+  border-right: 1px solid var(--border);
+}
+.sidebar-brand {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  height: 56px;
+  padding: 0 10px;
+  font-weight: 700;
+  font-size: 18px;
+  letter-spacing: 0.5px;
+}
+/* Only the destination list scrolls, so Settings and Sign out stay reachable even
+   on a short laptop. */
+.sidebar-items {
+  flex: 1;
+  overflow-y: auto;
+  scrollbar-width: thin;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+/* Clusters are separated by space alone — see the note in Sidebar.tsx. */
+.sidebar-cluster {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+.side-link {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 5px 12px;
+  border-radius: 8px;
+  color: var(--muted);
+  text-decoration: none;
+  font-weight: 500;
+  border-left: 2px solid transparent;
+}
+.side-link:hover {
+  background: var(--surface-2);
+  color: var(--text);
+}
+/* Active is additive: the background and the full-strength text carry it, and the
+   rail is a third cue rather than a replacement for them. */
+.side-link.active {
+  background: var(--surface-2);
+  border-left-color: var(--accent);
+  color: var(--text);
+}
+.sidebar-foot {
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding-top: 8px;
+  border-top: 1px solid var(--border);
+}
+.sidebar-household {
+  padding: 2px 12px;
+  font-size: 12px;
+}
+.sidebar-signout {
+  margin: 2px 8px 0;
+  text-align: left;
+}
+/* A count says more than a dot, and a vertical row has room for it. */
+.badge {
+  min-width: 20px;
+  padding: 0 6px;
+  border-radius: 999px;
+  background: var(--accent-strong);
+  color: #fff;
+  font-size: 11px;
+  font-weight: 700;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+}
+.appbar {
+  position: sticky;
+  top: 0;
+  z-index: 10;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  height: 56px;
+  padding: 0 20px;
+  background: rgba(11, 18, 32, 0.9);
+  backdrop-filter: blur(8px);
+  border-bottom: 1px solid var(--border);
+}
 .topbar {
   position: sticky;
   top: 0;
