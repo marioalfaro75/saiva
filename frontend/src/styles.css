@@ -222,6 +222,37 @@ a {
   backdrop-filter: blur(8px);
   border-bottom: 1px solid var(--border);
 }
+.appbar-range {
+  font-size: 13px;
+  color: var(--muted);
+}
+.appbar-spacer {
+  flex: 1;
+}
+/* Three independent signals that these are not today's figures — a symbol, wording
+   that appears in no other state, and colour — so it survives colour-vision
+   deficiency, sunlight and habituation. Sticky, unlike the band it replaces, which
+   scrolled away under a sticky header after one flick. */
+.appbar[data-period="past"],
+.appbar[data-period="future"] {
+  background: rgba(245, 158, 11, 0.12);
+  border-bottom-color: var(--warning);
+}
+.appbar[data-period="past"] .appbar-range,
+.appbar[data-period="future"] .appbar-range {
+  color: var(--warning);
+  font-weight: 600;
+}
+/* Sits directly under the app bar rather than scrolling with the page. Deliberately
+   not dismissible: the SPA knows it is talking to a different backend build, and
+   silencing that trades a real correctness hazard for 44px. */
+.app-wide .update-bar {
+  position: sticky;
+  top: 56px;
+  z-index: 9;
+  padding: 8px 20px;
+  font-size: 13px;
+}
 .topbar {
   position: sticky;
   top: 0;

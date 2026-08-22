@@ -58,7 +58,33 @@ export function Layout({ children }: { children: ReactNode }) {
   const unread = notifs.data?.unread ?? 0;
   const wide = useMediaQuery(WIDE);
 
-  // The banners are identical in both shells; only the navigation differs.
+  // is_current is a containment test, so "not current" is exactly past or future.
+  // They need different words: one says the figures are stale, the other that
+  // nothing has happened yet.
+  const periodState = !resolved || resolved.is_current
+    ? "current"
+    : new Date(resolved.end) < new Date()
+      ? "past"
+      : "future";
+  const range = resolved ? `${formatDate(resolved.start)} – ${formatDate(resolved.end)}` : "";
+  const periodNote =
+    periodState === "past"
+      ? `Past period — ${range}. Not the current period.`
+      : periodState === "future"
+        ? `Future period — ${range}. Nothing has happened yet.`
+        : range;
+
+  const reloadBanner = reloadNeeded && (
+    <div className="update-bar">
+      A new version of Saiva is ready.
+      <button className="btn btn-primary" onClick={() => window.location.reload()}>
+        Reload
+      </button>
+    </div>
+  );
+
+  // The narrow shell keeps both bands; the wide one folds the period warning into
+  // the app bar, where it is sticky instead of scrolling away.
   const banners = (
     <>
       {isPast && resolved && (
@@ -97,10 +123,18 @@ export function Layout({ children }: { children: ReactNode }) {
           onSignOut={() => void logout()}
         />
         <div className="main">
-          <header className="appbar">
+          <header className="appbar" data-period={periodState}>
             <PeriodPicker />
+            {resolved && (
+              <span className="appbar-range">
+                {periodState !== "current" && <span aria-hidden="true">⚠ </span>}
+                {periodNote}
+              </span>
+            )}
+            <span className="appbar-spacer" />
+            <span className="muted hide-mobile">{me?.household.name}</span>
           </header>
-          {banners}
+          {reloadBanner}
           <main id="content" className="content">
             {children}
           </main>

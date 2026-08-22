@@ -164,4 +164,35 @@ describe("status signals", () => {
     // The wording may move into an app bar, but it must remain on screen.
     expect(await screen.findByText(/not the current period/i)).toBeInTheDocument();
   });
+
+  it("distinguishes a past period from a future one", async () => {
+    // Colour alone cannot carry this: the two states mean different things, and a
+    // wash fails for colour-vision deficiency and in sunlight.
+    setViewport(1280);
+    stubShell({
+      "/periods/resolve": {
+        start: "2020-07-01",
+        end: "2021-06-30",
+        label: "FY2020–21",
+        is_current: false,
+      },
+    });
+    const { unmount } = renderShell(<Layout>c</Layout>);
+    expect(await screen.findByText(/Past period/)).toBeInTheDocument();
+    unmount();
+
+    vi.unstubAllGlobals();
+    setViewport(1280);
+    stubShell({
+      "/periods/resolve": {
+        start: "2090-07-01",
+        end: "2091-06-30",
+        label: "FY2090–91",
+        is_current: false,
+      },
+    });
+    renderShell(<Layout>c</Layout>);
+    expect(await screen.findByText(/Future period/)).toBeInTheDocument();
+    expect(screen.getByText(/Nothing has happened yet/)).toBeInTheDocument();
+  });
 });
