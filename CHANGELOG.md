@@ -5,6 +5,14 @@ All notable changes to Saiva are documented here. The project follows
 
 ## [Unreleased]
 
+
+## [0.11.0] — 2026-08-22
+
+Navigation moves out of a crowded top bar into a side menu, the phone becomes a
+place you can actually work rather than a scaled-down desktop, and the AI advisor
+answers from your data instead of declining. Also fixes a bug that could import or
+skip the wrong rows from a statement.
+
 ### Added
 - **A side menu replaces the top bar.** Thirteen links across the top had run out of
   room; they now sit in a sidebar grouped by what you are doing — seeing where you
@@ -255,6 +263,7 @@ personal financial advice.
 - On the first GHCR publish, set the `saiva-api` / `saiva-web` packages to public
   (or `docker login ghcr.io` on the host) so image pulls are authorised.
 
+[0.11.0]: https://github.com/marioalfaro75/saiva/compare/v0.10.1...v0.11.0
 [0.10.1]: https://github.com/marioalfaro75/saiva/compare/v0.10.0...v0.10.1
 [0.10.0]: https://github.com/marioalfaro75/saiva/compare/v0.9.0...v0.10.0
 [0.9.0]: https://github.com/marioalfaro75/saiva/compare/v0.8.4...v0.9.0
