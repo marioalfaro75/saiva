@@ -120,52 +120,53 @@ export function Benchmarks() {
         </div>
       )}
 
-      <div className="card" style={{ marginTop: 16 }}>
-        <div className="spread">
-          <span />
-          <FilterToggle table={table} />
+      {data && data.your_total_weekly_cents === 0 ? (
+        <EmptyState title="Nothing to compare yet">
+          Benchmarks need a few months of spending.{" "}
+          <Link to="/import">Import a statement</Link>, or{" "}
+          <Link to="/settings">load demo data</Link> to see how the comparison reads.
+        </EmptyState>
+      ) : (
+        <div className="card" style={{ marginTop: 16 }}>
+          <div className="spread">
+            <span />
+            <FilterToggle table={table} />
+          </div>
+          <TableWrap min={TABLE_MIN.benchmarks} label="Spending vs typical household">
+            <table>
+              <thead>
+                <tr>
+                  <SortHeader table={table} col="category">
+                    Category
+                  </SortHeader>
+                  <SortHeader table={table} col="yours" numeric>
+                    You / wk
+                  </SortHeader>
+                  <SortHeader table={table} col="typical" numeric>
+                    Typical / wk
+                  </SortHeader>
+                  <SortHeader table={table} col="ratio">
+                    vs typical
+                  </SortHeader>
+                  <SortHeader table={table} col="difference" numeric>
+                    Difference
+                  </SortHeader>
+                </tr>
+                <FilterRow
+                  table={table}
+                  labels={BENCHMARK_LABELS}
+                  columns={["category", "yours", "typical", "ratio", "difference"]}
+                />
+              </thead>
+              <tbody>
+                {table.rows.map((i) => (
+                  <Row key={i.category} item={i} />
+                ))}
+              </tbody>
+            </table>
+          </TableWrap>
         </div>
-        <TableWrap min={TABLE_MIN.benchmarks} label="Spending vs typical household">
-          <table>
-            <thead>
-              <tr>
-                <SortHeader table={table} col="category">
-                  Category
-                </SortHeader>
-                <SortHeader table={table} col="yours" numeric>
-                  You / wk
-                </SortHeader>
-                <SortHeader table={table} col="typical" numeric>
-                  Typical / wk
-                </SortHeader>
-                <SortHeader table={table} col="ratio">
-                  vs typical
-                </SortHeader>
-                <SortHeader table={table} col="difference" numeric>
-                  Difference
-                </SortHeader>
-              </tr>
-              <FilterRow
-                table={table}
-                labels={BENCHMARK_LABELS}
-                columns={["category", "yours", "typical", "ratio", "difference"]}
-              />
-            </thead>
-            <tbody>
-              {table.rows.map((i) => (
-                <Row key={i.category} item={i} />
-              ))}
-            </tbody>
-          </table>
-        </TableWrap>
-        {data && data.your_total_weekly_cents === 0 && (
-          <EmptyState title="Nothing to compare yet">
-            Benchmarks need a few months of spending.{" "}
-            <Link to="/import">Import a statement</Link>, or{" "}
-            <Link to="/settings">load demo data</Link> to see how the comparison reads.
-          </EmptyState>
-        )}
-      </div>
+      )}
 
       {data && (
         <p className="muted" style={{ marginTop: 12, fontSize: 13 }}>
