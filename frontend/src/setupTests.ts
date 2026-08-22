@@ -1,4 +1,5 @@
 import "@testing-library/jest-dom";
+import { act } from "@testing-library/react";
 
 // jsdom implements no ResizeObserver, and Recharts' ResponsiveContainer constructs
 // one on mount. Without this any test that renders a chart throws asynchronously.
@@ -25,9 +26,13 @@ const evaluate = (query: string): boolean => {
 
 export function setViewport(width: number): void {
   viewportWidth = width;
-  for (const { query, fn } of listeners) {
-    fn({ matches: evaluate(query), media: query } as MediaQueryListEvent);
-  }
+  // A resize is a real event that re-renders whatever is listening, so it belongs
+  // inside `act` — otherwise every width change warns about an unwrapped update.
+  act(() => {
+    for (const { query, fn } of listeners) {
+      fn({ matches: evaluate(query), media: query } as MediaQueryListEvent);
+    }
+  });
 }
 
 globalThis.matchMedia ??= ((query: string) => {

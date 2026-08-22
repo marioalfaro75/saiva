@@ -607,7 +607,9 @@ th.num .sort-btn {
   gap: 12px;
 }
 
-@media (max-width: 640px) {
+/* 639, not 640: at exactly 640px the `min-width: 640px` query also matches, and the
+   two would disagree about whether this is a phone. */
+@media (max-width: 639px) {
   .hide-mobile {
     display: none;
   }
@@ -821,4 +823,130 @@ th.actions {
   border-radius: 50%;
   background: var(--accent);
   vertical-align: middle;
+}
+
+/* ---- Phone presentations of the table controls ----
+   A card list has no column headers to hang sorting and filtering on, so the same
+   `TableControls` get a row of chips and a stack of fields instead. */
+.sort-chips {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+  margin-bottom: 10px;
+}
+.chip {
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  color: var(--muted);
+  border-radius: 999px;
+  padding: 7px 12px;
+  font-size: 13px;
+  min-height: 34px;
+  cursor: pointer;
+}
+.chip.on {
+  border-color: var(--accent-strong);
+  background: rgba(45, 212, 191, 0.12);
+  color: var(--accent);
+}
+.filter-fields {
+  display: grid;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+.filter-fields .field {
+  margin: 0;
+}
+.select-all {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0 0 10px;
+  font-size: 13px;
+  color: var(--muted);
+  min-height: 40px;
+}
+
+/* ---- Transactions as cards ---- */
+.txn-cards {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 8px;
+}
+.txn-card {
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface-2);
+  padding: 10px 12px;
+  display: grid;
+  gap: 6px;
+}
+.txn-card.picked {
+  border-color: var(--accent-strong);
+}
+.txn-card-head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
+.txn-card-desc {
+  flex: 1;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.txn-card-head .num {
+  flex: none;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.txn-card-meta {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  font-size: 12px;
+}
+.txn-card-foot {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.txn-card-foot .grow {
+  flex: 1;
+}
+/* The checkbox is the whole reason a card can join a bulk action, so it gets a real
+   touch target rather than the 13px box a pointer can manage. */
+.txn-card-head input[type="checkbox"],
+.select-all input[type="checkbox"] {
+  width: 18px;
+  height: 18px;
+  flex: none;
+}
+
+@media (max-width: 639px) {
+  /* 40px minimum on anything tapped: the WCAG 2.2 target-size floor is 24px, but a
+     categorise-and-lock pass is dozens of taps in a row. */
+  .txn-card-foot .pill-select,
+  .txn-card-foot .icon-btn {
+    min-height: 40px;
+  }
+  .txn-card-foot .pill-select {
+    flex: 1;
+    min-width: 0;
+    max-width: 60%;
+  }
+  .txn-card-foot .icon-btn {
+    min-width: 40px;
+    font-size: 16px;
+  }
+  .bulk-bar {
+    /* Sticky to the bottom of a phone screen, where the thumb is. */
+    padding: 10px 12px;
+    gap: 8px;
+  }
+  .bulk-bar .btn {
+    min-height: 40px;
+  }
 }

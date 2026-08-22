@@ -2,6 +2,7 @@ import { fireEvent, render, screen } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 
 import { FilterRow, FilterToggle } from "./FilterRow";
+import { FilterFields, SortChips } from "./MobileControls";
 import { SortHeader } from "./SortHeader";
 import type { TableControls } from "./useTable";
 
@@ -12,7 +13,11 @@ import type { TableControls } from "./useTable";
  * what gets announced, and which callbacks fire with which arguments.
  */
 
-function controls(over: Partial<TableControls> = {}): TableControls {
+type Callbacks = "toggleSort" | "setFilter" | "clearFilters" | "toggleFilters";
+/** The callbacks stay spies — only the state around them is worth overriding. */
+type MockedControls = Omit<TableControls, Callbacks> & Record<Callbacks, ReturnType<typeof vi.fn>>;
+
+function controls(over: Partial<Omit<TableControls, Callbacks>> = {}): MockedControls {
   return {
     sort: null,
     toggleSort: vi.fn(),
@@ -161,5 +166,71 @@ describe("FilterToggle", () => {
     expect(button).toHaveAttribute("aria-expanded", "false");
     fireEvent.click(button);
     expect(table.toggleFilters).toHaveBeenCalled();
+  });
+});
+
+/**
+ * The phone presentations. What matters here is that they are *presentations*: a
+ * chip must reach `toggleSort` with the same argument a column header sends, so the
+ * ascending → descending → off cycle and the URL it writes stay in one place.
+ */
+describe("SortChips", () => {
+  const labels = { date: "Date", amount: "Amount" };
+
+  it("calls the same toggleSort a column header calls", () => {
+    const chip = controls();
+    const chips = render(<SortChips table={chip} labels={labels} columns={["date", "amount"]} />);
+    fireEvent.click(chips.getByRole("button", { name: /Amount/ }));
+    chips.unmount();
+
+    // Same control, same call — only the shape of the thing you press differs.
+    const header = controls();
+    const head = render(inTable(<SortHeader table={header} col="amount">Amount</SortHeader>));
+    fireEvent.click(head.getByRole("button", { name: /Amount/ }));
+
+    expect(chip.toggleSort.mock.calls).toEqual(header.toggleSort.mock.calls);
+    expect(chip.toggleSort).toHaveBeenCalledWith("amount");
+  });
+
+  it("marks the sorted column pressed, and says which way", () => {
+    render(
+      <SortChips
+        table={controls({ sort: { key: "date", dir: "desc" } })}
+        labels={labels}
+        columns={["date", "amount"]}
+      />,
+    );
+    expect(screen.getByRole("button", { name: /Date/ })).toHaveAttribute("aria-pressed", "true");
+    // The arrow is decorative; the direction has to be readable without it.
+    expect(screen.getByRole("button", { name: /Date/ })).toHaveAccessibleName(
+      /sorted descending/,
+    );
+    expect(screen.getByRole("button", { name: /Amount/ })).toHaveAttribute(
+      "aria-pressed",
+      "false",
+    );
+  });
+
+  it("groups the chips so they are announced as one control", () => {
+    render(<SortChips table={controls()} labels={labels} columns={["date"]} />);
+    expect(screen.getByRole("group", { name: "Sort by" })).toBeInTheDocument();
+  });
+});
+
+describe("FilterFields", () => {
+  const labels = { date: "Date", amount: "Amount" };
+
+  it("labels and reports edits exactly as the filter row does", () => {
+    const table = controls();
+    render(<FilterFields table={table} labels={labels} columns={["date", "amount"]} />);
+    fireEvent.change(screen.getByLabelText("Filter Date"), { target: { value: "Feb" } });
+    expect(table.setFilter).toHaveBeenCalledWith("date", "Feb");
+  });
+
+  it("stays closed with the filter row", () => {
+    const { container } = render(
+      <FilterFields table={controls({ filtersOpen: false })} labels={labels} columns={["date"]} />,
+    );
+    expect(container.querySelector("input")).toBeNull();
   });
 });

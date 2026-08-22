@@ -11,6 +11,8 @@ import { useServerTable } from "../table/useServerTable";
 import { useTable } from "../table/useTable";
 import { CategoriseDialog } from "../components/CategoriseDialog";
 import { RulesManager } from "../components/RulesManager";
+import { matchesAtMount, PHONE, useMediaQuery } from "../hooks/useMediaQuery";
+import { FilterFields, SortChips } from "../table/MobileControls";
 import { TABLE_MIN, TableWrap } from "../table/TableWrap";
 import { formatCents, formatDate } from "../format";
 import type { Transaction, TxnGroup } from "../api/types";
@@ -58,13 +60,28 @@ export function Transactions() {
   };
 
   const { period } = usePeriod();
+  const narrow = !useMediaQuery(PHONE);
+  // Read once at mount, not tracked: a phone shows a page as a tall stack of cards,
+  // so fifty of them is a long scroll — but changing the size on resize would
+  // renumber the pages under someone midway through reviewing them.
+  const [pageSize] = useState(() => (matchesAtMount(PHONE) ? 50 : 25));
   // This list is paginated by the server, so ordering and filtering go with the
   // request — sorting the fetched page here would answer the wrong question.
   const server = useServerTable(TXN_FILTER_KEYS);
   const accounts = useQuery({ queryKey: ["accounts"], queryFn: api.accounts });
   const categories = useQuery({ queryKey: ["categories"], queryFn: api.categories });
   const txns = useQuery({
-    queryKey: ["txns", q, accountId, categoryId, uncategorised, page, period, server.params],
+    queryKey: [
+      "txns",
+      q,
+      accountId,
+      categoryId,
+      uncategorised,
+      page,
+      pageSize,
+      period,
+      server.params,
+    ],
     queryFn: () =>
       api.transactions({
         q: q || undefined,
@@ -73,7 +90,7 @@ export function Transactions() {
         uncategorised: uncategorised || undefined,
         period,
         page,
-        page_size: 50,
+        page_size: pageSize,
         ...server.params,
       }),
     enabled: tab === "transactions",
@@ -172,6 +189,52 @@ export function Transactions() {
       {c.name}
     </option>
   ));
+
+  // One definition per interactive control, laid out two ways below: a table on a
+  // wide screen, a stack of cards on a phone. Two copies of a `<select>` wired to a
+  // mutation is exactly the kind of thing that drifts.
+  const pickBox = (t: Transaction) => (
+    <input
+      type="checkbox"
+      style={{ width: "auto" }}
+      checked={selected.has(t.id)}
+      aria-label={`Select ${t.merchant ?? t.raw_description}`}
+      onChange={() => toggleSel(t.id)}
+    />
+  );
+  const categoryPicker = (t: Transaction) => (
+    <select
+      className="pill-select"
+      aria-label="Category"
+      value={t.category_id ?? ""}
+      onChange={(e) => quickCat.mutate({ id: t.id, categoryId: e.target.value })}
+    >
+      <option value="">Uncategorised</option>
+      {categoryOptions}
+    </select>
+  );
+  const rowActions = (t: Transaction) => (
+    <>
+      <button
+        className={`icon-btn ${t.category_locked ? "on" : ""}`}
+        title={t.category_locked ? "Locked — click to unlock" : "Lock"}
+        aria-label={t.category_locked ? "Unlock category" : "Lock category"}
+        onClick={() => lockToggle.mutate({ id: t.id, locked: !t.category_locked })}
+      >
+        {t.category_locked ? "🔒" : "🔓"}
+      </button>
+      <button
+        className="icon-btn"
+        title="Apply to similar, make a rule…"
+        aria-label="More actions"
+        onClick={() => setDialogTxn(t)}
+      >
+        ⋯
+      </button>
+    </>
+  );
+  const transferTag = (t: Transaction) =>
+    t.is_transfer ? <span className="tag transfer">transfer</span> : null;
 
   return (
     <div>
@@ -284,96 +347,118 @@ export function Transactions() {
                 <span />
                 <FilterToggle table={server} count={txns.data?.total} />
               </div>
-              <TableWrap min={TABLE_MIN.transactions} label="Transactions">
-                <table>
-                  <thead>
-                    <tr>
-                      <th className="pick">
-                        <input
-                          type="checkbox"
-                          style={{ width: "auto" }}
-                          checked={allOnPageSelected}
-                          onChange={toggleAllOnPage}
-                        />
-                      </th>
-                      <SortHeader table={server} col="date">
-                        Date
-                      </SortHeader>
-                      <SortHeader table={server} col="description">
-                        Description
-                      </SortHeader>
-                      <SortHeader table={server} col="account">
-                        Account
-                      </SortHeader>
-                      <SortHeader table={server} col="category">
-                        Category
-                      </SortHeader>
-                      <SortHeader table={server} col="amount" numeric>
-                        Amount
-                      </SortHeader>
-                      <th className="actions"></th>
-                    </tr>
-                    <FilterRow
-                      table={server}
-                      labels={TXN_LABELS}
-                      columns={[null, "date", "description", "account", "category", "amount", null]}
-                    />
-                  </thead>
-                  <tbody>
+              {narrow ? (
+                /* A seven-column table on a 390px screen is either unreadable or a
+                   sideways scroll for every row. The same rows, the same controls,
+                   stacked — with the header's sorting and filtering moved to chips
+                   and fields above, since there are no column headers to hang them
+                   on. */
+                <>
+                  <SortChips table={server} labels={TXN_LABELS} columns={TXN_FILTER_KEYS} />
+                  <FilterFields table={server} labels={TXN_LABELS} columns={TXN_FILTER_KEYS} />
+                  {pageItems.length > 0 && (
+                    <label className="select-all">
+                      <input
+                        type="checkbox"
+                        style={{ width: "auto" }}
+                        checked={allOnPageSelected}
+                        onChange={toggleAllOnPage}
+                      />
+                      Select all {pageItems.length} on this page
+                    </label>
+                  )}
+                  <ul className="txn-cards">
                     {pageItems.map((t) => (
-                      <tr key={t.id}>
-                        <td className="pick">
+                      <li key={t.id} className={selected.has(t.id) ? "txn-card picked" : "txn-card"}>
+                        <div className="txn-card-head">
+                          {pickBox(t)}
+                          <span className="txn-card-desc">{t.merchant ?? t.raw_description}</span>
+                          <span
+                            className={`num ${t.amount_cents < 0 ? "negative" : "positive"}`}
+                          >
+                            {formatCents(t.amount_cents)}
+                          </span>
+                        </div>
+                        <div className="txn-card-meta muted">
+                          <span>{formatDate(t.txn_date)}</span>
+                          <span aria-hidden="true">·</span>
+                          <span>{t.account_name}</span>
+                          {transferTag(t)}
+                        </div>
+                        <div className="txn-card-foot">
+                          {categoryPicker(t)}
+                          <span className="grow" />
+                          {rowActions(t)}
+                        </div>
+                      </li>
+                    ))}
+                  </ul>
+                </>
+              ) : (
+                <TableWrap min={TABLE_MIN.transactions} label="Transactions">
+                  <table>
+                    <thead>
+                      <tr>
+                        <th className="pick">
                           <input
                             type="checkbox"
                             style={{ width: "auto" }}
-                            checked={selected.has(t.id)}
-                            onChange={() => toggleSel(t.id)}
+                            aria-label="Select all on this page"
+                            checked={allOnPageSelected}
+                            onChange={toggleAllOnPage}
                           />
-                        </td>
-                        <td className="muted">{formatDate(t.txn_date)}</td>
-                        <td>
-                          {t.merchant ?? t.raw_description}
-                          {t.is_transfer && (
-                            <span className="tag transfer" style={{ marginLeft: 6 }}>
-                              transfer
-                            </span>
-                          )}
-                        </td>
-                        <td className="muted">{t.account_name}</td>
-                        <td>
-                          <select
-                            className="pill-select"
-                            value={t.category_id ?? ""}
-                            onChange={(e) => quickCat.mutate({ id: t.id, categoryId: e.target.value })}
-                          >
-                            <option value="">Uncategorised</option>
-                            {categoryOptions}
-                          </select>
-                        </td>
-                        <td className={`num ${t.amount_cents < 0 ? "negative" : "positive"}`}>
-                          {formatCents(t.amount_cents)}
-                        </td>
-                        <td className="actions">
-                          <button
-                            className={`icon-btn ${t.category_locked ? "on" : ""}`}
-                            title={t.category_locked ? "Locked — click to unlock" : "Lock"}
-                            onClick={() => lockToggle.mutate({ id: t.id, locked: !t.category_locked })}
-                          >
-                            {t.category_locked ? "🔒" : "🔓"}
-                          </button>
-                          <button
-                            className="icon-btn"
-                            title="Apply to similar, make a rule…"
-                            onClick={() => setDialogTxn(t)}
-                          >
-                            ⋯
-                          </button>
-                        </td>
+                        </th>
+                        <SortHeader table={server} col="date">
+                          Date
+                        </SortHeader>
+                        <SortHeader table={server} col="description">
+                          Description
+                        </SortHeader>
+                        <SortHeader table={server} col="account">
+                          Account
+                        </SortHeader>
+                        <SortHeader table={server} col="category">
+                          Category
+                        </SortHeader>
+                        <SortHeader table={server} col="amount" numeric>
+                          Amount
+                        </SortHeader>
+                        <th className="actions"></th>
                       </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </TableWrap>
+                      <FilterRow
+                        table={server}
+                        labels={TXN_LABELS}
+                        columns={[
+                          null,
+                          "date",
+                          "description",
+                          "account",
+                          "category",
+                          "amount",
+                          null,
+                        ]}
+                      />
+                    </thead>
+                    <tbody>
+                      {pageItems.map((t) => (
+                        <tr key={t.id}>
+                          <td className="pick">{pickBox(t)}</td>
+                          <td className="muted">{formatDate(t.txn_date)}</td>
+                          <td>
+                            {t.merchant ?? t.raw_description} {transferTag(t)}
+                          </td>
+                          <td className="muted">{t.account_name}</td>
+                          <td>{categoryPicker(t)}</td>
+                          <td className={`num ${t.amount_cents < 0 ? "negative" : "positive"}`}>
+                            {formatCents(t.amount_cents)}
+                          </td>
+                          <td className="actions">{rowActions(t)}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </TableWrap>
+              )}
               {txns.data && pageItems.length === 0 && (
                 <p className="muted">No transactions match your filters.</p>
               )}
