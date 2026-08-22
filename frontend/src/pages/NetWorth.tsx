@@ -1,7 +1,8 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { type FormEvent, useState } from "react";
+import { type FormEvent, useId, useState } from "react";
 import { Line, LineChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
 
+import { TABLE_MIN, TableWrap } from "../table/TableWrap";
 import { api } from "../api/client";
 import type { NetWorth as NetWorthData, NetWorthItem } from "../api/types";
 import { dollarsToCents, formatCents } from "../format";
@@ -10,6 +11,7 @@ import { FilterRow, FilterToggle } from "../table/FilterRow";
 import { SortHeader } from "../table/SortHeader";
 import type { ColumnSpec } from "../table/sorting";
 import { useTable } from "../table/useTable";
+import { PageHead } from "../components/PageHead";
 
 type SavePatch = { name?: string; value_cents?: number };
 
@@ -125,27 +127,29 @@ function ItemTable({
             <span />
             <FilterToggle table={table} />
           </div>
-          <table>
-            {/* This list had no header row; it needs one for the columns to be
-                sortable, and the empty cell keeps the actions column aligned. */}
-            <thead>
-              <tr>
-                <SortHeader table={table} col="name">
-                  Name
-                </SortHeader>
-                <SortHeader table={table} col="value" numeric>
-                  Value
-                </SortHeader>
-                <th className="actions"></th>
-              </tr>
-              <FilterRow table={table} labels={ITEM_LABELS} columns={["name", "value", null]} />
-            </thead>
-            <tbody>
-              {table.rows.map((i) => (
-                <ItemRow key={i.id} item={i} onSave={onSave} onRemove={onRemove} busy={busy} />
-              ))}
-            </tbody>
-          </table>
+          <TableWrap min={TABLE_MIN.netWorthItems} label="Items">
+            <table>
+              {/* This list had no header row; it needs one for the columns to be
+                  sortable, and the empty cell keeps the actions column aligned. */}
+              <thead>
+                <tr>
+                  <SortHeader table={table} col="name">
+                    Name
+                  </SortHeader>
+                  <SortHeader table={table} col="value" numeric>
+                    Value
+                  </SortHeader>
+                  <th className="actions"></th>
+                </tr>
+                <FilterRow table={table} labels={ITEM_LABELS} columns={["name", "value", null]} />
+              </thead>
+              <tbody>
+                {table.rows.map((i) => (
+                  <ItemRow key={i.id} item={i} onSave={onSave} onRemove={onRemove} busy={busy} />
+                ))}
+              </tbody>
+            </table>
+          </TableWrap>
         </>
       ) : (
         <p className="muted">None yet.</p>
@@ -155,6 +159,7 @@ function ItemTable({
 }
 
 export function NetWorth() {
+  const fid = useId();
   const { period } = usePeriod();
   const qc = useQueryClient();
   const nw = useQuery({
@@ -166,7 +171,9 @@ export function NetWorth() {
   const [kind, setKind] = useState("asset");
   const [amount, setAmount] = useState("");
 
-  const setData = (data: NetWorthData) => qc.setQueryData(["netWorth"], data);
+  // The key must carry the period, or a mutation writes its response into a cache
+  // entry nothing reads and the table keeps showing the figures from before the edit.
+  const setData = (data: NetWorthData) => qc.setQueryData(["netWorth", period], data);
 
   const create = useMutation({
     mutationFn: () => api.createNetWorthItem({ name, kind, value_cents: dollarsToCents(amount) }),
@@ -209,8 +216,7 @@ export function NetWorth() {
 
   return (
     <div>
-      <div className="page-head">
-        <h1>Net worth</h1>
+      <PageHead title="Net worth" sub="Everything you own and owe, tracked over time.">
         <button
           type="button"
           className="btn"
@@ -219,7 +225,7 @@ export function NetWorth() {
         >
           {snapshot.isPending ? "Saving…" : "Record snapshot"}
         </button>
-      </div>
+      </PageHead>
 
       <div className="cards">
         <Stat
@@ -245,7 +251,7 @@ export function NetWorth() {
         </div>
       )}
 
-      <div className="grid" style={{ gridTemplateColumns: "1fr 1fr", marginTop: 16 }}>
+      <div className="split" style={{ marginTop: 16 }}>
         <ItemTable
           title="Assets"
           tableId="networth-assets"
@@ -271,8 +277,8 @@ export function NetWorth() {
         <form onSubmit={onSubmit}>
           <div className="row">
             <div className="field">
-              <label>Name</label>
-              <input
+              <label htmlFor={`${fid}-name`}>Name</label>
+              <input id={`${fid}-name`}
                 value={name}
                 onChange={(e) => setName(e.target.value)}
                 placeholder="e.g. Family home"
@@ -280,15 +286,15 @@ export function NetWorth() {
               />
             </div>
             <div className="field">
-              <label>Type</label>
-              <select value={kind} onChange={(e) => setKind(e.target.value)}>
+              <label htmlFor={`${fid}-type`}>Type</label>
+              <select id={`${fid}-type`} value={kind} onChange={(e) => setKind(e.target.value)}>
                 <option value="asset">Asset</option>
                 <option value="liability">Liability</option>
               </select>
             </div>
             <div className="field">
-              <label>Value ($)</label>
-              <input
+              <label htmlFor={`${fid}-value`}>Value ($)</label>
+              <input id={`${fid}-value`}
                 value={amount}
                 onChange={(e) => setAmount(e.target.value)}
                 placeholder="e.g. 850000"

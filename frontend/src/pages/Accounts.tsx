@@ -1,5 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { type FormEvent, useState } from "react";
+import { type FormEvent, useId, useState } from "react";
+
+import { Link } from "react-router-dom";
 
 import { api } from "../api/client";
 import type { Account } from "../api/types";
@@ -7,7 +9,9 @@ import { FilterRow, FilterToggle } from "../table/FilterRow";
 import { SortHeader } from "../table/SortHeader";
 import type { ColumnSpec } from "../table/sorting";
 import { useTable } from "../table/useTable";
+import { TABLE_MIN, TableWrap } from "../table/TableWrap";
 import { formatCents } from "../format";
+import { PageHead } from "../components/PageHead";
 
 const ACCOUNT_TYPES = [
   "everyday",
@@ -37,6 +41,7 @@ const ACCOUNT_COLUMNS: ColumnSpec<Account>[] = [
 ];
 
 export function Accounts() {
+  const fid = useId();
   const qc = useQueryClient();
   const accounts = useQuery({ queryKey: ["accounts"], queryFn: api.accounts });
   const table = useTable(accounts.data ?? [], ACCOUNT_COLUMNS, { id: "accounts" });
@@ -60,9 +65,7 @@ export function Accounts() {
 
   return (
     <div>
-      <div className="page-head">
-        <h1>Accounts</h1>
-      </div>
+      <PageHead title="Accounts" />
 
       <div className="grid">
         <div className="card">
@@ -72,47 +75,51 @@ export function Accounts() {
                 <span />
                 <FilterToggle table={table} />
               </div>
-              <table>
-                <thead>
-                  <tr>
-                    <SortHeader table={table} col="name">
-                      Name
-                    </SortHeader>
-                    <SortHeader table={table} col="type">
-                      Type
-                    </SortHeader>
-                    <SortHeader table={table} col="institution">
-                      Institution
-                    </SortHeader>
-                    <SortHeader table={table} col="balance" numeric>
-                      Balance
-                    </SortHeader>
-                    <SortHeader table={table} col="txns" numeric>
-                      Txns
-                    </SortHeader>
-                  </tr>
-                  <FilterRow
-                    table={table}
-                    labels={ACCOUNT_LABELS}
-                    columns={["name", "type", "institution", "balance", "txns"]}
-                  />
-                </thead>
-                <tbody>
-                  {table.rows.map((a) => (
-                    <tr key={a.id}>
-                      <td>{a.name}</td>
-                      <td>
-                        <span className="tag">{a.type.replace(/_/g, " ")}</span>
-                      </td>
-                      <td className="muted">{a.institution ?? "—"}</td>
-                      <td className={`num ${a.balance_cents < 0 ? "negative" : ""}`}>
-                        {formatCents(a.balance_cents)}
-                      </td>
-                      <td className="num muted">{a.txn_count}</td>
+              <TableWrap min={TABLE_MIN.accounts} label="Accounts">
+                <table>
+                  <thead>
+                    <tr>
+                      <SortHeader table={table} col="name">
+                        Name
+                      </SortHeader>
+                      <SortHeader table={table} col="type">
+                        Type
+                      </SortHeader>
+                      <SortHeader table={table} col="institution">
+                        Institution
+                      </SortHeader>
+                      <SortHeader table={table} col="balance" numeric>
+                        Balance
+                      </SortHeader>
+                      <SortHeader table={table} col="txns" numeric>
+                        Txns
+                      </SortHeader>
                     </tr>
-                  ))}
-                </tbody>
-              </table>
+                    <FilterRow
+                      table={table}
+                      labels={ACCOUNT_LABELS}
+                      columns={["name", "type", "institution", "balance", "txns"]}
+                    />
+                  </thead>
+                  <tbody>
+                    {table.rows.map((a) => (
+                      <tr key={a.id}>
+                        <td>
+                          <Link to={`/transactions?account_id=${a.id}`}>{a.name}</Link>
+                        </td>
+                        <td>
+                          <span className="tag">{a.type.replace(/_/g, " ")}</span>
+                        </td>
+                        <td className="muted">{a.institution ?? "—"}</td>
+                        <td className={`num ${a.balance_cents < 0 ? "negative" : ""}`}>
+                          {formatCents(a.balance_cents)}
+                        </td>
+                        <td className="num muted">{a.txn_count}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </TableWrap>
             </>
           ) : (
             <p className="muted">No accounts yet. Add one below, then import a statement.</p>
@@ -124,12 +131,17 @@ export function Accounts() {
           <form onSubmit={onSubmit}>
             <div className="row">
               <div className="field">
-                <label>Name</label>
-                <input value={name} onChange={(e) => setName(e.target.value)} required />
+                <label htmlFor={`${fid}-name`}>Name</label>
+                <input
+                  id={`${fid}-name`}
+                  value={name}
+                  onChange={(e) => setName(e.target.value)}
+                  required
+                />
               </div>
               <div className="field">
-                <label>Type</label>
-                <select value={type} onChange={(e) => setType(e.target.value)}>
+                <label htmlFor={`${fid}-type`}>Type</label>
+                <select id={`${fid}-type`} value={type} onChange={(e) => setType(e.target.value)}>
                   {ACCOUNT_TYPES.map((t) => (
                     <option key={t} value={t}>
                       {t.replace(/_/g, " ")}
@@ -138,8 +150,8 @@ export function Accounts() {
                 </select>
               </div>
               <div className="field">
-                <label>Institution</label>
-                <input
+                <label htmlFor={`${fid}-institution`}>Institution</label>
+                <input id={`${fid}-institution`}
                   value={institution}
                   onChange={(e) => setInstitution(e.target.value)}
                   placeholder="optional"

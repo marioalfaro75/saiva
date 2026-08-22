@@ -1,4 +1,4 @@
-import { type FormEvent, useState } from "react";
+import { type FormEvent, useId, useState } from "react";
 
 import { ApiError } from "../api/client";
 import type { SetupBody } from "../api/types";
@@ -7,6 +7,7 @@ import { useAuth } from "../auth/AuthContext";
 type Basis = "calendar" | "weekly" | "fortnightly" | "monthly";
 
 export function Login({ initialised }: { initialised: boolean }) {
+  const fid = useId();
   const { login, setup } = useAuth();
   const [householdName, setHouseholdName] = useState("");
   const [name, setName] = useState("");
@@ -54,16 +55,30 @@ export function Login({ initialised }: { initialised: boolean }) {
         {!initialised && (
           <>
             <div className="field">
-              <label>Household name</label>
-              <input value={householdName} onChange={(e) => setHouseholdName(e.target.value)} required />
+              <label htmlFor={`${fid}-household-name`}>Household name</label>
+              <input
+                id={`${fid}-household-name`}
+                value={householdName}
+                onChange={(e) => setHouseholdName(e.target.value)}
+                required
+              />
             </div>
             <div className="field">
-              <label>Your name</label>
-              <input value={name} onChange={(e) => setName(e.target.value)} required />
+              <label htmlFor={`${fid}-your-name`}>Your name</label>
+              <input
+                id={`${fid}-your-name`}
+                value={name}
+                onChange={(e) => setName(e.target.value)}
+                required
+              />
             </div>
             <div className="field">
-              <label>Budget period</label>
-              <select value={periodBasis} onChange={(e) => setPeriodBasis(e.target.value as Basis)}>
+              <label htmlFor={`${fid}-budget-period`}>Budget period</label>
+              <select
+                id={`${fid}-budget-period`}
+                value={periodBasis}
+                onChange={(e) => setPeriodBasis(e.target.value as Basis)}
+              >
                 <option value="calendar">Calendar months</option>
                 <option value="weekly">Weekly pay cycle</option>
                 <option value="fortnightly">Fortnightly pay cycle</option>
@@ -74,12 +89,18 @@ export function Login({ initialised }: { initialised: boolean }) {
         )}
 
         <div className="field">
-          <label>Email</label>
-          <input type="email" value={email} onChange={(e) => setEmail(e.target.value)} required />
+          <label htmlFor={`${fid}-email`}>Email</label>
+          <input
+            id={`${fid}-email`}
+            type="email"
+            value={email}
+            onChange={(e) => setEmail(e.target.value)}
+            required
+          />
         </div>
         <div className="field">
-          <label>Password</label>
-          <input
+          <label htmlFor={`${fid}-password`}>Password</label>
+          <input id={`${fid}-password`}
             type="password"
             value={password}
             onChange={(e) => setPassword(e.target.value)}

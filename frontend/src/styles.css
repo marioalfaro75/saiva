@@ -1,4 +1,8 @@
 :root {
+  /* Native selects, date pickers and scrollbars render in the OS light theme on a
+     dark app without this. One line, every native control. */
+  color-scheme: dark;
+
   --bg: #0b1220;
   --surface: #131c2e;
   --surface-2: #1b2740;
@@ -11,6 +15,48 @@
   --negative: #f87171;
   --radius: 12px;
   --shadow: 0 6px 24px rgba(0, 0, 0, 0.25);
+  /* Semantic colours, previously hardcoded at each use. Deliberately NOT applied to
+     the categorical chart palette in Overview.tsx, where the same hex is series
+     colour rather than a warning. */
+  --warning: #f59e0b;
+  --info: #60a5fa;
+}
+
+/* Keyboard users had no visible focus anywhere: the only focus rule in the file
+   removed the outline from inputs and selects, and everything else fell back to
+   whatever the browser drew on a near-black ground. */
+:where(a, button, select, input, textarea, summary, [tabindex]):focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: 6px;
+}
+
+/* The drawer is the app's first real motion; this also covers the budget bar. */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+/* Lets a keyboard reach the page without tabbing the whole navigation. */
+.skip-link {
+  position: absolute;
+  left: -9999px;
+  z-index: 100;
+}
+.skip-link:focus {
+  left: 12px;
+  top: 12px;
+  padding: 8px 14px;
+  background: var(--surface-2);
+  border: 1px solid var(--accent);
+  border-radius: 8px;
+  color: var(--text);
 }
 
 * {
@@ -21,7 +67,7 @@ body {
   margin: 0;
   background: var(--bg);
   color: var(--text);
-  font-family: "Inter", system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
   font-size: 15px;
   line-height: 1.5;
 }
@@ -62,17 +108,222 @@ a {
 .app {
   min-height: 100vh;
 }
-.topbar {
+
+/* Sidebar shell, >=1080px. The sidebar is in flow and sticky rather than fixed with
+   a margin on the content: an internally-scrolling <main> would break browser scroll
+   restoration, iOS pull-to-refresh and the mobile URL-bar collapse. The document
+   scrolls; nothing inside does.
+
+   minmax(0, 1fr) is load-bearing — without it a wide table blows the track out and
+   brings back horizontal page scroll. */
+.app-wide {
+  display: grid;
+  grid-template-columns: var(--nav-w, 240px) minmax(0, 1fr);
+}
+.sidebar {
+  position: sticky;
+  top: 0;
+  height: 100dvh;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 8px 10px 10px;
+  background: var(--surface);
+  border-right: 1px solid var(--border);
+}
+.sidebar-brand {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  height: 56px;
+  padding: 0 10px;
+  font-weight: 700;
+  font-size: 18px;
+  letter-spacing: 0.5px;
+}
+/* Only the destination list scrolls, so Settings and Sign out stay reachable even
+   on a short laptop. */
+.sidebar-items {
+  flex: 1;
+  overflow-y: auto;
+  scrollbar-width: thin;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+/* Clusters are separated by space alone — see the note in Sidebar.tsx. */
+.sidebar-cluster {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+.side-link {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 5px 12px;
+  border-radius: 8px;
+  color: var(--muted);
+  text-decoration: none;
+  font-weight: 500;
+  border-left: 2px solid transparent;
+}
+.side-link:hover {
+  background: var(--surface-2);
+  color: var(--text);
+}
+/* Active is additive: the background and the full-strength text carry it, and the
+   rail is a third cue rather than a replacement for them. */
+.side-link.active {
+  background: var(--surface-2);
+  border-left-color: var(--accent);
+  color: var(--text);
+}
+.sidebar-foot {
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding-top: 8px;
+  border-top: 1px solid var(--border);
+}
+.sidebar-household {
+  padding: 2px 12px;
+  font-size: 12px;
+}
+.sidebar-signout {
+  margin: 2px 8px 0;
+  text-align: left;
+}
+/* A count says more than a dot, and a vertical row has room for it. */
+.badge {
+  min-width: 20px;
+  padding: 0 6px;
+  border-radius: 999px;
+  background: var(--accent-strong);
+  color: #fff;
+  font-size: 11px;
+  font-weight: 700;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+}
+.appbar {
   position: sticky;
   top: 0;
   z-index: 10;
   display: flex;
   align-items: center;
-  gap: 20px;
-  padding: 12px 20px;
+  gap: 12px;
+  height: 56px;
+  padding: 0 20px;
   background: rgba(11, 18, 32, 0.9);
   backdrop-filter: blur(8px);
   border-bottom: 1px solid var(--border);
+}
+.appbar-range {
+  font-size: 13px;
+  color: var(--muted);
+}
+.appbar-spacer {
+  flex: 1;
+}
+/* Three independent signals that these are not today's figures — a symbol, wording
+   that appears in no other state, and colour — so it survives colour-vision
+   deficiency, sunlight and habituation. Sticky, unlike the band it replaces, which
+   scrolled away under a sticky header after one flick. */
+.appbar[data-period="past"],
+.appbar[data-period="future"] {
+  background: rgba(245, 158, 11, 0.12);
+  border-bottom-color: var(--warning);
+}
+.appbar[data-period="past"] .appbar-range,
+.appbar[data-period="future"] .appbar-range {
+  color: var(--warning);
+  font-weight: 600;
+}
+/* Sits directly under the app bar rather than scrolling with the page. Deliberately
+   not dismissible: the SPA knows it is talking to a different backend build, and
+   silencing that trades a real correctness hazard for 44px. */
+.app-wide .update-bar {
+  position: sticky;
+  top: 56px;
+  z-index: 9;
+  padding: 8px 20px;
+  font-size: 13px;
+}
+/* ---- Drawer, below 1080px ---- */
+.app-narrow {
+  min-height: 100vh;
+}
+.sidebar-drawer {
+  position: fixed;
+  inset: 0 auto 0 0;
+  z-index: 40;
+  width: min(320px, 100vw - 56px);
+  transform: translateX(-100%);
+  transition: transform 0.18s ease;
+  box-shadow: var(--shadow);
+}
+@media (min-width: 640px) {
+  .sidebar-drawer {
+    width: 280px;
+  }
+}
+.app-narrow[data-drawer] .sidebar-drawer {
+  transform: translateX(0);
+}
+.scrim {
+  position: fixed;
+  inset: 0;
+  z-index: 39;
+  background: rgba(0, 0, 0, 0.5);
+}
+.nav-toggle {
+  flex: none;
+  min-width: 40px;
+  min-height: 40px;
+  padding: 0;
+  font-size: 18px;
+  line-height: 1;
+}
+.appbar-mark {
+  flex: none;
+}
+/* The brand wordmark and the household name do not fit beside a hamburger and the
+   period picker at 390px, and neither is load-bearing. */
+.show-narrow {
+  display: none;
+}
+@media (max-width: 639px) {
+  .appbar {
+    height: 52px;
+    gap: 8px;
+    padding: 0 12px;
+  }
+  .hide-narrow {
+    display: none;
+  }
+  .show-narrow {
+    display: block;
+  }
+  .period-picker {
+    max-width: none;
+  }
+  .content {
+    padding: 20px 14px 56px;
+  }
+  /* A drawer row is a touch target, not a pointer target. */
+  .side-link {
+    padding: 9px 12px;
+  }
+}
+/* The abnormal-period band below 640px, sticky under the app bar. */
+.app-narrow .period-bar {
+  position: sticky;
+  top: 52px;
+  z-index: 9;
 }
 .brand {
   font-weight: 700;
@@ -82,32 +333,6 @@ a {
 .brand-mark {
   color: var(--accent);
   font-size: 22px;
-}
-.nav {
-  display: flex;
-  gap: 4px;
-  flex: 1;
-  flex-wrap: wrap;
-}
-.nav-link {
-  color: var(--muted);
-  text-decoration: none;
-  padding: 8px 12px;
-  border-radius: 8px;
-  font-weight: 500;
-}
-.nav-link:hover {
-  background: var(--surface-2);
-  color: var(--text);
-}
-.nav-link.active {
-  background: var(--surface-2);
-  color: var(--accent);
-}
-.topbar-right {
-  display: flex;
-  align-items: center;
-  gap: 12px;
 }
 .content {
   max-width: 1100px;
@@ -119,6 +344,13 @@ a {
 .grid {
   display: grid;
   gap: 16px;
+}
+/* Two hard-coded "1fr 1fr" grids used to crush a 200px donut and two editable
+   tables into 131px boxes on a phone. auto-fit collapses them with no breakpoint. */
+.split {
+  display: grid;
+  gap: 16px;
+  grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
 }
 .cards {
   display: grid;
@@ -151,6 +383,22 @@ a {
   justify-content: space-between;
   gap: 12px;
   margin-bottom: 20px;
+  flex-wrap: wrap;
+}
+.page-title {
+  min-width: 0;
+}
+/* One line saying what the page is for, under its name. */
+.page-sub {
+  margin: 2px 0 0;
+  color: var(--muted);
+  font-size: 13px;
+  max-width: 60ch;
+}
+.page-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
   flex-wrap: wrap;
 }
 h1 {
@@ -208,9 +456,8 @@ select {
   border-radius: 9px;
   font-size: 14px;
 }
-input:focus,
-select:focus {
-  outline: none;
+input:focus-visible,
+select:focus-visible {
   border-color: var(--accent);
 }
 .field {
@@ -248,6 +495,18 @@ td.num,
 th.num {
   text-align: right;
   font-variant-numeric: tabular-nums;
+}
+
+/* A wide table scrolls inside its card rather than squashing or pushing the page
+   sideways. Note: overflow-x: auto makes overflow-y compute to auto too, so this is
+   a scroll container on both axes — a future sticky thead or a cell overlay would be
+   clipped to it. */
+.table-wrap {
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+}
+.table-wrap > table {
+  min-width: var(--tw-min, 0);
 }
 
 /* ---- Sortable / filterable tables ---- */
@@ -364,12 +623,11 @@ th.num .sort-btn {
   gap: 12px;
 }
 
-@media (max-width: 640px) {
+/* 639, not 640: at exactly 640px the `min-width: 640px` query also matches, and the
+   two would disagree about whether this is a phone. */
+@media (max-width: 639px) {
   .hide-mobile {
     display: none;
-  }
-  .topbar {
-    flex-wrap: wrap;
   }
 }
 
@@ -499,7 +757,7 @@ th.actions {
   transition: width 0.3s ease;
 }
 .budget-bar > span.warning {
-  background: #f59e0b;
+  background: var(--warning);
 }
 .budget-bar > span.over {
   background: var(--negative);
@@ -518,7 +776,7 @@ th.actions {
 }
 .status-pill.warning {
   background: rgba(245, 158, 11, 0.15);
-  color: #f59e0b;
+  color: var(--warning);
 }
 .status-pill.over {
   background: rgba(248, 113, 113, 0.15);
@@ -526,7 +784,7 @@ th.actions {
 }
 .status-pill.info {
   background: rgba(96, 165, 250, 0.15);
-  color: #60a5fa;
+  color: var(--info);
 }
 
 /* ---- Insights ---- */
@@ -537,7 +795,7 @@ th.actions {
   border-left-color: var(--negative);
 }
 .insight-warn {
-  border-left-color: #f59e0b;
+  border-left-color: var(--warning);
 }
 .insight-info {
   border-left-color: #2dd4bf;
@@ -567,7 +825,7 @@ th.actions {
   gap: 8px;
   padding: 8px 20px;
   background: rgba(245, 158, 11, 0.15);
-  color: #f59e0b;
+  color: var(--warning);
   font-size: 13px;
 }
 .period-picker {
@@ -581,4 +839,208 @@ th.actions {
   border-radius: 50%;
   background: var(--accent);
   vertical-align: middle;
+}
+
+/* ---- Phone presentations of the table controls ----
+   A card list has no column headers to hang sorting and filtering on, so the same
+   `TableControls` get a row of chips and a stack of fields instead. */
+.sort-chips {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+  margin-bottom: 10px;
+}
+.chip {
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  color: var(--muted);
+  border-radius: 999px;
+  padding: 7px 12px;
+  font-size: 13px;
+  min-height: 34px;
+  cursor: pointer;
+}
+.chip.on {
+  border-color: var(--accent-strong);
+  background: rgba(45, 212, 191, 0.12);
+  color: var(--accent);
+}
+.filter-fields {
+  display: grid;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+.filter-fields .field {
+  margin: 0;
+}
+.select-all {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0 0 10px;
+  font-size: 13px;
+  color: var(--muted);
+  min-height: 40px;
+}
+
+/* ---- Transactions as cards ---- */
+.txn-cards {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 8px;
+}
+.txn-card {
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface-2);
+  padding: 10px 12px;
+  display: grid;
+  gap: 6px;
+}
+.txn-card.picked {
+  border-color: var(--accent-strong);
+}
+.txn-card-head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
+.txn-card-desc {
+  flex: 1;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.txn-card-head .num {
+  flex: none;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.txn-card-meta {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  font-size: 12px;
+}
+.txn-card-foot {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.txn-card-foot .grow {
+  flex: 1;
+}
+/* The checkbox is the whole reason a card can join a bulk action, so it gets a real
+   touch target rather than the 13px box a pointer can manage. */
+.txn-card-head input[type="checkbox"],
+.select-all input[type="checkbox"] {
+  width: 18px;
+  height: 18px;
+  flex: none;
+}
+
+@media (max-width: 639px) {
+  /* 40px minimum on anything tapped: the WCAG 2.2 target-size floor is 24px, but a
+     categorise-and-lock pass is dozens of taps in a row. */
+  .txn-card-foot .pill-select,
+  .txn-card-foot .icon-btn {
+    min-height: 40px;
+  }
+  .txn-card-foot .pill-select {
+    flex: 1;
+    min-width: 0;
+    max-width: 60%;
+  }
+  .txn-card-foot .icon-btn {
+    min-width: 40px;
+    font-size: 16px;
+  }
+  .bulk-bar {
+    /* Sticky to the bottom of a phone screen, where the thumb is. */
+    padding: 10px 12px;
+    gap: 8px;
+  }
+  .bulk-bar .btn {
+    min-height: 40px;
+  }
+}
+
+/* ---- Wide tables as a stack of cards (import review) ---- */
+.stack-cards {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 8px;
+}
+.stack-card {
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface-2);
+  padding: 10px 12px;
+  display: grid;
+  gap: 6px;
+}
+.stack-card-head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
+.stack-card-head .grow {
+  flex: 1;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.stack-card-head .num {
+  flex: none;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.stack-card-head input[type="checkbox"] {
+  width: 18px;
+  height: 18px;
+  flex: none;
+}
+.stack-card-meta {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  font-size: 12px;
+}
+.stack-card select,
+.stack-card input[type="text"],
+.stack-card .row input {
+  width: 100%;
+}
+/* A preview describing a configuration that has since changed. Dimmed rather than
+   removed: the rows are still worth reading, they just are not the answer any more. */
+.card.stale > *:not(.notice) {
+  opacity: 0.5;
+}
+
+/* ---- Empty states ---- */
+.empty {
+  text-align: center;
+  padding: 28px 20px;
+}
+.empty-title {
+  margin: 0 0 4px;
+  font-size: 16px;
+  font-weight: 600;
+  color: var(--text);
+}
+.empty .muted {
+  margin: 0 auto;
+  max-width: 46ch;
+}
+
+/* An auto-filling grid of equally sized cards — budgets, goals. */
+.tiles {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+  gap: 16px;
+  margin-top: 16px;
 }

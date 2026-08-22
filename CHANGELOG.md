@@ -6,6 +6,24 @@ All notable changes to Saiva are documented here. The project follows
 ## [Unreleased]
 
 ### Added
+- **A side menu replaces the top bar.** Thirteen links across the top had run out of
+  room; they now sit in a sidebar grouped by what you are doing — seeing where you
+  stand, working with transactions, planning, and the long view. On a laptop it is
+  always there; below 1080px it is a drawer behind a menu button, closing when you
+  pick something, on Escape, or on a tap outside.
+- **The period you are looking at is always on screen.** The app bar carries it
+  permanently and turns amber whenever it is not the current period, so figures from
+  a past financial year can't be mistaken for live ones.
+- **The phone is a place you can actually work.** Below 640px the transactions list
+  becomes a stack of cards with the same controls the table has — selection, the
+  category picker, lock, and the transfer tag — plus select‑all, sort chips and
+  stacked filter fields in place of column headers. Pages are shorter there (25
+  rather than 50) and everything you tap is at least 40px. The import wizard's two
+  review tables get the same treatment.
+- **Subtitles on the pages whose name doesn't say what they are for** — Forecast,
+  Benchmarks, Net worth, Insights, and Bills.
+- **Empty states that lead somewhere.** Instead of naming a page — "load demo data
+  from Settings" — they link to it.
 - **The AI advisor can now look things up.** It has read-only access to search your
   transactions, total spending by category or merchant, list uncategorised items and
   compare two periods — so questions like "are there any transactions mentioning
@@ -29,6 +47,31 @@ All notable changes to Saiva are documented here. The project follows
   mode withholds, it now says which setting is responsible and where to change it,
   instead of only "the provided data does not include…".
 - Amounts in advisor answers read `-$1,200.00` rather than `$-1,200.00`.
+- **The import wizard can no longer act on a preview that no longer applies.** Ten
+  controls feed the preview and none of them cleared it, so changing the account or a
+  mapped column left the old preview on screen — and importing then sent row numbers
+  taken from it, which could import or skip the wrong rows. The preview now knows
+  when it is out of date, says so, and Import waits for a fresh one. That button also
+  says what it will do: *Import 84 transactions*.
+- **Editing net worth showed the old figures.** Every add, edit and delete wrote its
+  result into the wrong cache entry, so the table kept the values from before the
+  change until the page was reloaded.
+- **Overview no longer reads `$0.00` while it is still loading.** Income, expenses and
+  net show an em dash until the figures arrive, as the savings rate already did.
+- **Budgets, Goals, Alerts and Benchmarks lead with your data**, not with the form for
+  adding more of it.
+- **Wide tables scroll inside their card** instead of squashing every column to
+  illegibility, and are reachable from the keyboard.
+- Group review is its own tab on Transactions rather than a mode hidden inside the
+  list, and it says plainly that it looks across all time rather than the selected
+  period.
+- Keyboard focus is visible everywhere, and the categorise dialog traps focus and
+  returns it.
+- **Every form label now belongs to its field.** Forty-four of them were text sitting
+  beside a control with nothing joining them, so tapping the word didn't focus the
+  box — most annoying on a phone — and a screen reader read the field with no name.
+  On the sign-in form that meant email and password were both announced as an unnamed
+  text field.
 
 
 ## [0.10.1] — 2026-08-20

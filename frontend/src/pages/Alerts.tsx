@@ -1,10 +1,12 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useEffect, useState } from "react";
+import { useEffect, useId, useState } from "react";
 import { Link } from "react-router-dom";
 
 import { api } from "../api/client";
+import { EmptyState } from "../components/EmptyState";
 import type { Notification } from "../api/types";
 import { dollarsToCents } from "../format";
+import { PageHead } from "../components/PageHead";
 
 const PILL: Record<string, string> = { alert: "over", warn: "warning", info: "info" };
 
@@ -50,6 +52,7 @@ function Row({ note, onRead }: { note: Notification; onRead: (id: string) => voi
 }
 
 export function Alerts() {
+  const fid = useId();
   const qc = useQueryClient();
   const notes = useQuery({ queryKey: ["notifications"], queryFn: api.notifications });
   const settings = useQuery({
@@ -95,18 +98,32 @@ export function Alerts() {
 
   return (
     <div>
-      <div className="page-head">
-        <h1>Alerts</h1>
+      <PageHead title="Alerts">
         {(notes.data?.unread ?? 0) > 0 && (
           <button className="btn" onClick={() => readAll.mutate()}>
             Mark all read
           </button>
         )}
-      </div>
+      </PageHead>
 
       {flash && <div className="notice">{flash}</div>}
 
-      <div className="card" style={{ marginBottom: 16 }}>
+      {items.length > 0 ? (
+        <div style={{ display: "grid", gap: 12 }}>
+          {items.map((n) => (
+            <Row key={n.id} note={n} onRead={(id) => read.mutate(id)} />
+          ))}
+        </div>
+      ) : (
+        notes.data && (
+          <EmptyState title="Nothing needs your attention">
+            Saiva flags over-budget categories, unusual spend, upcoming bills, large
+            transactions and a low projected balance here. Set the thresholds below.
+          </EmptyState>
+        )
+      )}
+
+      <div className="card" style={{ marginTop: 16 }}>
         <h2>Email & preferences</h2>
         <p className="muted" style={{ marginTop: 0 }}>
           {s?.smtp_configured
@@ -128,8 +145,8 @@ export function Alerts() {
             Email me alerts
           </label>
           <div>
-            <label>Digest</label>
-            <select
+            <label htmlFor={`${fid}-digest`}>Digest</label>
+            <select id={`${fid}-digest`}
               className="pill-select"
               value={s?.digest ?? "off"}
               disabled={!s?.smtp_configured || save.isPending}
@@ -145,12 +162,20 @@ export function Alerts() {
         </div>
         <div className="row" style={{ marginTop: 8 }}>
           <div>
-            <label>Large transaction over</label>
-            <input value={largeTxn} onChange={(e) => setLargeTxn(e.target.value)} />
+            <label htmlFor={`${fid}-large-txn`}>Large transaction over</label>
+            <input
+              id={`${fid}-large-txn`}
+              value={largeTxn}
+              onChange={(e) => setLargeTxn(e.target.value)}
+            />
           </div>
           <div>
-            <label>Warn if projected balance below</label>
-            <input value={lowBal} onChange={(e) => setLowBal(e.target.value)} />
+            <label htmlFor={`${fid}-low-balance`}>Warn if projected balance below</label>
+            <input
+              id={`${fid}-low-balance`}
+              value={lowBal}
+              onChange={(e) => setLowBal(e.target.value)}
+            />
           </div>
         </div>
         <div className="toolbar" style={{ marginTop: 12, marginBottom: 0 }}>

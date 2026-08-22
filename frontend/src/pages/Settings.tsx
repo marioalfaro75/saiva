@@ -1,9 +1,10 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { type FormEvent, useEffect, useState } from "react";
+import { type FormEvent, useEffect, useId, useState } from "react";
 
 import { api } from "../api/client";
 import type { AiSettings } from "../api/types";
 import { UpdatesPanel } from "../components/UpdatesPanel";
+import { PageHead } from "../components/PageHead";
 
 interface Form {
   state: string;
@@ -13,6 +14,7 @@ interface Form {
 }
 
 export function Settings() {
+  const fid = useId();
   const qc = useQueryClient();
   const household = useQuery({ queryKey: ["household"], queryFn: api.household });
   const [form, setForm] = useState<Form>({
@@ -126,9 +128,7 @@ export function Settings() {
 
   return (
     <div>
-      <div className="page-head">
-        <h1>Settings</h1>
-      </div>
+      <PageHead title="Settings" />
 
       <div className="grid">
         <div className="card">
@@ -136,8 +136,8 @@ export function Settings() {
           <form onSubmit={onSubmit}>
             <div className="row">
               <div className="field">
-                <label>State / territory</label>
-                <select
+                <label htmlFor={`${fid}-state`}>State / territory</label>
+                <select id={`${fid}-state`}
                   value={form.state}
                   onChange={(e) => setForm({ ...form, state: e.target.value })}
                 >
@@ -150,8 +150,8 @@ export function Settings() {
                 </select>
               </div>
               <div className="field">
-                <label>Budget period basis</label>
-                <select
+                <label htmlFor={`${fid}-period-basis`}>Budget period basis</label>
+                <select id={`${fid}-period-basis`}
                   value={form.period_basis}
                   onChange={(e) => setForm({ ...form, period_basis: e.target.value })}
                 >
@@ -162,8 +162,8 @@ export function Settings() {
                 </select>
               </div>
               <div className="field">
-                <label>Financial year starts (month)</label>
-                <input
+                <label htmlFor={`${fid}-fy-start`}>Financial year starts (month)</label>
+                <input id={`${fid}-fy-start`}
                   type="number"
                   min={1}
                   max={12}
@@ -174,8 +174,8 @@ export function Settings() {
             </div>
             {showAnchor && (
               <div className="field">
-                <label>Pay-cycle anchor date (a recent payday)</label>
-                <input
+                <label htmlFor={`${fid}-pay-anchor`}>Pay-cycle anchor date (a recent payday)</label>
+                <input id={`${fid}-pay-anchor`}
                   type="date"
                   value={form.pay_cycle_anchor}
                   onChange={(e) => setForm({ ...form, pay_cycle_anchor: e.target.value })}
@@ -249,8 +249,8 @@ export function Settings() {
           </p>
           <div className="row">
             <div>
-              <label>Provider</label>
-              <select
+              <label htmlFor={`${fid}-provider`}>Provider</label>
+              <select id={`${fid}-provider`}
                 className="pill-select"
                 value={ai.provider}
                 onChange={(e) =>
@@ -264,8 +264,8 @@ export function Settings() {
               </select>
             </div>
             <div>
-              <label>Privacy mode</label>
-              <select
+              <label htmlFor={`${fid}-privacy-mode`}>Privacy mode</label>
+              <select id={`${fid}-privacy-mode`}
                 className="pill-select"
                 value={ai.privacy_mode}
                 onChange={(e) =>
@@ -281,8 +281,10 @@ export function Settings() {
           {ai.provider !== "none" && (
             <>
               <div className="field" style={{ marginTop: 8 }}>
-                <label>API key {aiQuery.data?.has_key ? "(set — leave blank to keep)" : ""}</label>
-                <input
+                <label htmlFor={`${fid}-api-key`}>
+                  API key {aiQuery.data?.has_key ? "(set — leave blank to keep)" : ""}
+                </label>
+                <input id={`${fid}-api-key`}
                   type="password"
                   value={ai.api_key}
                   onChange={(e) => setAi({ ...ai, api_key: e.target.value })}
@@ -291,8 +293,8 @@ export function Settings() {
               </div>
               {ai.provider === "openai" && (
                 <div className="field">
-                  <label>Base URL</label>
-                  <input
+                  <label htmlFor={`${fid}-base-url`}>Base URL</label>
+                  <input id={`${fid}-base-url`}
                     value={ai.base_url}
                     onChange={(e) => setAi({ ...ai, base_url: e.target.value })}
                     placeholder="https://api.openai.com/v1 or http://ollama:11434/v1"
@@ -300,8 +302,8 @@ export function Settings() {
                 </div>
               )}
               <div className="field">
-                <label>Model</label>
-                <select
+                <label htmlFor={`${fid}-model`}>Model</label>
+                <select id={`${fid}-model`}
                   className="pill-select"
                   value={modelIsCustom ? "__custom__" : ai.model}
                   onChange={(e) => {

@@ -1,10 +1,13 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { type FormEvent, useState } from "react";
+import { type FormEvent, useId, useState } from "react";
+import { Link } from "react-router-dom";
 
 import { api } from "../api/client";
 import type { SavingsGoal } from "../api/types";
+import { EmptyState } from "../components/EmptyState";
 import { dollarsToCents, formatCents, formatDate } from "../format";
 import { usePeriod } from "../period/context";
+import { PageHead } from "../components/PageHead";
 
 type GoalPatch = {
   target_cents?: number;
@@ -23,6 +26,7 @@ function GoalCard({
   onRemove: (id: string) => void;
   busy: boolean;
 }) {
+  const fid = useId();
   const [editing, setEditing] = useState(false);
   const [target, setTarget] = useState((goal.target_cents / 100).toString());
   const [date, setDate] = useState(goal.target_date ?? "");
@@ -69,17 +73,27 @@ function GoalCard({
         <div style={{ marginTop: 12 }}>
           <div className="row">
             <div className="field">
-              <label>Target ($)</label>
-              <input value={target} onChange={(e) => setTarget(e.target.value)} inputMode="decimal" />
+              <label htmlFor={`${fid}-target`}>Target ($)</label>
+              <input
+                id={`${fid}-target`}
+                value={target}
+                onChange={(e) => setTarget(e.target.value)}
+                inputMode="decimal"
+              />
             </div>
             <div className="field">
-              <label>Target date</label>
-              <input type="date" value={date} onChange={(e) => setDate(e.target.value)} />
+              <label htmlFor={`${fid}-target-date`}>Target date</label>
+              <input
+                id={`${fid}-target-date`}
+                type="date"
+                value={date}
+                onChange={(e) => setDate(e.target.value)}
+              />
             </div>
             {!goal.account_id && (
               <div className="field">
-                <label>Saved so far ($)</label>
-                <input
+                <label htmlFor={`${fid}-saved-so-far`}>Saved so far ($)</label>
+                <input id={`${fid}-saved-so-far`}
                   value={current}
                   onChange={(e) => setCurrent(e.target.value)}
                   inputMode="decimal"
@@ -121,6 +135,7 @@ function GoalCard({
 }
 
 export function Goals() {
+  const fid = useId();
   const { period } = usePeriod();
   const qc = useQueryClient();
   const goals = useQuery({
@@ -174,17 +189,36 @@ export function Goals() {
 
   return (
     <div>
-      <div className="page-head">
-        <h1>Savings goals</h1>
-      </div>
+      <PageHead title="Savings goals" />
 
-      <div className="card">
+      {list.length > 0 ? (
+        <div className="tiles">
+          {list.map((g) => (
+            <GoalCard
+              key={g.id}
+              goal={g}
+              busy={busy}
+              onSave={(id, patch) => update.mutate({ id, patch })}
+              onRemove={(id) => remove.mutate(id)}
+            />
+          ))}
+        </div>
+      ) : (
+        goals.data && (
+          <EmptyState title="No savings goals yet">
+            Add one below — link a savings account to track progress automatically, or enter
+            an amount by hand. <Link to="/settings">Load demo data</Link> for examples.
+          </EmptyState>
+        )
+      )}
+
+      <div className="card" style={{ marginTop: 16 }}>
         <h2>Add a goal</h2>
         <form onSubmit={onSubmit}>
           <div className="row">
             <div className="field">
-              <label>Name</label>
-              <input
+              <label htmlFor={`${fid}-name`}>Name</label>
+              <input id={`${fid}-name`}
                 value={name}
                 onChange={(e) => setName(e.target.value)}
                 placeholder="e.g. Emergency fund"
@@ -192,8 +226,8 @@ export function Goals() {
               />
             </div>
             <div className="field">
-              <label>Target ($)</label>
-              <input
+              <label htmlFor={`${fid}-target`}>Target ($)</label>
+              <input id={`${fid}-target`}
                 value={target}
                 onChange={(e) => setTarget(e.target.value)}
                 placeholder="e.g. 20000"
@@ -202,14 +236,23 @@ export function Goals() {
               />
             </div>
             <div className="field">
-              <label>Target date (optional)</label>
-              <input type="date" value={date} onChange={(e) => setDate(e.target.value)} />
+              <label htmlFor={`${fid}-target-date-optional`}>Target date (optional)</label>
+              <input
+                id={`${fid}-target-date-optional`}
+                type="date"
+                value={date}
+                onChange={(e) => setDate(e.target.value)}
+              />
             </div>
           </div>
           <div className="row">
             <div className="field">
-              <label>Linked account (optional)</label>
-              <select value={accountId} onChange={(e) => setAccountId(e.target.value)}>
+              <label htmlFor={`${fid}-linked-account-optional`}>Linked account (optional)</label>
+              <select
+                id={`${fid}-linked-account-optional`}
+                value={accountId}
+                onChange={(e) => setAccountId(e.target.value)}
+              >
                 <option value="">Track manually</option>
                 {(accounts.data ?? []).map((a) => (
                   <option key={a.id} value={a.id}>
@@ -220,8 +263,8 @@ export function Goals() {
             </div>
             {!accountId && (
               <div className="field">
-                <label>Saved so far ($)</label>
-                <input
+                <label htmlFor={`${fid}-saved-so-far`}>Saved so far ($)</label>
+                <input id={`${fid}-saved-so-far`}
                   value={current}
                   onChange={(e) => setCurrent(e.target.value)}
                   placeholder="0"
