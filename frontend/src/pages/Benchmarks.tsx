@@ -1,8 +1,10 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { type FormEvent, useState } from "react";
+import { Link } from "react-router-dom";
 
 import { api } from "../api/client";
 import type { BenchmarkItem } from "../api/types";
+import { EmptyState } from "../components/EmptyState";
 import { useAuth } from "../auth/AuthContext";
 import { TABLE_MIN, TableWrap } from "../table/TableWrap";
 import { formatCents } from "../format";
@@ -11,6 +13,7 @@ import { FilterRow, FilterToggle } from "../table/FilterRow";
 import { SortHeader } from "../table/SortHeader";
 import type { ColumnSpec } from "../table/sorting";
 import { useTable } from "../table/useTable";
+import { PageHead } from "../components/PageHead";
 
 function signed(cents: number): string {
   return `${cents > 0 ? "+" : "-"}${formatCents(Math.abs(cents))}`;
@@ -91,42 +94,12 @@ export function Benchmarks() {
 
   return (
     <div>
-      <div className="page-head">
-        <h1>Benchmarks</h1>
+      <PageHead
+        title="Benchmarks"
+        sub="How your spending compares with a typical household your size."
+      >
         {data && <span className="muted">{data.basis}</span>}
-      </div>
-
-      <div className="card">
-        <h2>Your household</h2>
-        <p className="muted" style={{ marginTop: 0 }}>
-          Typical figures are scaled to your household size.
-        </p>
-        <form onSubmit={onSubmit}>
-          <div className="row">
-            <div className="field">
-              <label>Adults</label>
-              <input
-                type="number"
-                min={1}
-                value={adults}
-                onChange={(e) => setAdults(Number(e.target.value))}
-              />
-            </div>
-            <div className="field">
-              <label>Children</label>
-              <input
-                type="number"
-                min={0}
-                value={children}
-                onChange={(e) => setChildren(Number(e.target.value))}
-              />
-            </div>
-          </div>
-          <button className="btn" disabled={save.isPending}>
-            {save.isPending ? "Updating…" : "Update household size"}
-          </button>
-        </form>
-      </div>
+      </PageHead>
 
       {data && (
         <div className="cards" style={{ marginTop: 16 }}>
@@ -186,10 +159,11 @@ export function Benchmarks() {
           </table>
         </TableWrap>
         {data && data.your_total_weekly_cents === 0 && (
-          <p className="muted">
-            No spending yet to compare. Import a few months of transactions (or load demo data from
-            Settings) to see how you stack up.
-          </p>
+          <EmptyState title="Nothing to compare yet">
+            Benchmarks need a few months of spending.{" "}
+            <Link to="/import">Import a statement</Link>, or{" "}
+            <Link to="/settings">load demo data</Link> to see how the comparison reads.
+          </EmptyState>
         )}
       </div>
 
@@ -198,6 +172,38 @@ export function Benchmarks() {
           {data.note}
         </p>
       )}
+      <div className="card" style={{ marginTop: 16 }}>
+        <h2>Your household</h2>
+        <p className="muted" style={{ marginTop: 0 }}>
+          Typical figures are scaled to your household size.
+        </p>
+        <form onSubmit={onSubmit}>
+          <div className="row">
+            <div className="field">
+              <label>Adults</label>
+              <input
+                type="number"
+                min={1}
+                value={adults}
+                onChange={(e) => setAdults(Number(e.target.value))}
+              />
+            </div>
+            <div className="field">
+              <label>Children</label>
+              <input
+                type="number"
+                min={0}
+                value={children}
+                onChange={(e) => setChildren(Number(e.target.value))}
+              />
+            </div>
+          </div>
+          <button className="btn" disabled={save.isPending}>
+            {save.isPending ? "Updating…" : "Update household size"}
+          </button>
+        </form>
+      </div>
+
     </div>
   );
 }

@@ -11,6 +11,7 @@ import { FilterRow, FilterToggle } from "../table/FilterRow";
 import { SortHeader } from "../table/SortHeader";
 import type { ColumnSpec } from "../table/sorting";
 import { useTable } from "../table/useTable";
+import { PageHead } from "../components/PageHead";
 
 type SavePatch = { name?: string; value_cents?: number };
 
@@ -169,7 +170,9 @@ export function NetWorth() {
   const [kind, setKind] = useState("asset");
   const [amount, setAmount] = useState("");
 
-  const setData = (data: NetWorthData) => qc.setQueryData(["netWorth"], data);
+  // The key must carry the period, or a mutation writes its response into a cache
+  // entry nothing reads and the table keeps showing the figures from before the edit.
+  const setData = (data: NetWorthData) => qc.setQueryData(["netWorth", period], data);
 
   const create = useMutation({
     mutationFn: () => api.createNetWorthItem({ name, kind, value_cents: dollarsToCents(amount) }),
@@ -212,8 +215,7 @@ export function NetWorth() {
 
   return (
     <div>
-      <div className="page-head">
-        <h1>Net worth</h1>
+      <PageHead title="Net worth" sub="Everything you own and owe, tracked over time.">
         <button
           type="button"
           className="btn"
@@ -222,7 +224,7 @@ export function NetWorth() {
         >
           {snapshot.isPending ? "Saving…" : "Record snapshot"}
         </button>
-      </div>
+      </PageHead>
 
       <div className="cards">
         <Stat

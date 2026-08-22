@@ -4,6 +4,7 @@ import { Link } from "react-router-dom";
 import { api } from "../api/client";
 import type { Insight } from "../api/types";
 import { usePeriod } from "../period/context";
+import { PageHead } from "../components/PageHead";
 
 const PILL_CLASS: Record<string, string> = { alert: "over", warn: "warning", info: "info" };
 const PILL_LABEL: Record<string, string> = { alert: "Alert", warn: "Heads up", info: "FYI" };
@@ -42,10 +43,9 @@ export function Insights() {
 
   return (
     <div>
-      <div className="page-head">
-        <h1>Insights</h1>
+      <PageHead title="Insights" sub="Patterns Saiva noticed in your spending this period.">
         {data && list.length > 0 && <span className="muted">Based on {data.generated_for}</span>}
-      </div>
+      </PageHead>
 
       {list.length > 0 ? (
         <div style={{ display: "grid", gap: 12 }}>

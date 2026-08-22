@@ -16,6 +16,7 @@ import { FilterFields, SortChips } from "../table/MobileControls";
 import { TABLE_MIN, TableWrap } from "../table/TableWrap";
 import { formatCents, formatDate } from "../format";
 import type { Transaction, TxnGroup } from "../api/types";
+import { PageHead } from "../components/PageHead";
 
 const TXN_LABELS = {
   date: "Date",
@@ -238,9 +239,7 @@ export function Transactions() {
 
   return (
     <div>
-      <div className="page-head">
-        <h1>Transactions</h1>
-      </div>
+      <PageHead title="Transactions" />
 
       <div className="tabs">
         <button

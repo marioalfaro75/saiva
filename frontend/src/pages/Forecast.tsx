@@ -14,6 +14,7 @@ import {
 import { api } from "../api/client";
 import { formatCents, formatDate } from "../format";
 import { usePeriod } from "../period/context";
+import { PageHead } from "../components/PageHead";
 
 const HORIZONS = [
   { value: 30, label: "30 days" },
@@ -70,10 +71,13 @@ export function Forecast() {
 
   return (
     <div>
-      <div className="page-head">
-        <h1>Forecast</h1>
+      <PageHead
+        title="Forecast"
+        sub="Projected balances, from your recurring bills and how you usually spend."
+      >
         <select
           className="pill-select"
+          aria-label="Forecast horizon"
           value={days}
           onChange={(e) => setDays(Number(e.target.value))}
         >
@@ -83,7 +87,7 @@ export function Forecast() {
             </option>
           ))}
         </select>
-      </div>
+      </PageHead>
 
       <div className="cards">
         <Stat label="Balance today" value={formatCents(base.data?.starting_balance_cents ?? 0)} />

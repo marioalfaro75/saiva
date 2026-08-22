@@ -9,6 +9,7 @@ import { FilterRow, FilterToggle } from "../table/FilterRow";
 import { SortHeader } from "../table/SortHeader";
 import type { ColumnSpec } from "../table/sorting";
 import { useTable } from "../table/useTable";
+import { PageHead } from "../components/PageHead";
 
 function cap(s: string): string {
   return s.charAt(0).toUpperCase() + s.slice(1);
@@ -97,9 +98,10 @@ export function Bills() {
 
   return (
     <div>
-      <div className="page-head">
-        <h1>Bills &amp; recurring</h1>
-      </div>
+      <PageHead
+        title="Bills & recurring"
+        sub="Payments that repeat, and when the next ones fall due."
+      />
 
       <div className="cards" style={{ marginBottom: 16 }}>
         <div className="card">

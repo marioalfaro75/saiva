@@ -1,12 +1,13 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { type FormEvent, useMemo, useState } from "react";
-
 import { Link } from "react-router-dom";
 
 import { api } from "../api/client";
 import type { Budget, Category } from "../api/types";
+import { EmptyState } from "../components/EmptyState";
 import { dollarsToCents, formatCents, formatPct } from "../format";
 import { usePeriod } from "../period/context";
+import { PageHead } from "../components/PageHead";
 
 const PERIODS = [
   { value: "monthly", label: "Monthly" },
@@ -197,17 +198,37 @@ export function Budgets() {
 
   return (
     <div>
-      <div className="page-head">
-        <h1>Budgets</h1>
+      <PageHead title="Budgets">
         {list.length > 0 && (
           <span className="muted">
             {list.length} budget{list.length === 1 ? "" : "s"}
             {attention > 0 ? ` · ${attention} need attention` : ""}
           </span>
         )}
-      </div>
+      </PageHead>
 
-      <div className="card">
+      {list.length > 0 ? (
+        <div className="tiles">
+          {list.map((b) => (
+            <BudgetCard
+              key={b.id}
+              budget={b}
+              busy={update.isPending || remove.isPending}
+              onSave={(id, patch) => update.mutate({ id, patch })}
+              onRemove={(id) => remove.mutate(id)}
+            />
+          ))}
+        </div>
+      ) : (
+        budgets.data && (
+          <EmptyState title="No budgets yet">
+            Add one below to track spending against a limit, or{" "}
+            <Link to="/settings">load demo data</Link> to see it in action.
+          </EmptyState>
+        )
+      )}
+
+      <div className="card" style={{ marginTop: 16 }}>
         <h2>Add a budget</h2>
         <form onSubmit={onSubmit}>
           <div className="row">
@@ -262,33 +283,6 @@ export function Budgets() {
         </form>
       </div>
 
-      {list.length > 0 ? (
-        <div
-          style={{
-            display: "grid",
-            gridTemplateColumns: "repeat(auto-fill, minmax(300px, 1fr))",
-            gap: 16,
-            marginTop: 16,
-          }}
-        >
-          {list.map((b) => (
-            <BudgetCard
-              key={b.id}
-              budget={b}
-              busy={update.isPending || remove.isPending}
-              onSave={(id, patch) => update.mutate({ id, patch })}
-              onRemove={(id) => remove.mutate(id)}
-            />
-          ))}
-        </div>
-      ) : (
-        <div className="card" style={{ marginTop: 16 }}>
-          <p className="muted">
-            No budgets yet. Add one above to track spending against a limit — or load demo data from
-            Settings to see it in action.
-          </p>
-        </div>
-      )}
     </div>
   );
 }

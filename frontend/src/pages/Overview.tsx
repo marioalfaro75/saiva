@@ -22,6 +22,7 @@ import type { ColumnSpec } from "../table/sorting";
 import { useTable } from "../table/useTable";
 import { TABLE_MIN, TableWrap } from "../table/TableWrap";
 import { formatCents, formatPct } from "../format";
+import { PageHead } from "../components/PageHead";
 
 // A categorical scale: each entry is one pie slice, not a meaning. Two of these
 // hexes match --warning and --info, and sweeping them into those tokens would
@@ -88,10 +89,9 @@ export function Overview() {
 
   return (
     <div>
-      <div className="page-head">
-        <h1>Overview</h1>
+      <PageHead title="Overview">
         <span className="muted">{resolved?.label}</span>
-      </div>
+      </PageHead>
 
       {summary.data?.txn_count === 0 && (
         <div className="notice">
@@ -101,9 +101,20 @@ export function Overview() {
       )}
 
       <div className="cards">
-        <Stat label="Income" value={formatCents(summary.data?.income_cents ?? 0)} cls="positive" />
-        <Stat label="Expenses" value={formatCents(summary.data?.expense_cents ?? 0)} cls="negative" />
-        <Stat label="Net" value={formatCents(summary.data?.net_cents ?? 0)} />
+        {/* An em dash while loading, not $0.00: a zero is a claim about the data,
+            and reading "you spent nothing" for a second is worse than reading
+            nothing at all. The savings rate already used this idiom. */}
+        <Stat
+          label="Income"
+          value={summary.data ? formatCents(summary.data.income_cents) : "—"}
+          cls="positive"
+        />
+        <Stat
+          label="Expenses"
+          value={summary.data ? formatCents(summary.data.expense_cents) : "—"}
+          cls="negative"
+        />
+        <Stat label="Net" value={summary.data ? formatCents(summary.data.net_cents) : "—"} />
         <Stat
           label="Savings rate"
           value={summary.data ? formatPct(summary.data.savings_rate) : "—"}

@@ -385,6 +385,22 @@ a {
   margin-bottom: 20px;
   flex-wrap: wrap;
 }
+.page-title {
+  min-width: 0;
+}
+/* One line saying what the page is for, under its name. */
+.page-sub {
+  margin: 2px 0 0;
+  color: var(--muted);
+  font-size: 13px;
+  max-width: 60ch;
+}
+.page-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
 h1 {
   font-size: 22px;
   margin: 0;
@@ -1003,4 +1019,28 @@ th.actions {
    removed: the rows are still worth reading, they just are not the answer any more. */
 .card.stale > *:not(.notice) {
   opacity: 0.5;
+}
+
+/* ---- Empty states ---- */
+.empty {
+  text-align: center;
+  padding: 28px 20px;
+}
+.empty-title {
+  margin: 0 0 4px;
+  font-size: 16px;
+  font-weight: 600;
+  color: var(--text);
+}
+.empty .muted {
+  margin: 0 auto;
+  max-width: 46ch;
+}
+
+/* An auto-filling grid of equally sized cards — budgets, goals. */
+.tiles {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+  gap: 16px;
+  margin-top: 16px;
 }

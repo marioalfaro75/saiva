@@ -17,6 +17,7 @@ import { formatCents, formatDate } from "../format";
 import { SortHeader } from "../table/SortHeader";
 import type { ColumnSpec } from "../table/sorting";
 import { useTable } from "../table/useTable";
+import { PageHead } from "../components/PageHead";
 
 const ACCOUNT_TYPES = [
   "everyday",
@@ -388,9 +389,7 @@ export function ImportPage() {
 
   return (
     <div>
-      <div className="page-head">
-        <h1>Import transactions</h1>
-      </div>
+      <PageHead title="Import transactions" />
       {error && <div className="error">{error}</div>}
       {result && <div className="notice">{result}</div>}
 

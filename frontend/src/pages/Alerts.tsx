@@ -3,8 +3,10 @@ import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 
 import { api } from "../api/client";
+import { EmptyState } from "../components/EmptyState";
 import type { Notification } from "../api/types";
 import { dollarsToCents } from "../format";
+import { PageHead } from "../components/PageHead";
 
 const PILL: Record<string, string> = { alert: "over", warn: "warning", info: "info" };
 
@@ -95,18 +97,32 @@ export function Alerts() {
 
   return (
     <div>
-      <div className="page-head">
-        <h1>Alerts</h1>
+      <PageHead title="Alerts">
         {(notes.data?.unread ?? 0) > 0 && (
           <button className="btn" onClick={() => readAll.mutate()}>
             Mark all read
           </button>
         )}
-      </div>
+      </PageHead>
 
       {flash && <div className="notice">{flash}</div>}
 
-      <div className="card" style={{ marginBottom: 16 }}>
+      {items.length > 0 ? (
+        <div style={{ display: "grid", gap: 12 }}>
+          {items.map((n) => (
+            <Row key={n.id} note={n} onRead={(id) => read.mutate(id)} />
+          ))}
+        </div>
+      ) : (
+        notes.data && (
+          <EmptyState title="Nothing needs your attention">
+            Saiva flags over-budget categories, unusual spend, upcoming bills, large
+            transactions and a low projected balance here. Set the thresholds below.
+          </EmptyState>
+        )
+      )}
+
+      <div className="card" style={{ marginTop: 16 }}>
         <h2>Email & preferences</h2>
         <p className="muted" style={{ marginTop: 0 }}>
           {s?.smtp_configured

@@ -1,10 +1,13 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { type FormEvent, useState } from "react";
+import { Link } from "react-router-dom";
 
 import { api } from "../api/client";
 import type { SavingsGoal } from "../api/types";
+import { EmptyState } from "../components/EmptyState";
 import { dollarsToCents, formatCents, formatDate } from "../format";
 import { usePeriod } from "../period/context";
+import { PageHead } from "../components/PageHead";
 
 type GoalPatch = {
   target_cents?: number;
@@ -174,11 +177,30 @@ export function Goals() {
 
   return (
     <div>
-      <div className="page-head">
-        <h1>Savings goals</h1>
-      </div>
+      <PageHead title="Savings goals" />
 
-      <div className="card">
+      {list.length > 0 ? (
+        <div className="tiles">
+          {list.map((g) => (
+            <GoalCard
+              key={g.id}
+              goal={g}
+              busy={busy}
+              onSave={(id, patch) => update.mutate({ id, patch })}
+              onRemove={(id) => remove.mutate(id)}
+            />
+          ))}
+        </div>
+      ) : (
+        goals.data && (
+          <EmptyState title="No savings goals yet">
+            Add one below — link a savings account to track progress automatically, or enter
+            an amount by hand. <Link to="/settings">Load demo data</Link> for examples.
+          </EmptyState>
+        )
+      )}
+
+      <div className="card" style={{ marginTop: 16 }}>
         <h2>Add a goal</h2>
         <form onSubmit={onSubmit}>
           <div className="row">

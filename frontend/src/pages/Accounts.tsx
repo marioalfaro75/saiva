@@ -11,6 +11,7 @@ import type { ColumnSpec } from "../table/sorting";
 import { useTable } from "../table/useTable";
 import { TABLE_MIN, TableWrap } from "../table/TableWrap";
 import { formatCents } from "../format";
+import { PageHead } from "../components/PageHead";
 
 const ACCOUNT_TYPES = [
   "everyday",
@@ -63,9 +64,7 @@ export function Accounts() {
 
   return (
     <div>
-      <div className="page-head">
-        <h1>Accounts</h1>
-      </div>
+      <PageHead title="Accounts" />
 
       <div className="grid">
         <div className="card">

@@ -4,6 +4,7 @@ import { type FormEvent, useEffect, useState } from "react";
 import { api } from "../api/client";
 import type { AiSettings } from "../api/types";
 import { UpdatesPanel } from "../components/UpdatesPanel";
+import { PageHead } from "../components/PageHead";
 
 interface Form {
   state: string;
@@ -126,9 +127,7 @@ export function Settings() {
 
   return (
     <div>
-      <div className="page-head">
-        <h1>Settings</h1>
-      </div>
+      <PageHead title="Settings" />
 
       <div className="grid">
         <div className="card">

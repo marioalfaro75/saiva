@@ -5,6 +5,7 @@ import { Link } from "react-router-dom";
 import { api } from "../api/client";
 import { usePeriod } from "../period/context";
 import type { ChatMessage } from "../api/types";
+import { PageHead } from "../components/PageHead";
 
 const PRIVACY_LABEL: Record<string, string> = {
   local_only: "Local only — nothing leaves your network",
@@ -36,12 +37,11 @@ export function Advisor() {
 
   return (
     <div>
-      <div className="page-head">
-        <h1>Advisor</h1>
+      <PageHead title="Advisor" sub="Ask questions about your own numbers.">
         {settings.data && (
           <span className="muted">{PRIVACY_LABEL[settings.data.privacy_mode]}</span>
         )}
-      </div>
+      </PageHead>
 
       <div className="notice">
         General information only — not personal financial advice. Answers are grounded in your
