@@ -1,5 +1,6 @@
 import { NavLink } from "react-router-dom";
 
+import { useDismissable } from "../hooks/useDismissable";
 import { CLUSTERS, SETTINGS } from "./navItems";
 
 interface Props {
@@ -11,11 +12,30 @@ interface Props {
   onSignOut: () => void;
   /** Called after following a link, so the drawer can close itself. */
   onNavigate?: () => void;
+  /** Set when the sidebar is an off-canvas drawer rather than a persistent column. */
+  drawer?: boolean;
+  open?: boolean;
 }
 
-export function Sidebar({ unread, updateAvailable, household, onSignOut, onNavigate }: Props) {
+export function Sidebar({
+  unread,
+  updateAvailable,
+  household,
+  onSignOut,
+  onNavigate,
+  drawer = false,
+  open = false,
+}: Props) {
+  // Escape, focus trap, focus return and scroll lock — the same behaviour the
+  // categorise dialog uses, so there is one overlay implementation, not two.
+  const panel = useDismissable<HTMLElement>(drawer && open, onNavigate ?? (() => {}));
   return (
-    <nav className="sidebar" aria-label="Main">
+    <nav
+      className={drawer ? "sidebar sidebar-drawer" : "sidebar"}
+      aria-label="Main"
+      ref={drawer ? panel : undefined}
+      {...(drawer ? { "aria-hidden": !open, inert: open ? undefined : "" } : {})}
+    >
       <div className="sidebar-brand">
         <span className="brand-mark">≈</span> Saiva
       </div>

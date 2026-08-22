@@ -253,17 +253,77 @@ a {
   padding: 8px 20px;
   font-size: 13px;
 }
-.topbar {
+/* ---- Drawer, below 1080px ---- */
+.app-narrow {
+  min-height: 100vh;
+}
+.sidebar-drawer {
+  position: fixed;
+  inset: 0 auto 0 0;
+  z-index: 40;
+  width: min(320px, 100vw - 56px);
+  transform: translateX(-100%);
+  transition: transform 0.18s ease;
+  box-shadow: var(--shadow);
+}
+@media (min-width: 640px) {
+  .sidebar-drawer {
+    width: 280px;
+  }
+}
+.app-narrow[data-drawer] .sidebar-drawer {
+  transform: translateX(0);
+}
+.scrim {
+  position: fixed;
+  inset: 0;
+  z-index: 39;
+  background: rgba(0, 0, 0, 0.5);
+}
+.nav-toggle {
+  flex: none;
+  min-width: 40px;
+  min-height: 40px;
+  padding: 0;
+  font-size: 18px;
+  line-height: 1;
+}
+.appbar-mark {
+  flex: none;
+}
+/* The brand wordmark and the household name do not fit beside a hamburger and the
+   period picker at 390px, and neither is load-bearing. */
+.show-narrow {
+  display: none;
+}
+@media (max-width: 639px) {
+  .appbar {
+    height: 52px;
+    gap: 8px;
+    padding: 0 12px;
+  }
+  .hide-narrow {
+    display: none;
+  }
+  .show-narrow {
+    display: block;
+  }
+  .period-picker {
+    max-width: none;
+  }
+  .content {
+    padding: 20px 14px 56px;
+  }
+  /* A drawer row is a touch target, not a pointer target. */
+  .side-link {
+    padding: 9px 12px;
+  }
+}
+/* The abnormal-period band below 640px, sticky under the app bar. */
+.app-narrow .period-bar {
   position: sticky;
-  top: 0;
-  z-index: 10;
-  display: flex;
-  align-items: center;
-  gap: 20px;
-  padding: 12px 20px;
-  background: rgba(11, 18, 32, 0.9);
-  backdrop-filter: blur(8px);
-  border-bottom: 1px solid var(--border);
+  top: 52px;
+  z-index: 9;
 }
 .brand {
   font-weight: 700;
@@ -273,32 +333,6 @@ a {
 .brand-mark {
   color: var(--accent);
   font-size: 22px;
-}
-.nav {
-  display: flex;
-  gap: 4px;
-  flex: 1;
-  flex-wrap: wrap;
-}
-.nav-link {
-  color: var(--muted);
-  text-decoration: none;
-  padding: 8px 12px;
-  border-radius: 8px;
-  font-weight: 500;
-}
-.nav-link:hover {
-  background: var(--surface-2);
-  color: var(--text);
-}
-.nav-link.active {
-  background: var(--surface-2);
-  color: var(--accent);
-}
-.topbar-right {
-  display: flex;
-  align-items: center;
-  gap: 12px;
 }
 .content {
   max-width: 1100px;
@@ -564,9 +598,6 @@ th.num .sort-btn {
 @media (max-width: 640px) {
   .hide-mobile {
     display: none;
-  }
-  .topbar {
-    flex-wrap: wrap;
   }
 }
 

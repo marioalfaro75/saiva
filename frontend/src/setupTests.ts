@@ -9,25 +9,44 @@ class ResizeObserverStub {
 }
 globalThis.ResizeObserver ??= ResizeObserverStub as unknown as typeof ResizeObserver;
 
-// jsdom has no matchMedia. Default to a narrow viewport and let tests widen it via
-// setViewport(); without this every media-query branch silently takes one path.
+// jsdom has no matchMedia. Default to a narrow viewport, let tests widen it with
+// setViewport(), and notify listeners so components that react to a resize can be
+// tested rather than only their initial state.
 let viewportWidth = 800;
+const listeners = new Set<{ query: string; fn: (e: MediaQueryListEvent) => void }>();
+
+const evaluate = (query: string): boolean => {
+  const min = /min-width:\s*(\d+)px/.exec(query);
+  const max = /max-width:\s*(\d+)px/.exec(query);
+  if (min) return viewportWidth >= Number(min[1]);
+  if (max) return viewportWidth <= Number(max[1]);
+  return false;
+};
 
 export function setViewport(width: number): void {
   viewportWidth = width;
+  for (const { query, fn } of listeners) {
+    fn({ matches: evaluate(query), media: query } as MediaQueryListEvent);
+  }
 }
 
 globalThis.matchMedia ??= ((query: string) => {
-  const min = /min-width:\s*(\d+)px/.exec(query);
-  const matches = min ? viewportWidth >= Number(min[1]) : false;
+  const entry = { query, fn: (_e: MediaQueryListEvent) => {} };
   return {
-    matches,
+    get matches() {
+      return evaluate(query);
+    },
     media: query,
     onchange: null,
-    addEventListener: () => {},
-    removeEventListener: () => {},
+    addEventListener: (_t: string, fn: (e: MediaQueryListEvent) => void) => {
+      entry.fn = fn;
+      listeners.add(entry);
+    },
+    removeEventListener: () => {
+      listeners.delete(entry);
+    },
     addListener: () => {},
     removeListener: () => {},
     dispatchEvent: () => false,
-  } as MediaQueryList;
+  } as unknown as MediaQueryList;
 }) as typeof matchMedia;

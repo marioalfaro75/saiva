@@ -26,3 +26,6 @@ export function useMediaQuery(query: string): boolean {
 
 /** Width at which the navigation becomes a persistent sidebar. */
 export const WIDE = "(min-width: 1080px)";
+
+/** Above this the app bar has room for the period range beside the picker. */
+export const PHONE = "(min-width: 640px)";

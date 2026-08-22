@@ -1,4 +1,4 @@
-import { screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { setViewport } from "../setupTests";
@@ -75,7 +75,7 @@ const ROUTES = [
 // Every guarantee below has to hold in both shells, so the suite runs twice: once
 // narrow, where the original top bar renders, and once wide, where the sidebar does.
 describe.each([
-  ["top bar", 800, ".topbar"],
+  ["drawer", 800, ".sidebar-drawer"],
   ["sidebar", 1280, ".sidebar"],
 ])("app shell (%s)", (_name, width, shellSelector) => {
   it("renders the shell this viewport calls for, and only that one", async () => {
@@ -116,11 +116,21 @@ describe.each([
     expect(await screen.findByLabelText("Period")).toBeInTheDocument();
   });
 
-  it("renders the page content and a way to sign out", async () => {
+  it("renders the page content", async () => {
     setViewport(width);
     stubShell();
     renderShell(<Layout>the page</Layout>);
     expect(await screen.findByText("the page")).toBeInTheDocument();
+  });
+
+  it("offers a way to sign out", async () => {
+    setViewport(width);
+    stubShell();
+    renderShell(<Layout>c</Layout>);
+    await screen.findByLabelText("Period");
+    // A closed drawer is inert, so open it first; the persistent column is always open.
+    const toggle = screen.queryByRole("button", { name: "Menu" });
+    if (toggle) fireEvent.click(toggle);
     expect(screen.getByRole("button", { name: "Sign out" })).toBeInTheDocument();
   });
 });
@@ -194,5 +204,80 @@ describe("status signals", () => {
     renderShell(<Layout>c</Layout>);
     expect(await screen.findByText(/Future period/)).toBeInTheDocument();
     expect(screen.getByText(/Nothing has happened yet/)).toBeInTheDocument();
+  });
+});
+
+describe("drawer, below 1080px", () => {
+  async function openDrawer() {
+    setViewport(800);
+    stubShell();
+    const view = renderShell(<Layout>c</Layout>);
+    await screen.findByLabelText("Period");
+    fireEvent.click(screen.getByRole("button", { name: "Menu" }));
+    return view;
+  }
+
+  it("starts closed and hidden from assistive tech", async () => {
+    setViewport(800);
+    stubShell();
+    const { container } = renderShell(<Layout>c</Layout>);
+    await screen.findByLabelText("Period");
+    const nav = container.querySelector("nav")!;
+    expect(nav).toHaveAttribute("aria-hidden", "true");
+    expect(screen.getByRole("button", { name: "Menu" })).toHaveAttribute(
+      "aria-expanded",
+      "false",
+    );
+  });
+
+  it("opens on the menu button and exposes the navigation", async () => {
+    const { container } = await openDrawer();
+    expect(container.querySelector("nav")).toHaveAttribute("aria-hidden", "false");
+    expect(screen.getByRole("button", { name: "Menu" })).toHaveAttribute(
+      "aria-expanded",
+      "true",
+    );
+  });
+
+  it("closes on Escape", async () => {
+    const { container } = await openDrawer();
+    fireEvent.keyDown(document, { key: "Escape" });
+    await waitFor(() =>
+      expect(container.querySelector("nav")).toHaveAttribute("aria-hidden", "true"),
+    );
+  });
+
+  it("closes when the scrim is clicked", async () => {
+    const { container } = await openDrawer();
+    expect(container.querySelector(".scrim")).not.toBeNull();
+    fireEvent.pointerDown(container.querySelector(".scrim")!);
+    fireEvent.pointerUp(container.querySelector(".scrim")!);
+    await waitFor(() =>
+      expect(container.querySelector("nav")).toHaveAttribute("aria-hidden", "true"),
+    );
+  });
+
+  it("closes after following a link, rather than covering the page you asked for", async () => {
+    const { container } = await openDrawer();
+    fireEvent.click(container.querySelector('a[href="/budgets"]')!);
+    await waitFor(() =>
+      expect(container.querySelector("nav")).toHaveAttribute("aria-hidden", "true"),
+    );
+  });
+
+  it("does not leave a stuck overlay when the window grows past the breakpoint", async () => {
+    // A drawer left open while resizing would otherwise persist into the wide layout.
+    const { container } = await openDrawer();
+    expect(container.querySelector("nav")).toHaveAttribute("aria-hidden", "false");
+    act(() => setViewport(1280));
+    await waitFor(() => expect(container.querySelector(".scrim")).toBeNull());
+  });
+
+  it("has no menu button on a wide screen, where the column is always there", async () => {
+    setViewport(1280);
+    stubShell();
+    renderShell(<Layout>c</Layout>);
+    await screen.findByLabelText("Period");
+    expect(screen.queryByRole("button", { name: "Menu" })).toBeNull();
   });
 });
