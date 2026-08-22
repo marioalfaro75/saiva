@@ -1,5 +1,7 @@
 import { useMemo, useState } from "react";
 
+import { useDismissable } from "../hooks/useDismissable";
+
 import type { Category, RecategoriseScope, Transaction } from "../api/types";
 
 interface Props {
@@ -30,11 +32,20 @@ export function CategoriseDialog({ txn, categories, busy, onClose, onSubmit }: P
   const [pattern, setPattern] = useState(txn.merchant ?? txn.raw_description);
   const [makeRule, setMakeRule] = useState(false);
   const [lock, setLock] = useState(txn.category_locked);
+  // Escape, a focus trap, focus return, and dismissal only when the gesture began
+  // outside — so drag-selecting the pattern field no longer discards the edit.
+  const panel = useDismissable<HTMLDivElement>(true, onClose);
 
   return (
-    <div className="modal-overlay" onClick={onClose}>
-      <div className="modal" onClick={(e) => e.stopPropagation()}>
-        <h2>Categorise</h2>
+    <div className="modal-overlay">
+      <div
+        className="modal"
+        ref={panel}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="categorise-title"
+      >
+        <h2 id="categorise-title">Categorise</h2>
         <p className="muted" style={{ marginTop: 0 }}>
           {txn.merchant ?? txn.raw_description}
         </p>
