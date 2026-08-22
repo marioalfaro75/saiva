@@ -65,8 +65,13 @@ All notable changes to Saiva are documented here. The project follows
 - Group review is its own tab on Transactions rather than a mode hidden inside the
   list, and it says plainly that it looks across all time rather than the selected
   period.
-- Keyboard focus is visible everywhere, the categorise dialog traps focus and returns
-  it, and the import wizard's labels are attached to the controls they name.
+- Keyboard focus is visible everywhere, and the categorise dialog traps focus and
+  returns it.
+- **Every form label now belongs to its field.** Forty-four of them were text sitting
+  beside a control with nothing joining them, so tapping the word didn't focus the
+  box — most annoying on a phone — and a screen reader read the field with no name.
+  On the sign-in form that meant email and password were both announced as an unnamed
+  text field.
 
 
 ## [0.10.1] — 2026-08-20
