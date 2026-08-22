@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { type FormEvent, useState } from "react";
+import { type FormEvent, useId, useState } from "react";
 
 import { Link } from "react-router-dom";
 
@@ -41,6 +41,7 @@ const ACCOUNT_COLUMNS: ColumnSpec<Account>[] = [
 ];
 
 export function Accounts() {
+  const fid = useId();
   const qc = useQueryClient();
   const accounts = useQuery({ queryKey: ["accounts"], queryFn: api.accounts });
   const table = useTable(accounts.data ?? [], ACCOUNT_COLUMNS, { id: "accounts" });
@@ -130,12 +131,17 @@ export function Accounts() {
           <form onSubmit={onSubmit}>
             <div className="row">
               <div className="field">
-                <label>Name</label>
-                <input value={name} onChange={(e) => setName(e.target.value)} required />
+                <label htmlFor={`${fid}-name`}>Name</label>
+                <input
+                  id={`${fid}-name`}
+                  value={name}
+                  onChange={(e) => setName(e.target.value)}
+                  required
+                />
               </div>
               <div className="field">
-                <label>Type</label>
-                <select value={type} onChange={(e) => setType(e.target.value)}>
+                <label htmlFor={`${fid}-type`}>Type</label>
+                <select id={`${fid}-type`} value={type} onChange={(e) => setType(e.target.value)}>
                   {ACCOUNT_TYPES.map((t) => (
                     <option key={t} value={t}>
                       {t.replace(/_/g, " ")}
@@ -144,8 +150,8 @@ export function Accounts() {
                 </select>
               </div>
               <div className="field">
-                <label>Institution</label>
-                <input
+                <label htmlFor={`${fid}-institution`}>Institution</label>
+                <input id={`${fid}-institution`}
                   value={institution}
                   onChange={(e) => setInstitution(e.target.value)}
                   placeholder="optional"

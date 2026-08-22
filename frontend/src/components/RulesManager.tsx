@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useId, useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
 import { TABLE_MIN, TableWrap } from "../table/TableWrap";
@@ -34,6 +34,7 @@ const RULE_LABELS = {
 };
 
 export function RulesManager({ categories, onFlash }: Props) {
+  const fid = useId();
   const qc = useQueryClient();
   const rules = useQuery({ queryKey: ["rules"], queryFn: api.rules });
   const subcategories = useMemo(() => categories.filter((c) => c.parent_id), [categories]);
@@ -110,8 +111,12 @@ export function RulesManager({ categories, onFlash }: Props) {
         <h2>New rule</h2>
         <div className="row">
           <div>
-            <label>When description…</label>
-            <select value={matchType} onChange={(e) => setMatchType(e.target.value as MatchType)}>
+            <label htmlFor={`${fid}-when-description`}>When description…</label>
+            <select
+              id={`${fid}-when-description`}
+              value={matchType}
+              onChange={(e) => setMatchType(e.target.value as MatchType)}
+            >
               {MATCH_TYPES.map((m) => (
                 <option key={m} value={m}>
                   {m.replace("_", " ")}
@@ -120,16 +125,20 @@ export function RulesManager({ categories, onFlash }: Props) {
             </select>
           </div>
           <div style={{ flex: 2 }}>
-            <label>Matches</label>
-            <input
+            <label htmlFor={`${fid}-matches`}>Matches</label>
+            <input id={`${fid}-matches`}
               placeholder="e.g. woolworths"
               value={pattern}
               onChange={(e) => setPattern(e.target.value)}
             />
           </div>
           <div>
-            <label>Category</label>
-            <select value={categoryId} onChange={(e) => setCategoryId(e.target.value)}>
+            <label htmlFor={`${fid}-category`}>Category</label>
+            <select
+              id={`${fid}-category`}
+              value={categoryId}
+              onChange={(e) => setCategoryId(e.target.value)}
+            >
               <option value="">Choose…</option>
               {subcategories.map((c) => (
                 <option key={c.id} value={c.id}>

@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { type FormEvent, useState } from "react";
+import { type FormEvent, useId, useState } from "react";
 import { Link } from "react-router-dom";
 
 import { api } from "../api/client";
@@ -68,6 +68,7 @@ const BENCHMARK_COLUMNS: ColumnSpec<BenchmarkItem>[] = [
 ];
 
 export function Benchmarks() {
+  const fid = useId();
   const { period } = usePeriod();
   const qc = useQueryClient();
   const { me } = useAuth();
@@ -181,8 +182,8 @@ export function Benchmarks() {
         <form onSubmit={onSubmit}>
           <div className="row">
             <div className="field">
-              <label>Adults</label>
-              <input
+              <label htmlFor={`${fid}-adults`}>Adults</label>
+              <input id={`${fid}-adults`}
                 type="number"
                 min={1}
                 value={adults}
@@ -190,8 +191,8 @@ export function Benchmarks() {
               />
             </div>
             <div className="field">
-              <label>Children</label>
-              <input
+              <label htmlFor={`${fid}-children`}>Children</label>
+              <input id={`${fid}-children`}
                 type="number"
                 min={0}
                 value={children}

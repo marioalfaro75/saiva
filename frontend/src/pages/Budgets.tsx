@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { type FormEvent, useMemo, useState } from "react";
+import { type FormEvent, useId, useMemo, useState } from "react";
 import { Link } from "react-router-dom";
 
 import { api } from "../api/client";
@@ -48,6 +48,7 @@ function BudgetCard({
   onRemove: (id: string) => void;
   busy: boolean;
 }) {
+  const fid = useId();
   const [editing, setEditing] = useState(false);
   const [amount, setAmount] = useState((budget.limit_cents / 100).toString());
   const [period, setPeriod] = useState(budget.period);
@@ -95,12 +96,17 @@ function BudgetCard({
       {editing ? (
         <div className="row" style={{ marginTop: 12 }}>
           <div className="field">
-            <label>Limit ($)</label>
-            <input value={amount} onChange={(e) => setAmount(e.target.value)} inputMode="decimal" />
+            <label htmlFor={`${fid}-limit`}>Limit ($)</label>
+            <input
+              id={`${fid}-limit`}
+              value={amount}
+              onChange={(e) => setAmount(e.target.value)}
+              inputMode="decimal"
+            />
           </div>
           <div className="field">
-            <label>Period</label>
-            <select value={period} onChange={(e) => setPeriod(e.target.value)}>
+            <label htmlFor={`${fid}-period`}>Period</label>
+            <select id={`${fid}-period`} value={period} onChange={(e) => setPeriod(e.target.value)}>
               {PERIODS.map((p) => (
                 <option key={p.value} value={p.value}>
                   {p.label}
@@ -145,6 +151,7 @@ function BudgetCard({
 }
 
 export function Budgets() {
+  const fid = useId();
   // Distinct from a budget's own recurrence below: this is the app-wide view period.
   const { period: viewPeriod } = usePeriod();
   const qc = useQueryClient();
@@ -233,8 +240,13 @@ export function Budgets() {
         <form onSubmit={onSubmit}>
           <div className="row">
             <div className="field">
-              <label>Category</label>
-              <select value={categoryId} onChange={(e) => setCategoryId(e.target.value)} required>
+              <label htmlFor={`${fid}-category`}>Category</label>
+              <select
+                id={`${fid}-category`}
+                value={categoryId}
+                onChange={(e) => setCategoryId(e.target.value)}
+                required
+              >
                 <option value="">Choose a category…</option>
                 {options.map((o) => (
                   <option key={o.id} value={o.id}>
@@ -244,8 +256,12 @@ export function Budgets() {
               </select>
             </div>
             <div className="field">
-              <label>Period</label>
-              <select value={period} onChange={(e) => setPeriod(e.target.value)}>
+              <label htmlFor={`${fid}-period`}>Period</label>
+              <select
+                id={`${fid}-period`}
+                value={period}
+                onChange={(e) => setPeriod(e.target.value)}
+              >
                 {PERIODS.map((p) => (
                   <option key={p.value} value={p.value}>
                     {p.label}
@@ -254,8 +270,8 @@ export function Budgets() {
               </select>
             </div>
             <div className="field">
-              <label>Limit ($)</label>
-              <input
+              <label htmlFor={`${fid}-limit`}>Limit ($)</label>
+              <input id={`${fid}-limit`}
                 value={amount}
                 onChange={(e) => setAmount(e.target.value)}
                 placeholder="e.g. 800"

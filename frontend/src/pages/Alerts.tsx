@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useEffect, useState } from "react";
+import { useEffect, useId, useState } from "react";
 import { Link } from "react-router-dom";
 
 import { api } from "../api/client";
@@ -52,6 +52,7 @@ function Row({ note, onRead }: { note: Notification; onRead: (id: string) => voi
 }
 
 export function Alerts() {
+  const fid = useId();
   const qc = useQueryClient();
   const notes = useQuery({ queryKey: ["notifications"], queryFn: api.notifications });
   const settings = useQuery({
@@ -144,8 +145,8 @@ export function Alerts() {
             Email me alerts
           </label>
           <div>
-            <label>Digest</label>
-            <select
+            <label htmlFor={`${fid}-digest`}>Digest</label>
+            <select id={`${fid}-digest`}
               className="pill-select"
               value={s?.digest ?? "off"}
               disabled={!s?.smtp_configured || save.isPending}
@@ -161,12 +162,20 @@ export function Alerts() {
         </div>
         <div className="row" style={{ marginTop: 8 }}>
           <div>
-            <label>Large transaction over</label>
-            <input value={largeTxn} onChange={(e) => setLargeTxn(e.target.value)} />
+            <label htmlFor={`${fid}-large-txn`}>Large transaction over</label>
+            <input
+              id={`${fid}-large-txn`}
+              value={largeTxn}
+              onChange={(e) => setLargeTxn(e.target.value)}
+            />
           </div>
           <div>
-            <label>Warn if projected balance below</label>
-            <input value={lowBal} onChange={(e) => setLowBal(e.target.value)} />
+            <label htmlFor={`${fid}-low-balance`}>Warn if projected balance below</label>
+            <input
+              id={`${fid}-low-balance`}
+              value={lowBal}
+              onChange={(e) => setLowBal(e.target.value)}
+            />
           </div>
         </div>
         <div className="toolbar" style={{ marginTop: 12, marginBottom: 0 }}>

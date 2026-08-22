@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useId, useMemo, useState } from "react";
 
 import { useDismissable } from "../hooks/useDismissable";
 
@@ -26,6 +26,7 @@ const SCOPE_LABELS: Record<RecategoriseScope, string> = {
 };
 
 export function CategoriseDialog({ txn, categories, busy, onClose, onSubmit }: Props) {
+  const fid = useId();
   const subcategories = useMemo(() => categories.filter((c) => c.parent_id), [categories]);
   const [categoryId, setCategoryId] = useState(txn.category_id ?? "");
   const [scope, setScope] = useState<RecategoriseScope>("none");
@@ -51,8 +52,12 @@ export function CategoriseDialog({ txn, categories, busy, onClose, onSubmit }: P
         </p>
 
         <div className="field">
-          <label>Category</label>
-          <select value={categoryId} onChange={(e) => setCategoryId(e.target.value)}>
+          <label htmlFor={`${fid}-category`}>Category</label>
+          <select
+            id={`${fid}-category`}
+            value={categoryId}
+            onChange={(e) => setCategoryId(e.target.value)}
+          >
             <option value="">Uncategorised</option>
             {subcategories.map((c) => (
               <option key={c.id} value={c.id}>
@@ -63,8 +68,12 @@ export function CategoriseDialog({ txn, categories, busy, onClose, onSubmit }: P
         </div>
 
         <div className="field">
-          <label>Apply to</label>
-          <select value={scope} onChange={(e) => setScope(e.target.value as RecategoriseScope)}>
+          <label htmlFor={`${fid}-apply-to`}>Apply to</label>
+          <select
+            id={`${fid}-apply-to`}
+            value={scope}
+            onChange={(e) => setScope(e.target.value as RecategoriseScope)}
+          >
             {(Object.keys(SCOPE_LABELS) as RecategoriseScope[]).map((s) => (
               <option key={s} value={s}>
                 {SCOPE_LABELS[s]}
@@ -75,8 +84,12 @@ export function CategoriseDialog({ txn, categories, busy, onClose, onSubmit }: P
 
         {scope === "contains" && (
           <div className="field">
-            <label>Containing text</label>
-            <input value={pattern} onChange={(e) => setPattern(e.target.value)} />
+            <label htmlFor={`${fid}-containing-text`}>Containing text</label>
+            <input
+              id={`${fid}-containing-text`}
+              value={pattern}
+              onChange={(e) => setPattern(e.target.value)}
+            />
           </div>
         )}
 

@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { type FormEvent, useState } from "react";
+import { type FormEvent, useId, useState } from "react";
 import { Line, LineChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
 
 import { TABLE_MIN, TableWrap } from "../table/TableWrap";
@@ -159,6 +159,7 @@ function ItemTable({
 }
 
 export function NetWorth() {
+  const fid = useId();
   const { period } = usePeriod();
   const qc = useQueryClient();
   const nw = useQuery({
@@ -276,8 +277,8 @@ export function NetWorth() {
         <form onSubmit={onSubmit}>
           <div className="row">
             <div className="field">
-              <label>Name</label>
-              <input
+              <label htmlFor={`${fid}-name`}>Name</label>
+              <input id={`${fid}-name`}
                 value={name}
                 onChange={(e) => setName(e.target.value)}
                 placeholder="e.g. Family home"
@@ -285,15 +286,15 @@ export function NetWorth() {
               />
             </div>
             <div className="field">
-              <label>Type</label>
-              <select value={kind} onChange={(e) => setKind(e.target.value)}>
+              <label htmlFor={`${fid}-type`}>Type</label>
+              <select id={`${fid}-type`} value={kind} onChange={(e) => setKind(e.target.value)}>
                 <option value="asset">Asset</option>
                 <option value="liability">Liability</option>
               </select>
             </div>
             <div className="field">
-              <label>Value ($)</label>
-              <input
+              <label htmlFor={`${fid}-value`}>Value ($)</label>
+              <input id={`${fid}-value`}
                 value={amount}
                 onChange={(e) => setAmount(e.target.value)}
                 placeholder="e.g. 850000"
