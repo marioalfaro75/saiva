@@ -950,3 +950,57 @@ th.actions {
     min-height: 40px;
   }
 }
+
+/* ---- Wide tables as a stack of cards (import review) ---- */
+.stack-cards {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 8px;
+}
+.stack-card {
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface-2);
+  padding: 10px 12px;
+  display: grid;
+  gap: 6px;
+}
+.stack-card-head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
+.stack-card-head .grow {
+  flex: 1;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.stack-card-head .num {
+  flex: none;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.stack-card-head input[type="checkbox"] {
+  width: 18px;
+  height: 18px;
+  flex: none;
+}
+.stack-card-meta {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  font-size: 12px;
+}
+.stack-card select,
+.stack-card input[type="text"],
+.stack-card .row input {
+  width: 100%;
+}
+/* A preview describing a configuration that has since changed. Dimmed rather than
+   removed: the rows are still worth reading, they just are not the answer any more. */
+.card.stale > *:not(.notice) {
+  opacity: 0.5;
+}
