@@ -6,12 +6,11 @@ All notable changes to Saiva are documented here. The project follows
 ## [Unreleased]
 
 
-## [0.11.0] — 2026-08-22
+## [0.12.0] — 2026-08-22
 
-Navigation moves out of a crowded top bar into a side menu, the phone becomes a
-place you can actually work rather than a scaled-down desktop, and the AI advisor
-answers from your data instead of declining. Also fixes a bug that could import or
-skip the wrong rows from a statement.
+Navigation moves out of a crowded top bar into a side menu, and the phone becomes a
+place you can actually work rather than a scaled-down desktop. Also fixes a bug in
+the import wizard that could import or skip the wrong rows from a statement.
 
 ### Added
 - **A side menu replaces the top bar.** Thirteen links across the top had run out of
@@ -32,29 +31,8 @@ skip the wrong rows from a statement.
   Benchmarks, Net worth, Insights, and Bills.
 - **Empty states that lead somewhere.** Instead of naming a page — "load demo data
   from Settings" — they link to it.
-- **The AI advisor can now look things up.** It has read-only access to search your
-  transactions, total spending by category or merchant, list uncategorised items and
-  compare two periods — so questions like "are there any transactions mentioning
-  Helen" or "who do I spend the most with" are answered from your data rather than
-  declined. Which lookups it may use follows your **privacy mode**: the ones that
-  reveal individual transactions are simply not offered in *Aggregates only*.
-- **A far richer picture for the advisor.** It now sees top merchants, an
-  uncategorised summary, month‑by‑month figures, a comparison with the previous
-  period, budgets needing attention, goals, net worth, and a note of what data you
-  hold overall — instead of a household line and ten category totals.
-- The advisor **follows the period picker**, so asking while viewing a past financial
-  year answers for that year.
 
 ### Fixed
-- **Answers no longer stop mid‑sentence.** The reply limit was too small for the
-  questions this is for, and on Gemini 2.5 models the limit was being spent on the
-  model's own reasoning before it wrote anything. The limit is larger, reasoning has
-  its own budget, and a reply that does hit the limit now says so rather than
-  trailing off.
-- **The advisor explains its own limits.** When a question needs data your privacy
-  mode withholds, it now says which setting is responsible and where to change it,
-  instead of only "the provided data does not include…".
-- Amounts in advisor answers read `-$1,200.00` rather than `$-1,200.00`.
 - **The import wizard can no longer act on a preview that no longer applies.** Ten
   controls feed the preview and none of them cleared it, so changing the account or a
   mapped column left the old preview on screen — and importing then sent row numbers
@@ -80,6 +58,37 @@ skip the wrong rows from a statement.
   box — most annoying on a phone — and a screen reader read the field with no name.
   On the sign-in form that meant email and password were both announced as an unnamed
   text field.
+
+
+## [0.11.0] — 2026-08-20
+
+The AI advisor answers from your own data instead of declining, and stops cutting
+its answers off mid-sentence.
+
+### Added
+- **The AI advisor can now look things up.** It has read-only access to search your
+  transactions, total spending by category or merchant, list uncategorised items and
+  compare two periods — so questions like "are there any transactions mentioning
+  Helen" or "who do I spend the most with" are answered from your data rather than
+  declined. Which lookups it may use follows your **privacy mode**: the ones that
+  reveal individual transactions are simply not offered in *Aggregates only*.
+- **A far richer picture for the advisor.** It now sees top merchants, an
+  uncategorised summary, month‑by‑month figures, a comparison with the previous
+  period, budgets needing attention, goals, net worth, and a note of what data you
+  hold overall — instead of a household line and ten category totals.
+- The advisor **follows the period picker**, so asking while viewing a past financial
+  year answers for that year.
+
+### Fixed
+- **Answers no longer stop mid‑sentence.** The reply limit was too small for the
+  questions this is for, and on Gemini 2.5 models the limit was being spent on the
+  model's own reasoning before it wrote anything. The limit is larger, reasoning has
+  its own budget, and a reply that does hit the limit now says so rather than
+  trailing off.
+- **The advisor explains its own limits.** When a question needs data your privacy
+  mode withholds, it now says which setting is responsible and where to change it,
+  instead of only "the provided data does not include…".
+- Amounts in advisor answers read `-$1,200.00` rather than `$-1,200.00`.
 
 
 ## [0.10.1] — 2026-08-20
@@ -263,6 +272,7 @@ personal financial advice.
 - On the first GHCR publish, set the `saiva-api` / `saiva-web` packages to public
   (or `docker login ghcr.io` on the host) so image pulls are authorised.
 
+[0.12.0]: https://github.com/marioalfaro75/saiva/compare/v0.11.0...v0.12.0
 [0.11.0]: https://github.com/marioalfaro75/saiva/compare/v0.10.1...v0.11.0
 [0.10.1]: https://github.com/marioalfaro75/saiva/compare/v0.10.0...v0.10.1
 [0.10.0]: https://github.com/marioalfaro75/saiva/compare/v0.9.0...v0.10.0
