@@ -94,23 +94,55 @@ def read_rows(content: bytes) -> list[list[str]]:
     return [row for row in reader if any((c or "").strip() for c in row)]
 
 
-def _find(headers: list[str], keys: list[str]) -> int | None:
+def _find(headers: list[str], keys: list[str], exclude: set[int] | None = None) -> int | None:
     for i, h in enumerate(headers):
+        if exclude and i in exclude:
+            continue
         if any(k in h for k in keys):
             return i
     return None
 
 
-def _suggest_mapping(headers: list[str], has_header: bool) -> CsvMapping:
+DATE_KEYS = ["date"]
+DESC_KEYS = ["description", "narrative", "details", "reference", "transaction", "payee"]
+AMOUNT_KEYS = ["amount", "value"]
+DEBIT_KEYS = ["debit", "withdrawal", "paid out", "money out"]
+CREDIT_KEYS = ["credit", "deposit", "paid in", "money in"]
+BALANCE_KEYS = ["balance"]
+
+
+def _by_header(headers: list[str]) -> dict[str, int | None]:
+    """Every column the headers actually name. Nothing here is a default: a caller
+    that needs one applies it, and a caller deciding what is already spoken for can
+    tell a match from a guess."""
     lower = [h.lower() for h in headers]
-    date_col = _find(lower, ["date"])
-    desc_col = _find(
-        lower, ["description", "narrative", "details", "reference", "transaction", "payee"]
-    )
-    amount_col = _find(lower, ["amount", "value"])
-    debit_col = _find(lower, ["debit", "withdrawal", "paid out", "money out"])
-    credit_col = _find(lower, ["credit", "deposit", "paid in", "money in"])
-    balance_col = _find(lower, ["balance"])
+    debit = _find(lower, DEBIT_KEYS)
+    credit = _find(lower, CREDIT_KEYS)
+    return {
+        "date": _find(lower, DATE_KEYS),
+        "description": _find(lower, DESC_KEYS),
+        "debit": debit,
+        "credit": credit,
+        "balance": _find(lower, BALANCE_KEYS),
+        # Looked for after debit and credit, and never one of them: "Debit Amount"
+        # contains "amount", so a plain search picks it as the single signed column.
+        # That is unused while the file reads as debit/credit, but it is what the
+        # Amount field pre-selects if the mode is switched — turning every credit into
+        # a debit without a word.
+        "amount": _find(
+            lower, AMOUNT_KEYS, exclude={c for c in (debit, credit) if c is not None}
+        ),
+    }
+
+
+def _suggest_mapping(headers: list[str], has_header: bool) -> CsvMapping:
+    found = _by_header(headers)
+    date_col = found["date"]
+    desc_col = found["description"]
+    debit_col = found["debit"]
+    credit_col = found["credit"]
+    balance_col = found["balance"]
+    amount_col = found["amount"]
 
     mode: Literal["single", "debit_credit"] = (
         "debit_credit" if (debit_col is not None or credit_col is not None) else "single"
@@ -128,27 +160,78 @@ def _suggest_mapping(headers: list[str], has_header: bool) -> CsvMapping:
     )
 
 
-ACCOUNT_HEADER_KEYS = ["account", "acct", "bsb", "card", "product", "source"]
+ACCOUNT_HEADER_KEYS = [
+    "account", "acct", "bsb", "card", "product", "source", "wallet", "a/c", "acc no",
+]
+
+# What an account identifier looks like when the header does not say so: a BSB and
+# number, a masked card, a plain account number, or one Excel has turned into a float.
+ACCOUNT_VALUE = re.compile(
+    r"""^(?:
+        \d{3}-?\d{3}[\s-]?\d{4,10}      # BSB + account, spaced or hyphenated
+      | [*xX]{2,}[\s-]?\d{3,4}          # masked card: ****4417, xxxx4417
+      | \d{6,16}                        # plain account number
+      | \d(?:\.\d+)?[eE][+-]?\d+        # Excel-mangled account number
+    )$""",
+    re.X,
+)
+
+# How many different accounts one file can name and still be worth mapping by hand.
+MAX_ACCOUNT_VALUES = 50
 
 
-def _suggest_account_col(headers: list[str], body: list[list[str]]) -> int | None:
-    """Spot a column that names the account each row belongs to.
+def _column_values(col: int, body: list[list[str]]) -> list[str]:
+    return [r[col].strip() for r in body if col < len(r) and r[col].strip()]
 
-    Needs an account-ish header, and values that repeat: a column holding a distinct
-    value for every row is a reference or receipt number, not an account. Also caps
-    the count, since anything beyond a handful is not something to map by hand.
-    Returns a hint only; multi-account import stays off until the user opts in, so a
-    wrong guess costs nothing.
+
+def _repeats_like_an_account(values: list[str], rows: int, *, limit: int) -> bool:
+    """A column of accounts holds few values, each used many times. One distinct value
+    per row is a reference or receipt number, not an account."""
+    distinct = set(values)
+    if not distinct or len(distinct) > limit:
+        return False
+    return not (len(distinct) == rows and rows > 2)
+
+
+def _claimed(headers: list[str]) -> set[int]:
+    """Columns a header actually names, so the shape fallback does not take one.
+
+    Positional defaults are deliberately excluded. A headerless file has no evidence
+    for anything, so the mapping guesses column 1 is the description — and a guess
+    must not block detection of the very column it guessed over.
     """
+    return {c for c in _by_header(headers).values() if c is not None}
+
+
+def _suggest_account_col(
+    headers: list[str], body: list[list[str]], claimed: set[int] | None = None
+) -> int | None:
+    """Spot the column naming the account each row belongs to.
+
+    Tried by header first, then by the shape of the values, so a column called
+    "Wallet" or a file with no header row is still recognised. The value test is the
+    stricter of the two: with no name to corroborate it, it wants a repeating column
+    of things that look like account identifiers, and it ignores columns the mapping
+    has already claimed — a column of whole-dollar amounts is indistinguishable from
+    a column of account numbers on shape alone.
+    """
+    if not body:
+        return None
     col = _find([h.lower() for h in headers], ACCOUNT_HEADER_KEYS)
-    if col is None or not body:
-        return None
-    values = {r[col].strip() for r in body if col < len(r) and r[col].strip()}
-    if not values or len(values) > 20:
-        return None
-    if len(values) == len(body) and len(body) > 2:
-        return None
-    return col
+    if col is not None and _repeats_like_an_account(
+        _column_values(col, body), len(body), limit=MAX_ACCOUNT_VALUES
+    ):
+        return col
+
+    for i in range(len(headers)):
+        if claimed and i in claimed:
+            continue
+        values = _column_values(i, body)
+        if not values or not _repeats_like_an_account(values, len(body), limit=20):
+            continue
+        if sum(1 for v in values if ACCOUNT_VALUE.match(v)) >= len(values) * 0.9:
+            return i
+    return None
 
 
 def sniff_csv(content: bytes) -> ImportSniffOut:
@@ -174,13 +257,14 @@ def sniff_csv(content: bytes) -> ImportSniffOut:
         headers = [f"Column {i + 1}" for i in range(len(rows[0]))]
         body = rows
 
+    mapping = _suggest_mapping(headers, has_header)
     return ImportSniffOut(
         detected_format="csv",
         has_header=has_header,
         columns=headers,
         sample_rows=body[:5],
-        suggested_mapping=_suggest_mapping(headers, has_header),
-        suggested_account_col=_suggest_account_col(headers, body),
+        suggested_mapping=mapping,
+        suggested_account_col=_suggest_account_col(headers, body, _claimed(headers)),
     )
 
 
