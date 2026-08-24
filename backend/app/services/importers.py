@@ -266,6 +266,7 @@ def sniff_csv(content: bytes) -> ImportSniffOut:
             sample_rows=[],
             suggested_mapping=None,
             delimiter=delimiter,
+            fingerprint="",
         )
     text = _decode(content)
     try:
@@ -290,6 +291,7 @@ def sniff_csv(content: bytes) -> ImportSniffOut:
         suggested_mapping=mapping,
         suggested_account_col=_suggest_account_col(headers, body, _claimed(headers)),
         delimiter=delimiter,
+        fingerprint=fingerprint(headers, has_header),
     )
 
 

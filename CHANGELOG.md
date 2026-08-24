@@ -5,6 +5,40 @@ All notable changes to Saiva are documented here. The project follows
 
 ## [Unreleased]
 
+### Added
+- **The import wizard reads a file instead of interrogating you.** It lists every
+  column with the first few values from your own file and asks what each one is —
+  Date, Description, Money in, Money out, Amount, Account, Balance or Ignore. An
+  unfamiliar header stops mattering because you read the data, and nothing is left
+  out silently: anything unmapped shows as *Ignore* rather than blank. If something
+  needed is missing it says which, rather than greying out a button.
+- **A statement that names its own accounts is recognised.** When a column carries
+  account numbers the import maps them straight away, and never asks you to pick a
+  single account first — which is what used to hide multi-account import entirely.
+  Each value shows what it actually is: how many rows, the period it covers, the
+  balance it ends on and a sample line, because "7.34364E+11" identifies nothing but
+  a balance of −$819,480.37 over 74 rows is obviously the mortgage.
+- **The account column is found by the shape of its values**, not only by its header,
+  so a column called something unexpected — or a file with no header row — still
+  works. BSB-and-number, masked cards and plain account numbers are all recognised.
+- **Mappings are remembered per shape of file.** The next export from the same bank
+  opens already mapped, ignored columns included. It still shows you the mapping
+  every time, so a bank quietly adding a column is noticed rather than absorbed.
+- **The separator is shown and can be corrected**, since a tab-separated file whose
+  text contains commas is routinely mis-detected and then reads as a single column.
+
+### Fixed
+- **An OFX file covering more than one account no longer merges them.** Every
+  transaction in the download was filed under whichever single account you picked,
+  silently — a bank statement download routinely covers several. Each statement's
+  transactions now keep the account they came from.
+- **Excel-mangled account numbers are flagged.** Opening a statement in Excel turns a
+  long account number into something like `7.34364E+11`, losing its digits. The import
+  still handles it, says what happened, and declines to remember a value that can
+  never recur.
+- Switching an import to a single signed amount column no longer pre-selects a column
+  called "Debit Amount" — which contains "amount" — and turns every credit into a debit.
+
 
 ## [0.12.0] — 2026-08-22
 

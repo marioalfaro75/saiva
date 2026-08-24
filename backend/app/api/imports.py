@@ -313,7 +313,6 @@ async def sniff(
     db: Session = Depends(get_db),
 ) -> schemas.ImportSniffOut:
     out = importers.sniff_csv(await _read(file))
-    out.fingerprint = importers.fingerprint(out.columns, out.has_header)
     profile = db.execute(
         select(models.ImportProfile).where(
             models.ImportProfile.household_id == user.household_id,
