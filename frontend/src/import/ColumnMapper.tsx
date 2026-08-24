@@ -28,6 +28,7 @@ function samples(rows: string[][], col: number): string {
  * cheaper than finding out afterwards.
  */
 export function ColumnMapper({
+  profileName,
   sniff,
   mapping,
   roles,
@@ -35,6 +36,8 @@ export function ColumnMapper({
   onRole,
   onMapping,
 }: {
+  /** The saved mapping this file opened with, when one matched its shape. */
+  profileName: string | null;
   sniff: SniffResult;
   mapping: CsvMapping;
   roles: Roles;
@@ -53,6 +56,12 @@ export function ColumnMapper({
         <h2 style={{ margin: 0 }}>What is in each column?</h2>
         <span className="muted">{sniff.columns.length} columns</span>
       </div>
+      {profileName && (
+        <p className="muted" style={{ marginTop: 0 }}>
+          Mapped the way you mapped <strong>{profileName}</strong>. Change anything
+          that is wrong and the next file of this shape follows suit.
+        </p>
+      )}
 
       <div className="row">
         <div className="field">
@@ -110,7 +119,9 @@ export function ColumnMapper({
                     ))}
                   </select>
                   {role !== "ignore" && detected[col] === role && (
-                    <span className="muted detected"> detected</span>
+                    <span className="muted detected">
+                      {profileName ? " remembered" : " detected"}
+                    </span>
                   )}
                 </td>
               </tr>

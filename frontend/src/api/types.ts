@@ -382,6 +382,19 @@ export interface SniffResult {
   suggested_mapping: CsvMapping | null;
   suggested_account_col: number | null;
   delimiter: string;
+  /** A stable name for this shape of file, so a saved mapping can be found again. */
+  fingerprint: string;
+  /** The saved mapping for that shape, when there is one. */
+  profile: ImportProfile | null;
+}
+
+export interface ImportProfile {
+  id: string;
+  name: string;
+  mapping: CsvMapping;
+  /** Account-column value -> account id, for values that could not be bound to an
+   *  account permanently (a card's last four, a number Excel has mangled). */
+  account_map: Record<string, string>;
 }
 
 export interface AccountScanRow {

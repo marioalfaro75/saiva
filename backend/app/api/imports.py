@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import datetime as dt
 import json
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
@@ -166,6 +167,55 @@ def _remember_identifier(db: Session, account: models.Account, value: str) -> No
         account.bank_identifier = identifier
 
 
+def _save_profile(
+    db: Session,
+    household_id: str,
+    content: bytes,
+    mapping: schemas.CsvMapping,
+    account_map: dict[str, str],
+    filename: str,
+) -> None:
+    """Remember how this shape of file was read, so the next one opens already mapped.
+
+    Only the values that could not be bound to an account permanently are kept here;
+    the rest live on the account itself, where they survive the profile changing.
+
+    The fingerprint is taken from the file rather than sent by the client, so the
+    profile is keyed on what was actually read.
+    """
+    rows = importers.read_rows(content, mapping.delimiter)
+    if not rows:
+        return
+    key = importers.fingerprint(rows[0], mapping.has_header)
+    profile = db.execute(
+        select(models.ImportProfile).where(
+            models.ImportProfile.household_id == household_id,
+            models.ImportProfile.fingerprint == key,
+        )
+    ).scalar_one_or_none()
+    unbound = {
+        value: account_id
+        for value, account_id in account_map.items()
+        if importers.durable_identifier(value) is None
+    }
+    payload = mapping.model_dump()
+    if profile:
+        profile.mapping = payload
+        profile.account_map = {**(profile.account_map or {}), **unbound}
+        profile.last_used_at = dt.datetime.utcnow()
+        return
+    db.add(
+        models.ImportProfile(
+            household_id=household_id,
+            fingerprint=key,
+            name=filename,
+            mapping=payload,
+            account_map=unbound,
+            last_used_at=dt.datetime.utcnow(),
+        )
+    )
+
+
 def _build_targets(
     db: Session, household_id: str, assignments: list[schemas.AccountAssignment], *, create: bool
 ) -> dict[str, _Target]:
@@ -260,8 +310,24 @@ def _will_import(
 async def sniff(
     file: UploadFile = File(...),
     user: models.User = Depends(get_current_user),
+    db: Session = Depends(get_db),
 ) -> schemas.ImportSniffOut:
-    return importers.sniff_csv(await _read(file))
+    out = importers.sniff_csv(await _read(file))
+    out.fingerprint = importers.fingerprint(out.columns, out.has_header)
+    profile = db.execute(
+        select(models.ImportProfile).where(
+            models.ImportProfile.household_id == user.household_id,
+            models.ImportProfile.fingerprint == out.fingerprint,
+        )
+    ).scalar_one_or_none()
+    if profile:
+        out.profile = schemas.ImportProfileOut(
+            id=profile.id,
+            name=profile.name,
+            mapping=profile.mapping,
+            account_map=profile.account_map or {},
+        )
+    return out
 
 
 @router.post("/accounts/scan", response_model=list[schemas.AccountScanRow])
@@ -448,6 +514,15 @@ async def commit(
     )
     db.add(batch)
     db.flush()
+    if parsed_mapping is not None:
+        _save_profile(
+            db,
+            user.household_id,
+            content,
+            parsed_mapping,
+            {v: t.account_id for v, t in targets.items() if t.account_id},
+            file.filename or "upload",
+        )
 
     added = 0
     skipped = 0

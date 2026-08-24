@@ -124,6 +124,33 @@ class CategorisationRule(Base, TimestampMixin):
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
 
 
+class ImportProfile(Base, TimestampMixin):
+    """How a particular shape of file is read.
+
+    Keyed on a fingerprint of the header row, so next month's export from the same
+    bank opens already mapped. It carries the ignored columns as well as the used
+    ones: a column deliberately left out is a decision worth keeping, and a column
+    that appears later is one the fingerprint will not match, which is the point —
+    a bank quietly adding a column should be noticed rather than absorbed.
+    """
+
+    __tablename__ = "import_profiles"
+    __table_args__ = (UniqueConstraint("household_id", "fingerprint", name="uq_profile_shape"),)
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_uuid)
+    household_id: Mapped[str] = mapped_column(ForeignKey("households.id"), index=True)
+    # Hash of the normalised header row (or, for a headerless file, its shape).
+    fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
+    name: Mapped[str] = mapped_column(String(120), nullable=False)
+    # Column roles, delimiter, header flag and date format — everything the mapping
+    # step shows, so it can be restored exactly as it was left.
+    mapping: Mapped[dict] = mapped_column(JSON, nullable=False)
+    # Account-column value -> account id, for the values that could not be bound to an
+    # account permanently (a card's last four, a number Excel has mangled).
+    account_map: Mapped[dict] = mapped_column(JSON, default=dict)
+    last_used_at: Mapped[dt.datetime | None] = mapped_column(DateTime, nullable=True)
+
+
 class ImportBatch(Base, TimestampMixin):
     __tablename__ = "import_batches"
 

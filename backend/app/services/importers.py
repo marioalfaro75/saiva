@@ -389,6 +389,26 @@ def account_values(parsed: list[ParsedTxn]) -> list[AccountValue]:
     return out
 
 
+def fingerprint(columns: list[str], has_header: bool) -> str:
+    """A stable name for this shape of file.
+
+    Built from the header row, case- and space-insensitively so cosmetic changes do
+    not orphan a saved mapping. A file with no header has no names to go on, so its
+    shape is just the column count — weaker, and deliberately so: it will collide with
+    any other headerless file of the same width, which is why the mapping step is
+    always shown rather than silently applied.
+
+    A bank adding or renaming a column changes the fingerprint, and that is the point.
+    The profile stops matching, the step shows the new column, and you decide.
+    """
+    if has_header:
+        parts = [re.sub(r"\s+", " ", c).strip().lower() for c in columns]
+        payload = "h|" + "|".join(parts)
+    else:
+        payload = f"n|{len(columns)}"
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:32]
+
+
 def durable_identifier(value: str) -> str | None:
     """The value if it can be trusted to name the same account in a later file.
 

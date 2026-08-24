@@ -7,6 +7,7 @@ import type {
   AccountScanRow,
   CsvMapping,
   ImportPreview,
+  ImportProfile,
   PreviewRow,
   SniffResult,
 } from "../api/types";
@@ -84,6 +85,8 @@ export function ImportPage() {
   const [roles, setRoles] = useState<Roles>({});
   // What detection said, kept so a role can be shown as a guess rather than a choice.
   const [detected, setDetected] = useState<Roles>({});
+  // A saved mapping for this shape of file, when there is one.
+  const [profile, setProfile] = useState<ImportProfile | null>(null);
   const [preview, setPreview] = useState<ImportPreview | null>(null);
   // The configuration the preview on screen was computed from — compared against
   // the current one below to tell whether it still answers the question being asked.
@@ -103,6 +106,7 @@ export function ImportPage() {
   const reset = () => {
     setSniff(null);
     setMapping(null);
+    setProfile(null);
     setPreview(null);
     setPreviewKey(null);
     setDecisions({});
@@ -135,12 +139,18 @@ export function ImportPage() {
       const s = await api.sniff(f);
       setSniff(s);
       if (!s.suggested_mapping) return;
-      const seeded = { ...s.suggested_mapping, account_col: s.suggested_account_col };
+      // A saved profile for this shape of file wins over detection — it is what you
+      // decided last time. It pre-fills the step rather than skipping it, so a column
+      // the bank has since added is seen rather than absorbed.
+      const seeded = s.profile
+        ? s.profile.mapping
+        : { ...s.suggested_mapping, account_col: s.suggested_account_col };
       setMapping(seeded);
+      setProfile(s.profile);
       const initial = rolesFromMapping(seeded, s.columns.length);
       setRoles(initial);
       setDetected(initial);
-      if (s.suggested_account_col !== null) {
+      if (initial && Object.values(initial).includes("account")) {
         await runScan(f, "csv", mappingFromRoles(initial, seeded));
       }
     } catch (e) {
@@ -476,6 +486,7 @@ export function ImportPage() {
         {sniff && mapping && (
           <>
             <ColumnMapper
+              profileName={profile?.name ?? null}
               sniff={sniff}
               mapping={mapping}
               roles={roles}

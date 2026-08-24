@@ -219,6 +219,18 @@ class ImportSniffOut(BaseModel):
     suggested_account_col: int | None = None
     # The separator the file was read with, shown so a wrong guess can be corrected.
     delimiter: str = ","
+    # A stable name for this shape of file, so a saved mapping can be found again.
+    fingerprint: str = ""
+    # The saved mapping for that shape, when there is one. It pre-fills the mapping
+    # step; it never replaces it, so a column the bank has added cannot slip past.
+    profile: ImportProfileOut | None = None
+
+
+class ImportProfileOut(BaseModel):
+    id: str
+    name: str
+    mapping: dict
+    account_map: dict = {}
 
 
 class AccountScanRow(BaseModel):
