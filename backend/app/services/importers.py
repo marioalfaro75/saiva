@@ -81,16 +81,37 @@ def _decode(content: bytes) -> str:
     return content.decode("utf-8-sig", errors="replace")
 
 
-def _dialect(sample: str) -> type[csv.Dialect] | csv.Dialect:
+DELIMITERS = ",;\t|"
+
+
+def detect_delimiter(content: bytes) -> str:
+    """The character separating the columns.
+
+    Python's sniffer guesses from a sample and gets it wrong often enough to matter —
+    a tab-separated export whose narratives contain commas can come back as
+    comma-separated, and then the whole file reads as a single column. The guess is
+    surfaced in the mapping step so it can be corrected, which is why this returns the
+    character rather than a dialect.
+    """
+    text = _decode(content)[:4096]
     try:
-        return csv.Sniffer().sniff(sample, delimiters=",;\t|")
+        return csv.Sniffer().sniff(text, delimiters=DELIMITERS).delimiter
     except csv.Error:
-        return csv.excel
+        # Fall back to whichever candidate divides the first lines most consistently.
+        lines = [ln for ln in text.splitlines()[:10] if ln.strip()]
+        if not lines:
+            return ","
+        best, best_score = ",", 0
+        for d in DELIMITERS:
+            counts = [ln.count(d) for ln in lines]
+            if counts[0] and len(set(counts)) == 1 and counts[0] > best_score:
+                best, best_score = d, counts[0]
+        return best
 
 
-def read_rows(content: bytes) -> list[list[str]]:
+def read_rows(content: bytes, delimiter: str | None = None) -> list[list[str]]:
     text = _decode(content)
-    reader = csv.reader(io.StringIO(text), _dialect(text[:4096]))
+    reader = csv.reader(io.StringIO(text), delimiter=delimiter or detect_delimiter(content))
     return [row for row in reader if any((c or "").strip() for c in row)]
 
 
@@ -235,7 +256,8 @@ def _suggest_account_col(
 
 
 def sniff_csv(content: bytes) -> ImportSniffOut:
-    rows = read_rows(content)
+    delimiter = detect_delimiter(content)
+    rows = read_rows(content, delimiter)
     if not rows:
         return ImportSniffOut(
             detected_format="csv",
@@ -243,6 +265,7 @@ def sniff_csv(content: bytes) -> ImportSniffOut:
             columns=[],
             sample_rows=[],
             suggested_mapping=None,
+            delimiter=delimiter,
         )
     text = _decode(content)
     try:
@@ -258,6 +281,7 @@ def sniff_csv(content: bytes) -> ImportSniffOut:
         body = rows
 
     mapping = _suggest_mapping(headers, has_header)
+    mapping.delimiter = delimiter
     return ImportSniffOut(
         detected_format="csv",
         has_header=has_header,
@@ -265,11 +289,12 @@ def sniff_csv(content: bytes) -> ImportSniffOut:
         sample_rows=body[:5],
         suggested_mapping=mapping,
         suggested_account_col=_suggest_account_col(headers, body, _claimed(headers)),
+        delimiter=delimiter,
     )
 
 
 def parse_csv(content: bytes, mapping: CsvMapping) -> list[ParsedTxn]:
-    rows = read_rows(content)
+    rows = read_rows(content, mapping.delimiter)
     start = mapping.skip_rows + (1 if mapping.has_header else 0)
     out: list[ParsedTxn] = []
     for row in rows[start:]:

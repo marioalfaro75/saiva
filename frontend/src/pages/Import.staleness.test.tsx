@@ -17,7 +17,10 @@ import { ImportPage } from "./Import";
 const SNIFF = {
   "/imports/sniff": {
     columns: ["Date", "Details", "Amount", "Acct"],
-    sample_rows: [],
+    sample_rows: [
+      ["01/08/2024", "COLES 0001", "-42.50", "1234"],
+      ["02/08/2024", "COLES 0002", "-11.00", "1234"],
+    ],
     delimiter: ",",
     has_header: true,
     suggested_account_col: null,
@@ -31,7 +34,16 @@ const SNIFF = {
       account_col: null,
       date_format: null,
       skip_rows: 0,
+      delimiter: ",",
     },
+  },
+};
+
+/** The same file, but its fourth column is recognised as naming the account. */
+const SNIFF_MULTI = {
+  "/imports/sniff": {
+    ...SNIFF["/imports/sniff"],
+    suggested_account_col: 3,
   },
 };
 
@@ -73,7 +85,16 @@ async function startImport() {
   await screen.findByRole("option", { name: "Everyday" });
   fireEvent.change(screen.getByLabelText("Account"), { target: { value: "a1" } });
   fireEvent.change(screen.getByLabelText(/^File/), { target: { files: [csv()] } });
-  await screen.findByText("Column mapping");
+  await screen.findByText("What is in each column?");
+  return view;
+}
+
+/** Picks a file whose account column is recognised, so no account is chosen first. */
+async function startMultiAccountImport() {
+  const view = renderApp(<ImportPage />);
+  await screen.findByRole("option", { name: "Everyday" });
+  fireEvent.change(screen.getByLabelText(/^File/), { target: { files: [csv()] } });
+  await screen.findByText("What is in each column?");
   return view;
 }
 
@@ -130,19 +151,19 @@ describe("Import: a preview stops being an answer when the question changes", ()
 
   it("notices when a mapped column changes", async () => {
     await preview();
-    fireEvent.change(screen.getByLabelText("Description column"), { target: { value: "3" } });
+    fireEvent.change(screen.getByLabelText("Role for Acct"), { target: { value: "balance" } });
     await expectStale();
   });
 
   it("notices when the amount format changes", async () => {
     await preview();
-    fireEvent.change(screen.getByLabelText("Amount format"), { target: { value: "debit_credit" } });
+    fireEvent.change(screen.getByLabelText("Role for Amount"), { target: { value: "money_out" } });
     await expectStale();
   });
 
   it("goes fresh again on a second preview", async () => {
     await preview();
-    fireEvent.change(screen.getByLabelText("Description column"), { target: { value: "3" } });
+    fireEvent.change(screen.getByLabelText("Role for Acct"), { target: { value: "balance" } });
     await expectStale();
     fireEvent.click(previewButton());
     await waitFor(() => expect(importButton()).toBeEnabled());
@@ -154,6 +175,7 @@ describe("Import: multi-account assignments", () => {
   beforeEach(() =>
     stubApi({
       ...STUBS,
+      ...SNIFF_MULTI,
       "/imports/accounts/scan": [
         { value: "1234", row_count: 12, sample_description: "COLES", suggested_account_id: null },
       ],
@@ -161,8 +183,8 @@ describe("Import: multi-account assignments", () => {
   );
 
   const toAssignment = async () => {
-    await startImport();
-    fireEvent.click(screen.getByLabelText(/more than one account/));
+    await startMultiAccountImport();
+    // No opt-in: the file names its accounts, so the step appears by itself.
     return screen.findByText("Which account is which?");
   };
 

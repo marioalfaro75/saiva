@@ -370,6 +370,8 @@ export interface CsvMapping {
   skip_rows: number;
   /** Column naming the account each row belongs to; null for a single-account file. */
   account_col: number | null;
+  /** Column separator. Sniffed, but overridable when the guess is wrong. */
+  delimiter: string | null;
 }
 
 export interface SniffResult {
@@ -379,6 +381,7 @@ export interface SniffResult {
   sample_rows: string[][];
   suggested_mapping: CsvMapping | null;
   suggested_account_col: number | null;
+  delimiter: string;
 }
 
 export interface AccountScanRow {
@@ -386,6 +389,12 @@ export interface AccountScanRow {
   row_count: number;
   sample_description: string | null;
   suggested_account_id: string | null;
+  first_date: string | null;
+  last_date: string | null;
+  latest_balance_cents: number | null;
+  /** Excel turned a long account number into scientific notation. It still maps for
+   *  this file; it just cannot be stored as the account's lasting identifier. */
+  looks_mangled: boolean;
 }
 
 export interface AccountAssignment {

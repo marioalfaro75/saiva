@@ -198,6 +198,9 @@ class CsvMapping(BaseModel):
     balance_col: int | None = None
     date_format: str | None = None  # e.g. "%d/%m/%Y"; auto-detected if omitted
     decimal: str = "."
+    # Column separator. Sniffed, but overridable: a tab-separated file whose text
+    # contains commas is routinely mis-sniffed, and then it reads as one column.
+    delimiter: str | None = None
     invert_amount: bool = False  # set if outflows are positive in the file
     skip_rows: int = 0
     # Set when the file covers several accounts: the column naming the account each
@@ -214,6 +217,8 @@ class ImportSniffOut(BaseModel):
     # A column that looks like it identifies an account, offered as a hint. Multi-account
     # import stays off until the user opts in, so this is never applied automatically.
     suggested_account_col: int | None = None
+    # The separator the file was read with, shown so a wrong guess can be corrected.
+    delimiter: str = ","
 
 
 class AccountScanRow(BaseModel):

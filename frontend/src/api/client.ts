@@ -297,10 +297,12 @@ export const api = {
     form.append("file", file);
     return request<SniffResult>("/imports/sniff", { method: "POST", body: form });
   },
-  scanAccounts: (file: File, mapping: unknown) => {
+  scanAccounts: (file: File, mapping: unknown, fileFormat = "csv") => {
     const form = new FormData();
     form.append("file", file);
-    form.append("mapping", JSON.stringify(mapping));
+    form.append("file_format", fileFormat);
+    // OFX names its accounts per statement, so it has no column mapping to send.
+    if (mapping) form.append("mapping", JSON.stringify(mapping));
     return request<AccountScanRow[]>("/imports/accounts/scan", { method: "POST", body: form });
   },
   preview: (

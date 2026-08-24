@@ -1044,3 +1044,52 @@ th.actions {
   gap: 16px;
   margin-top: 16px;
 }
+
+/* ---- Import: what each column is ---- */
+.mapper-table {
+  width: 100%;
+  margin-top: 10px;
+}
+.mapper-table td,
+.mapper-table th {
+  vertical-align: middle;
+}
+.mapper-table .sample {
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+.mapper-table tr.ignored td:not(:last-child) {
+  opacity: 0.5;
+}
+.mapper-table select {
+  min-width: 150px;
+}
+.detected {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.notice.warn {
+  background: rgba(245, 158, 11, 0.12);
+  border-color: var(--warning);
+  color: var(--warning);
+}
+
+/* ---- Import: telling one account value from another ---- */
+.acct-identity {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  flex-wrap: wrap;
+  font-size: 12px;
+  margin-top: 2px;
+}
+.acct-sample,
+.acct-warn {
+  flex-basis: 100%;
+}
+.acct-warn {
+  color: var(--warning);
+  margin-top: 4px;
+  max-width: 52ch;
+}
