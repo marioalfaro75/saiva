@@ -217,12 +217,20 @@ class ImportSniffOut(BaseModel):
 
 
 class AccountScanRow(BaseModel):
-    """One distinct value of the account column, with what it looks like it means."""
+    """One distinct value of the account column, with enough about it to recognise
+    which account it is. The value itself is often a bare number that means nothing
+    to a person, so the period it covers and the balance it ends on do the work."""
 
     value: str
     row_count: int
     sample_description: str | None
     suggested_account_id: str | None
+    first_date: dt.date | None = None
+    last_date: dt.date | None = None
+    latest_balance_cents: int | None = None
+    # Excel turned a long account number into scientific notation. It still maps for
+    # this file; it just cannot be stored as the account's lasting identifier.
+    looks_mangled: bool = False
 
 
 class AccountCreateFromImport(BaseModel):

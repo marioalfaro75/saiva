@@ -29,6 +29,9 @@ class ParsedTxn:
     provider_txn_id: str | None = None
     # Raw value of the account column when the file covers several accounts.
     account_value: str | None = None
+    # Running balance where the file reports one. Not stored on the transaction; used
+    # to tell one account value from another during import.
+    balance_cents: int | None = None
 
 
 def parse_date(value: str, fmt: str | None = None) -> dt.date:
@@ -207,6 +210,11 @@ def parse_csv(content: bytes, mapping: CsvMapping) -> list[ParsedTxn]:
         account_value = None
         if mapping.account_col is not None and mapping.account_col < len(row):
             account_value = row[mapping.account_col].strip()
+        balance = (
+            _cell_cents(row, mapping.balance_col, mapping.decimal)
+            if mapping.balance_col is not None
+            else None
+        )
         out.append(
             ParsedTxn(
                 date,
@@ -214,53 +222,152 @@ def parse_csv(content: bytes, mapping: CsvMapping) -> list[ParsedTxn]:
                 description,
                 normalise_merchant(description),
                 account_value=account_value,
+                balance_cents=balance,
             )
         )
     return out
 
 
-def scan_account_values(content: bytes, mapping: CsvMapping) -> list[tuple[str, int, str | None]]:
-    """Distinct values of the account column, most common first, each with its row
-    count and a sample description to help the user recognise what it refers to."""
-    counts: dict[str, int] = {}
-    samples: dict[str, str] = {}
-    for p in parse_csv(content, mapping):
+# Excel turns a long account number with no leading zero into a float, so
+# 734364123456 comes back as "7.34364E+11" with only six significant figures. The
+# value still identifies the account consistently within one file, but the original
+# number is gone, so it must never be stored as an account's lasting identifier.
+MANGLED_NUMBER = re.compile(r"^\d(?:\.\d+)?[eE][+-]?\d+$")
+
+
+@dataclass
+class AccountValue:
+    """One distinct value of the account column, with enough about it to recognise
+    which of your accounts it is. A bare number like "7.34364E+11" is unidentifiable
+    on its own; a balance of -819,480.37 over 74 rows is obviously the mortgage."""
+
+    value: str
+    row_count: int
+    sample_description: str | None
+    first_date: dt.date | None
+    last_date: dt.date | None
+    latest_balance_cents: int | None
+    looks_mangled: bool
+
+
+def account_values(parsed: list[ParsedTxn]) -> list[AccountValue]:
+    """Summarise each distinct account value, most rows first."""
+    groups: dict[str, list[ParsedTxn]] = {}
+    for p in parsed:
         value = (p.account_value or "").strip()
-        if not value:
-            continue
-        counts[value] = counts.get(value, 0) + 1
-        samples.setdefault(value, p.raw_description)
-    ordered = sorted(counts, key=lambda v: (-counts[v], v))
-    return [(v, counts[v], samples.get(v)) for v in ordered]
+        if value:
+            groups.setdefault(value, []).append(p)
+
+    out: list[AccountValue] = []
+    for value, txns in groups.items():
+        dated = sorted(txns, key=lambda t: t.txn_date)
+        with_balance = [t for t in dated if t.balance_cents is not None]
+        out.append(
+            AccountValue(
+                value=value,
+                row_count=len(txns),
+                sample_description=next(
+                    (t.raw_description for t in txns if t.raw_description), None
+                ),
+                first_date=dated[0].txn_date if dated else None,
+                last_date=dated[-1].txn_date if dated else None,
+                # The balance on the most recent row, which is the one worth showing.
+                latest_balance_cents=with_balance[-1].balance_cents if with_balance else None,
+                looks_mangled=bool(MANGLED_NUMBER.match(value)),
+            )
+        )
+    out.sort(key=lambda a: (-a.row_count, a.value))
+    return out
+
+
+def durable_identifier(value: str) -> str | None:
+    """The value if it can be trusted to name the same account in a later file.
+
+    Two kinds cannot. A number Excel has rendered in scientific notation has lost its
+    digits, so a clean export later would not match it. A short fragment — a card's
+    last four, say — is not unique enough to bind an account to, and a different card
+    ending in the same digits would silently inherit it. Both still map fine for the
+    file in hand; they just are not remembered.
+    """
+    v = (value or "").strip()
+    if not v or MANGLED_NUMBER.match(v):
+        return None
+    return v if len(re.sub(r"\D", "", v)) >= 6 else None
+
+
+def scan_account_values(
+    content: bytes, file_format: str, mapping: CsvMapping | None
+) -> list[AccountValue]:
+    """Account values in a file, whatever the format. OFX carries them per statement;
+    CSV carries them in a column the mapping names."""
+    return account_values(parse_file(content, file_format, mapping))
+
+
+_STATEMENT = re.compile(r"<(STMTRS|CCSTMTRS)>(.*?)</\1>", re.S | re.I)
+_ACCTFROM = re.compile(r"<(?:BANK|CC)ACCTFROM>(.*?)</(?:BANK|CC)ACCTFROM>", re.S | re.I)
+_TXN = re.compile(r"<STMTTRN>(.*?)</STMTTRN>", re.S | re.I)
+
+
+def _ofx_tag(name: str, block: str) -> str:
+    """Read one OFX element. Values run to the next tag or line end because OFX 1.x is
+    SGML and leaves elements unclosed; only aggregates carry a closing tag."""
+    m = re.search(rf"<{name}>([^<\r\n]*)", block, re.I)
+    return m.group(1).strip() if m else ""
+
+
+def _statement_account(block: str) -> str | None:
+    """The account a statement belongs to, from its ACCTFROM aggregate.
+
+    Scoped to that aggregate rather than the whole block: a transfer's STMTTRN can
+    carry its own ACCTID for the other side, which would otherwise be picked up.
+    """
+    m = _ACCTFROM.search(block)
+    if m:
+        return _ofx_tag("ACCTID", m.group(1)) or None
+    # Some issuers leave ACCTFROM unclosed. Anything before the first transaction is
+    # still statement-level, so look only there.
+    head = block[: m.start()] if (m := _TXN.search(block)) else block
+    return _ofx_tag("ACCTID", head) or None
+
+
+def _statements(text: str) -> list[tuple[str | None, str]]:
+    """(account id, block) for each statement in the document.
+
+    OFX wraps every account's transactions in its own STMTRS/CCSTMTRS aggregate, so
+    one download can carry several accounts. Reading STMTTRN across the whole
+    document silently merges them into whichever account the importer was told to
+    use — the transactions land under the wrong account with nothing to show for it.
+
+    A document with no recognisable statement wrapper is treated as a single
+    unattributed statement, so unusual exports still import as they always did.
+    """
+    blocks = [(_statement_account(body), body) for _kind, body in _STATEMENT.findall(text)]
+    return blocks or [(None, text)]
 
 
 def parse_ofx(content: bytes) -> list[ParsedTxn]:
     text = _decode(content)
     out: list[ParsedTxn] = []
-    for block in re.findall(r"<STMTTRN>(.*?)</STMTTRN>", text, re.S | re.I):
-
-        def tag(name: str, b: str = block) -> str:
-            m = re.search(rf"<{name}>([^<\r\n]*)", b, re.I)
-            return m.group(1).strip() if m else ""
-
-        raw_date = tag("DTPOSTED")[:8]
-        try:
-            date = dt.datetime.strptime(raw_date, "%Y%m%d").date()
-        except ValueError:
-            continue
-        name = tag("NAME") or tag("PAYEE")
-        memo = tag("MEMO")
-        description = " ".join(p for p in (name, memo) if p).strip()
-        amount = to_cents(tag("TRNAMT"))
-        out.append(
-            ParsedTxn(
-                date,
-                amount,
-                description,
-                normalise_merchant(description),
-                provider_txn_id=tag("FITID") or None,
+    for account_value, statement in _statements(text):
+        for block in _TXN.findall(statement):
+            raw_date = _ofx_tag("DTPOSTED", block)[:8]
+            try:
+                date = dt.datetime.strptime(raw_date, "%Y%m%d").date()
+            except ValueError:
+                continue
+            name = _ofx_tag("NAME", block) or _ofx_tag("PAYEE", block)
+            memo = _ofx_tag("MEMO", block)
+            description = " ".join(p for p in (name, memo) if p).strip()
+            out.append(
+                ParsedTxn(
+                    date,
+                    to_cents(_ofx_tag("TRNAMT", block)),
+                    description,
+                    normalise_merchant(description),
+                    provider_txn_id=_ofx_tag("FITID", block) or None,
+                    account_value=account_value,
+                )
             )
-        )
     return out
 
 

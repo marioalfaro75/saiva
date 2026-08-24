@@ -89,6 +89,11 @@ class Account(Base, TimestampMixin):
     currency: Mapped[str] = mapped_column(String(3), default="AUD")
     opening_balance_cents: Mapped[int] = mapped_column(Integer, default=0)
     owner_user_id: Mapped[str | None] = mapped_column(ForeignKey("users.id"), nullable=True)
+    # The bank's own name for this account — a statement's account-number column, or an
+    # OFX ACCTID — so a file identifies its accounts without being mapped again. Only
+    # set from values that survive a round trip: a fragment like a card's last four, or
+    # a number Excel has turned into "7.34364E+11", identifies nothing later.
+    bank_identifier: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
 
 
 class Category(Base, TimestampMixin):
