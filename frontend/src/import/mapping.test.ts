@@ -18,6 +18,7 @@ const BASE: CsvMapping = {
   credit_col: null,
   balance_col: null,
   date_format: null,
+  dayfirst: true,
   decimal: ".",
   invert_amount: false,
   skip_rows: 0,

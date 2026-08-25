@@ -1,6 +1,7 @@
 import { useId } from "react";
 
 import type { CsvMapping, SniffResult } from "../api/types";
+import { isAmbiguous, readDate } from "./dates";
 import { ROLE_LABELS, ROLES, type Role, type Roles, whatsMissing } from "./mapping";
 
 const DELIMITERS: { value: string; label: string }[] = [
@@ -50,6 +51,15 @@ export function ColumnMapper({
   const missing = whatsMissing(roles);
   const rows = sniff.sample_rows;
 
+  // The first real value from whichever column is the date, so the reading below is
+  // about this file rather than an example.
+  const dateCol = Object.entries(roles).find(([, r]) => r === "date")?.[0];
+  const dateSample =
+    dateCol === undefined
+      ? null
+      : (rows.map((r) => r[Number(dateCol)]?.trim()).find(Boolean) ?? null);
+  const reading = dateSample ? readDate(dateSample, mapping.dayfirst) : null;
+
   return (
     <div className="mapper">
       <div className="spread" style={{ marginBottom: 10 }}>
@@ -90,6 +100,29 @@ export function ColumnMapper({
           </select>
         </div>
       </div>
+
+      {reading && (
+        /* 01/07/2025 is a valid date whichever way round it is read, so nothing fails
+           and a wrong answer files a year into the wrong months in silence. Stated as
+           what will happen to a real value from the file, not as an abstract setting. */
+        <div className="row" style={{ marginTop: 4 }}>
+          <div className="field">
+            <label htmlFor={`${id}-dayfirst`}>Dates read as</label>
+            <select
+              id={`${id}-dayfirst`}
+              value={mapping.dayfirst ? "day" : "month"}
+              onChange={(e) => onMapping({ dayfirst: e.target.value === "day" })}
+            >
+              <option value="day">Day / month / year</option>
+              <option value="month">Month / day / year</option>
+            </select>
+          </div>
+          <p className="muted date-reading">
+            <code>{dateSample}</code> in your file is <strong>{reading}</strong>
+            {dateSample && !isAmbiguous(dateSample) && " — unambiguous either way"}
+          </p>
+        </div>
+      )}
 
       <table className="mapper-table">
         <thead>

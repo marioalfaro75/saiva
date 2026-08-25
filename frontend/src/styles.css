@@ -1093,3 +1093,13 @@ th.actions {
   margin-top: 4px;
   max-width: 52ch;
 }
+.date-reading {
+  align-self: end;
+  margin: 0 0 6px;
+  font-size: 13px;
+}
+.date-reading code {
+  background: var(--surface-2);
+  padding: 1px 5px;
+  border-radius: 4px;
+}

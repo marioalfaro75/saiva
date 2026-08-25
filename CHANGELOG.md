@@ -24,6 +24,11 @@ All notable changes to Saiva are documented here. The project follows
 - **Mappings are remembered per shape of file.** The next export from the same bank
   opens already mapped, ignored columns included. It still shows you the mapping
   every time, so a bank quietly adding a column is noticed rather than absorbed.
+- **How dates are read is stated, against a real value from your file.** `01/07/2025`
+  is a valid date whether the 1 or the 7 is the month, so nothing fails to parse and
+  the wrong assumption files a year of transactions into the wrong months in silence.
+  The mapping step says *"01/07/2025 in your file is 1 July 2025"* and lets you switch
+  it, and says when a value is unambiguous either way.
 - **The separator is shown and can be corrected**, since a tab-separated file whose
   text contains commas is routinely mis-detected and then reads as a single column.
 

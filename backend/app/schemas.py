@@ -197,6 +197,9 @@ class CsvMapping(BaseModel):
     credit_col: int | None = None
     balance_col: int | None = None
     date_format: str | None = None  # e.g. "%d/%m/%Y"; auto-detected if omitted
+    # Whether 01/07/2025 is 1 July or 7 January. Both parse, so a wrong answer files a
+    # year of transactions into the wrong months without one row failing.
+    dayfirst: bool = True
     decimal: str = "."
     # Column separator. Sniffed, but overridable: a tab-separated file whose text
     # contains commas is routinely mis-sniffed, and then it reads as one column.

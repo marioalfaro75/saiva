@@ -88,3 +88,22 @@ def test_debit_amount_is_not_also_read_as_the_signed_amount_column() -> None:
     assert m.amount_mode == "debit_credit"
     assert (m.debit_col, m.credit_col) == (3, 4)
     assert m.amount_col is None
+
+
+def test_day_first_is_settable_because_both_readings_parse() -> None:
+    """01/07/2025 is a valid date whichever number is the month, so a wrong assumption
+    files a year of transactions into the wrong months without one row failing."""
+    assert importers.parse_date("01/07/2025").isoformat() == "2025-07-01"
+    assert importers.parse_date("01/07/2025", None, False).isoformat() == "2025-01-07"
+
+
+def test_a_month_first_file_imports_under_the_month_first_setting() -> None:
+    body = (
+        b"Date,Description,Amount\n"
+        b"07/04/2025,WOOLWORTHS,-30.00\n"
+        b"12/25/2025,CHRISTMAS,-99.00\n"
+    )
+    mapping = importers.sniff_csv(body).suggested_mapping
+    mapping.dayfirst = False
+    parsed = importers.parse_csv(body, mapping)
+    assert [p.txn_date.isoformat() for p in parsed] == ["2025-07-04", "2025-12-25"]

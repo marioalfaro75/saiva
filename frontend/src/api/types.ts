@@ -365,6 +365,9 @@ export interface CsvMapping {
   credit_col: number | null;
   balance_col: number | null;
   date_format: string | null;
+  /** Whether 01/07/2025 is 1 July or 7 January. Both parse, so a wrong answer files a
+   *  year of transactions into the wrong months without one row failing. */
+  dayfirst: boolean;
   decimal: string;
   invert_amount: boolean;
   skip_rows: number;

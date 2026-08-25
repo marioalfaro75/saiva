@@ -16,7 +16,8 @@ from dateutil import parser as dateparser
 from ..schemas import CsvMapping, ImportSniffOut
 from .merchants import normalise_merchant
 
-AU_DATE_FORMATS = ["%d/%m/%Y", "%d/%m/%y", "%d-%m-%Y", "%Y-%m-%d", "%d %b %Y", "%d %B %Y"]
+DAY_FIRST_FORMATS = ["%d/%m/%Y", "%d/%m/%y", "%d-%m-%Y", "%Y-%m-%d", "%d %b %Y", "%d %B %Y"]
+MONTH_FIRST_FORMATS = ["%m/%d/%Y", "%m/%d/%y", "%m-%d-%Y", "%Y-%m-%d", "%b %d %Y", "%B %d %Y"]
 
 
 @dataclass
@@ -34,16 +35,23 @@ class ParsedTxn:
     balance_cents: int | None = None
 
 
-def parse_date(value: str, fmt: str | None = None) -> dt.date:
+def parse_date(value: str, fmt: str | None = None, dayfirst: bool = True) -> dt.date:
+    """Read a date, day first unless told otherwise.
+
+    Day first is right for Australian statements and wrong for American ones, and
+    01/07/2025 is a valid date either way — so getting it wrong files a year of
+    transactions into the wrong months without a single row failing to parse. It is
+    settable rather than guessed for exactly that reason.
+    """
     v = (value or "").strip()
     if fmt:
         return dt.datetime.strptime(v, fmt).date()
-    for f in AU_DATE_FORMATS:
+    for f in DAY_FIRST_FORMATS if dayfirst else MONTH_FIRST_FORMATS:
         try:
             return dt.datetime.strptime(v, f).date()
         except ValueError:
             continue
-    return dateparser.parse(v, dayfirst=True).date()
+    return dateparser.parse(v, dayfirst=dayfirst).date()
 
 
 def to_cents(value: str, decimal: str = ".") -> int:
@@ -301,7 +309,7 @@ def parse_csv(content: bytes, mapping: CsvMapping) -> list[ParsedTxn]:
     out: list[ParsedTxn] = []
     for row in rows[start:]:
         try:
-            date = parse_date(row[mapping.date_col], mapping.date_format)
+            date = parse_date(row[mapping.date_col], mapping.date_format, mapping.dayfirst)
             description = row[mapping.description_col].strip()
         except (IndexError, ValueError):
             continue
