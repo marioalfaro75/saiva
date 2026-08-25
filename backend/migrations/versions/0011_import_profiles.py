@@ -26,7 +26,8 @@ def upgrade() -> None:
         sa.Column('fingerprint', sa.String(length=64), nullable=False),
         sa.Column('name', sa.String(length=120), nullable=False),
         sa.Column('mapping', sa.JSON(), nullable=False),
-        sa.Column('account_map', sa.JSON(), nullable=True),
+        # Always a dict, empty when every value bound to an account permanently.
+        sa.Column('account_map', sa.JSON(), nullable=False),
         sa.Column('last_used_at', sa.DateTime(), nullable=True),
         sa.Column('created_at', sa.DateTime(), nullable=False),
         sa.Column('updated_at', sa.DateTime(), nullable=False),
