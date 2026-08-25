@@ -167,13 +167,20 @@ def _remember_identifier(db: Session, account: models.Account, value: str) -> No
         account.bank_identifier = identifier
 
 
+def _profile_name(header: list[str], has_header: bool) -> str:
+    """A short, stable description of the file shape this profile is for."""
+    if not has_header:
+        return f"{len(header)}-column file with no header"
+    names = [h.strip() for h in header if h.strip()][:3]
+    return ", ".join(names) + ("…" if len(header) > 3 else "")
+
+
 def _save_profile(
     db: Session,
     household_id: str,
     content: bytes,
     mapping: schemas.CsvMapping,
     account_map: dict[str, str],
-    filename: str,
 ) -> None:
     """Remember how this shape of file was read, so the next one opens already mapped.
 
@@ -208,7 +215,10 @@ def _save_profile(
         models.ImportProfile(
             household_id=household_id,
             fingerprint=key,
-            name=filename,
+            # Named after the shape rather than the file: a statement export is
+            # routinely called something like Data_export_15082026.csv, which names one
+            # download and not the arrangement being saved.
+            name=_profile_name(rows[0], mapping.has_header),
             mapping=payload,
             account_map=unbound,
             last_used_at=dt.datetime.utcnow(),
@@ -520,7 +530,6 @@ async def commit(
             content,
             parsed_mapping,
             {v: t.account_id for v, t in targets.items() if t.account_id},
-            file.filename or "upload",
         )
 
     added = 0

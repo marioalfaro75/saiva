@@ -67,9 +67,11 @@ export function ColumnMapper({
         <span className="muted">{sniff.columns.length} columns</span>
       </div>
       {profileName && (
+        /* The profile is matched on this file's own shape, so naming it here would add
+           nothing — what matters is that these roles are yours, not guesses. */
         <p className="muted" style={{ marginTop: 0 }}>
-          Mapped the way you mapped <strong>{profileName}</strong>. Change anything
-          that is wrong and the next file of this shape follows suit.
+          Mapped the way you mapped this file last time. Change anything that is wrong
+          and the next file of the same shape follows suit.
         </p>
       )}
 
