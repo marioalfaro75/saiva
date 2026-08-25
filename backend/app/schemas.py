@@ -197,7 +197,13 @@ class CsvMapping(BaseModel):
     credit_col: int | None = None
     balance_col: int | None = None
     date_format: str | None = None  # e.g. "%d/%m/%Y"; auto-detected if omitted
+    # Whether 01/07/2025 is 1 July or 7 January. Both parse, so a wrong answer files a
+    # year of transactions into the wrong months without one row failing.
+    dayfirst: bool = True
     decimal: str = "."
+    # Column separator. Sniffed, but overridable: a tab-separated file whose text
+    # contains commas is routinely mis-sniffed, and then it reads as one column.
+    delimiter: str | None = None
     invert_amount: bool = False  # set if outflows are positive in the file
     skip_rows: int = 0
     # Set when the file covers several accounts: the column naming the account each
@@ -214,15 +220,37 @@ class ImportSniffOut(BaseModel):
     # A column that looks like it identifies an account, offered as a hint. Multi-account
     # import stays off until the user opts in, so this is never applied automatically.
     suggested_account_col: int | None = None
+    # The separator the file was read with, shown so a wrong guess can be corrected.
+    delimiter: str = ","
+    # A stable name for this shape of file, so a saved mapping can be found again.
+    fingerprint: str = ""
+    # The saved mapping for that shape, when there is one. It pre-fills the mapping
+    # step; it never replaces it, so a column the bank has added cannot slip past.
+    profile: ImportProfileOut | None = None
+
+
+class ImportProfileOut(BaseModel):
+    id: str
+    name: str
+    mapping: dict
+    account_map: dict = {}
 
 
 class AccountScanRow(BaseModel):
-    """One distinct value of the account column, with what it looks like it means."""
+    """One distinct value of the account column, with enough about it to recognise
+    which account it is. The value itself is often a bare number that means nothing
+    to a person, so the period it covers and the balance it ends on do the work."""
 
     value: str
     row_count: int
     sample_description: str | None
     suggested_account_id: str | None
+    first_date: dt.date | None = None
+    last_date: dt.date | None = None
+    latest_balance_cents: int | None = None
+    # Excel turned a long account number into scientific notation. It still maps for
+    # this file; it just cannot be stored as the account's lasting identifier.
+    looks_mangled: bool = False
 
 
 class AccountCreateFromImport(BaseModel):

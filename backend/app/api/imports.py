@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import datetime as dt
 import json
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
@@ -146,6 +147,85 @@ def _parse_assignments(raw: str | None) -> list[schemas.AccountAssignment]:
     return [schemas.AccountAssignment.model_validate(a) for a in data]
 
 
+def _remember_identifier(db: Session, account: models.Account, value: str) -> None:
+    """Record the bank's identifier against an account the first time it is mapped, so
+    later files recognise it without being asked.
+
+    Never overwrites one already there: an account is reached through more than one
+    kind of file, and a value that happens to arrive second should not displace what
+    is working. Values that cannot survive a round trip are not stored at all.
+    """
+    if account.bank_identifier:
+        return
+    identifier = importers.durable_identifier(value)
+    if identifier and not db.execute(
+        select(models.Account.id).where(
+            models.Account.household_id == account.household_id,
+            models.Account.bank_identifier == identifier,
+        )
+    ).first():
+        account.bank_identifier = identifier
+
+
+def _profile_name(header: list[str], has_header: bool) -> str:
+    """A short, stable description of the file shape this profile is for."""
+    if not has_header:
+        return f"{len(header)}-column file with no header"
+    names = [h.strip() for h in header if h.strip()][:3]
+    return ", ".join(names) + ("…" if len(header) > 3 else "")
+
+
+def _save_profile(
+    db: Session,
+    household_id: str,
+    content: bytes,
+    mapping: schemas.CsvMapping,
+    account_map: dict[str, str],
+) -> None:
+    """Remember how this shape of file was read, so the next one opens already mapped.
+
+    Only the values that could not be bound to an account permanently are kept here;
+    the rest live on the account itself, where they survive the profile changing.
+
+    The fingerprint is taken from the file rather than sent by the client, so the
+    profile is keyed on what was actually read.
+    """
+    rows = importers.read_rows(content, mapping.delimiter)
+    if not rows:
+        return
+    key = importers.fingerprint(rows[0], mapping.has_header)
+    profile = db.execute(
+        select(models.ImportProfile).where(
+            models.ImportProfile.household_id == household_id,
+            models.ImportProfile.fingerprint == key,
+        )
+    ).scalar_one_or_none()
+    unbound = {
+        value: account_id
+        for value, account_id in account_map.items()
+        if importers.durable_identifier(value) is None
+    }
+    payload = mapping.model_dump()
+    if profile:
+        profile.mapping = payload
+        profile.account_map = {**(profile.account_map or {}), **unbound}
+        profile.last_used_at = dt.datetime.utcnow()
+        return
+    db.add(
+        models.ImportProfile(
+            household_id=household_id,
+            fingerprint=key,
+            # Named after the shape rather than the file: a statement export is
+            # routinely called something like Data_export_15082026.csv, which names one
+            # download and not the arrangement being saved.
+            name=_profile_name(rows[0], mapping.has_header),
+            mapping=payload,
+            account_map=unbound,
+            last_used_at=dt.datetime.utcnow(),
+        )
+    )
+
+
 def _build_targets(
     db: Session, household_id: str, assignments: list[schemas.AccountAssignment], *, create: bool
 ) -> dict[str, _Target]:
@@ -160,6 +240,8 @@ def _build_targets(
             targets[a.value] = _Target(name="Skipped", skip=True)
         elif a.account_id:
             account = _account_or_404(db, a.account_id, household_id)
+            if create:
+                _remember_identifier(db, account, a.value)
             targets[a.value] = _Target(
                 name=account.name, account_id=account.id, dedup_key=account.id
             )
@@ -170,6 +252,7 @@ def _build_targets(
                     name=a.create.name,
                     type=a.create.type,
                     institution=a.create.institution,
+                    bank_identifier=importers.durable_identifier(a.value),
                 )
                 db.add(account)
                 db.flush()
@@ -237,28 +320,48 @@ def _will_import(
 async def sniff(
     file: UploadFile = File(...),
     user: models.User = Depends(get_current_user),
+    db: Session = Depends(get_db),
 ) -> schemas.ImportSniffOut:
-    return importers.sniff_csv(await _read(file))
+    out = importers.sniff_csv(await _read(file))
+    profile = db.execute(
+        select(models.ImportProfile).where(
+            models.ImportProfile.household_id == user.household_id,
+            models.ImportProfile.fingerprint == out.fingerprint,
+        )
+    ).scalar_one_or_none()
+    if profile:
+        out.profile = schemas.ImportProfileOut(
+            id=profile.id,
+            name=profile.name,
+            mapping=profile.mapping,
+            account_map=profile.account_map or {},
+        )
+    return out
 
 
 @router.post("/accounts/scan", response_model=list[schemas.AccountScanRow])
 async def scan_accounts(
     file: UploadFile = File(...),
-    mapping: str = Form(...),
+    mapping: str | None = Form(None),
+    file_format: str = Form("csv"),
     user: models.User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> list[schemas.AccountScanRow]:
-    """List the distinct values of the chosen account column, each matched to the
-    account it most likely belongs to (remembered from a previous import, else by
-    name), so the user confirms rather than types."""
+    """List the accounts a file covers, each matched to the account it most likely
+    belongs to, so the user confirms rather than types.
+
+    CSV names its accounts in a column the mapping points at; OFX carries one per
+    statement. Both arrive here as the same list.
+    """
     parsed_mapping = _parse_mapping(mapping)
-    if parsed_mapping is None or parsed_mapping.account_col is None:
+    fmt = file_format.lower()
+    if fmt == "csv" and (parsed_mapping is None or parsed_mapping.account_col is None):
         raise HTTPException(
             status.HTTP_400_BAD_REQUEST, "Choose the column that identifies the account"
         )
     content = await _read(file)
     try:
-        found = importers.scan_account_values(content, parsed_mapping)
+        found = importers.scan_account_values(content, fmt, parsed_mapping)
     except ValueError as exc:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc)) from exc
 
@@ -268,14 +371,25 @@ async def scan_accounts(
         .all()
     )
     remembered = _remembered_assignments(db, user.household_id, {a.id for a in accounts})
+    by_identifier = {a.bank_identifier: a.id for a in accounts if a.bank_identifier}
     return [
         schemas.AccountScanRow(
-            value=value,
-            row_count=count,
-            sample_description=sample,
-            suggested_account_id=remembered.get(value) or _suggest_account(value, accounts),
+            value=a.value,
+            row_count=a.row_count,
+            sample_description=a.sample_description,
+            first_date=a.first_date,
+            last_date=a.last_date,
+            latest_balance_cents=a.latest_balance_cents,
+            looks_mangled=a.looks_mangled,
+            # Strongest evidence first: the bank's own identifier recorded against an
+            # account, then what this household chose last time, then the name.
+            suggested_account_id=(
+                by_identifier.get(a.value)
+                or remembered.get(a.value)
+                or _suggest_account(a.value, accounts)
+            ),
         )
-        for value, count, sample in found
+        for a in found
     ]
 
 
@@ -409,6 +523,14 @@ async def commit(
     )
     db.add(batch)
     db.flush()
+    if parsed_mapping is not None:
+        _save_profile(
+            db,
+            user.household_id,
+            content,
+            parsed_mapping,
+            {v: t.account_id for v, t in targets.items() if t.account_id},
+        )
 
     added = 0
     skipped = 0

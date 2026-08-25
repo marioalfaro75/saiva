@@ -365,11 +365,16 @@ export interface CsvMapping {
   credit_col: number | null;
   balance_col: number | null;
   date_format: string | null;
+  /** Whether 01/07/2025 is 1 July or 7 January. Both parse, so a wrong answer files a
+   *  year of transactions into the wrong months without one row failing. */
+  dayfirst: boolean;
   decimal: string;
   invert_amount: boolean;
   skip_rows: number;
   /** Column naming the account each row belongs to; null for a single-account file. */
   account_col: number | null;
+  /** Column separator. Sniffed, but overridable when the guess is wrong. */
+  delimiter: string | null;
 }
 
 export interface SniffResult {
@@ -379,6 +384,20 @@ export interface SniffResult {
   sample_rows: string[][];
   suggested_mapping: CsvMapping | null;
   suggested_account_col: number | null;
+  delimiter: string;
+  /** A stable name for this shape of file, so a saved mapping can be found again. */
+  fingerprint: string;
+  /** The saved mapping for that shape, when there is one. */
+  profile: ImportProfile | null;
+}
+
+export interface ImportProfile {
+  id: string;
+  name: string;
+  mapping: CsvMapping;
+  /** Account-column value -> account id, for values that could not be bound to an
+   *  account permanently (a card's last four, a number Excel has mangled). */
+  account_map: Record<string, string>;
 }
 
 export interface AccountScanRow {
@@ -386,6 +405,12 @@ export interface AccountScanRow {
   row_count: number;
   sample_description: string | null;
   suggested_account_id: string | null;
+  first_date: string | null;
+  last_date: string | null;
+  latest_balance_cents: number | null;
+  /** Excel turned a long account number into scientific notation. It still maps for
+   *  this file; it just cannot be stored as the account's lasting identifier. */
+  looks_mangled: boolean;
 }
 
 export interface AccountAssignment {

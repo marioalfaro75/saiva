@@ -7,10 +7,13 @@ import type {
   AccountScanRow,
   CsvMapping,
   ImportPreview,
+  ImportProfile,
   PreviewRow,
   SniffResult,
 } from "../api/types";
 import { PHONE, useMediaQuery } from "../hooks/useMediaQuery";
+import { ColumnMapper } from "../import/ColumnMapper";
+import { mappingFromRoles, rolesFromMapping, type Role, type Roles } from "../import/mapping";
 import { SortChips } from "../table/MobileControls";
 import { TABLE_MIN, TableWrap } from "../table/TableWrap";
 import { formatCents, formatDate } from "../format";
@@ -63,28 +66,6 @@ type Choice =
   | { mode: "create"; name: string; type: string }
   | { mode: "skip" };
 
-function ColSelect({
-  id,
-  cols,
-  value,
-  onChange,
-}: {
-  id: string;
-  cols: string[];
-  value: number;
-  onChange: (v: number) => void;
-}) {
-  return (
-    <select id={id} value={value} onChange={(e) => onChange(Number(e.target.value))}>
-      {cols.map((c, i) => (
-        <option key={i} value={i}>
-          {c}
-        </option>
-      ))}
-    </select>
-  );
-}
-
 function guessFormat(file: File): string {
   const lower = file.name.toLowerCase();
   if (lower.endsWith(".qfx")) return "qfx";
@@ -99,6 +80,13 @@ export function ImportPage() {
   const [format, setFormat] = useState("csv");
   const [sniff, setSniff] = useState<SniffResult | null>(null);
   const [mapping, setMapping] = useState<CsvMapping | null>(null);
+  // What each column is for. The mapping the API needs is derived from this, so the
+  // screen and the request can never disagree about which column is which.
+  const [roles, setRoles] = useState<Roles>({});
+  // What detection said, kept so a role can be shown as a guess rather than a choice.
+  const [detected, setDetected] = useState<Roles>({});
+  // A saved mapping for this shape of file, when there is one.
+  const [profile, setProfile] = useState<ImportProfile | null>(null);
   const [preview, setPreview] = useState<ImportPreview | null>(null);
   // The configuration the preview on screen was computed from — compared against
   // the current one below to tell whether it still answers the question being asked.
@@ -118,6 +106,7 @@ export function ImportPage() {
   const reset = () => {
     setSniff(null);
     setMapping(null);
+    setProfile(null);
     setPreview(null);
     setPreviewKey(null);
     setDecisions({});
@@ -127,7 +116,12 @@ export function ImportPage() {
     setError(null);
   };
 
-  const multiAccount = mapping?.account_col != null;
+  // The file answers the account question whenever it carries one, rather than the
+  // question being asked first and the answer hidden behind an opt-in.
+  const multiAccount = Object.values(roles).includes("account") || format !== "csv";
+  // What the API is sent: the roles on screen, resolved into the shape it expects.
+  const effectiveMapping =
+    mapping && format === "csv" ? mappingFromRoles(roles, mapping) : null;
 
   const onFile = async (f: File | null) => {
     setFile(f);
@@ -135,14 +129,32 @@ export function ImportPage() {
     if (!f) return;
     const fmt = guessFormat(f);
     setFormat(fmt);
-    if (fmt === "csv") {
-      try {
-        const s = await api.sniff(f);
-        setSniff(s);
-        setMapping(s.suggested_mapping);
-      } catch (e) {
-        setError(e instanceof ApiError ? e.message : "Could not read file");
+    try {
+      if (fmt !== "csv") {
+        // OFX names its accounts per statement, so there is nothing to map — go
+        // straight to matching them against yours.
+        await runScan(f, fmt, null);
+        return;
       }
+      const s = await api.sniff(f);
+      setSniff(s);
+      if (!s.suggested_mapping) return;
+      // A saved profile for this shape of file wins over detection — it is what you
+      // decided last time. It pre-fills the step rather than skipping it, so a column
+      // the bank has since added is seen rather than absorbed.
+      const seeded = s.profile
+        ? s.profile.mapping
+        : { ...s.suggested_mapping, account_col: s.suggested_account_col };
+      setMapping(seeded);
+      setProfile(s.profile);
+      const initial = rolesFromMapping(seeded, s.columns.length);
+      setRoles(initial);
+      setDetected(initial);
+      if (initial && Object.values(initial).includes("account")) {
+        await runScan(f, "csv", mappingFromRoles(initial, seeded));
+      }
+    } catch (e) {
+      setError(e instanceof ApiError ? e.message : "Could not read file");
     }
   };
 
@@ -150,17 +162,28 @@ export function ImportPage() {
     if (mapping) setMapping({ ...mapping, ...patch });
   };
 
+  /** Re-read the file under a changed mapping: the account values depend on it. */
+  const setRole = (col: number, role: Role) => {
+    const next = { ...roles, [col]: role };
+    setRoles(next);
+    setScan(null);
+    setChoices({});
+    if (!file || !mapping) return;
+    if (Object.values(next).includes("account")) {
+      void runScan(file, "csv", mappingFromRoles(next, mapping));
+    }
+  };
+
   // A row imports unless the reviewer said otherwise; definite duplicates never do.
   const willImport = (r: PreviewRow) => decisions[r.row_index] ?? r.will_import;
   const canDecide = (r: PreviewRow) => r.status === "new" || r.status === "duplicate_probable";
 
-  /** Read the account column's distinct values so each can be pointed at an account. */
-  const scanAccounts = async (accountCol: number) => {
-    if (!file || !mapping) return;
+  /** List the accounts a file covers, so each can be pointed at one of yours. */
+  const runScan = async (f: File, fmt: string, csvMapping: CsvMapping | null) => {
     setBusy(true);
     setError(null);
     try {
-      const found = await api.scanAccounts(file, { ...mapping, account_col: accountCol });
+      const found = await api.scanAccounts(f, csvMapping, fmt);
       setScan(found);
       setPreview(null);
       // Start from what the server matched; anything it could not place is left for
@@ -176,18 +199,10 @@ export function ImportPage() {
         ),
       );
     } catch (e) {
-      setError(e instanceof ApiError ? e.message : "Could not read the account column");
+      setError(e instanceof ApiError ? e.message : "Could not read the accounts in this file");
     } finally {
       setBusy(false);
     }
-  };
-
-  const setAccountCol = (col: number | null) => {
-    setMap({ account_col: col });
-    setScan(null);
-    setChoices({});
-    setPreview(null);
-    if (col !== null) void scanAccounts(col);
   };
 
   const assignments = (): AccountAssignment[] =>
@@ -222,12 +237,53 @@ export function ImportPage() {
     file: file && [file.name, file.size, file.lastModified],
     accountId: multiAccount ? "" : accountId,
     format,
-    mapping: format === "csv" ? mapping : null,
+    // The derived mapping, not the base one: what a column is for lives in `roles`,
+    // so hashing the base would miss every change made in the mapping step.
+    mapping: effectiveMapping,
     assignments: multiAccount ? assignments() : null,
   });
   const stale = preview !== null && previewKey !== configKey;
   const toImport = preview && !stale ? preview.rows.filter(willImport).length : 0;
   const canImport = readyToRun && preview !== null && !stale && toImport > 0;
+
+  /**
+   * What an account value actually is.
+   *
+   * The value itself is the bank's, not yours — "7.34364E+11" identifies nothing to a
+   * person. The period it covers and the balance it ends on do: -819,480.37 over 74
+   * rows is unmistakably the mortgage.
+   */
+  const accountIdentity = (s: AccountScanRow) => (
+    <div className="acct-identity muted">
+      <span>{s.row_count} rows</span>
+      {s.first_date && s.last_date && (
+        <>
+          <span aria-hidden="true">·</span>
+          <span>
+            {formatDate(s.first_date)} – {formatDate(s.last_date)}
+          </span>
+        </>
+      )}
+      {s.latest_balance_cents !== null && (
+        <>
+          <span aria-hidden="true">·</span>
+          <span className={s.latest_balance_cents < 0 ? "negative" : ""}>
+            balance {formatCents(s.latest_balance_cents)}
+          </span>
+        </>
+      )}
+      {s.sample_description && (
+        <div className="acct-sample">e.g. {s.sample_description}</div>
+      )}
+      {s.looks_mangled && (
+        <div className="acct-warn">
+          Excel has turned this account number into scientific notation, so its digits
+          are gone. It imports correctly either way — exporting again without opening
+          the file in Excel lets it be recognised automatically next time.
+        </div>
+      )}
+    </div>
+  );
 
   /** One definition of the assignment control, laid out as a table cell on a wide
    *  screen and inside a card on a phone. */
@@ -342,7 +398,7 @@ export function ImportPage() {
     // even if something changes while it is in flight.
     const ranWith = configKey;
     try {
-      const csvMapping = format === "csv" ? mapping : null;
+      const csvMapping = effectiveMapping;
       const accountAssignments = multiAccount ? assignments() : undefined;
       if (commit) {
         const rows = preview?.rows ?? [];
@@ -395,24 +451,26 @@ export function ImportPage() {
 
       <div className="card">
         <div className="row">
-          <div className="field">
-            <label htmlFor="imp-account">Account</label>
-            <select
-              id="imp-account"
-              value={accountId}
-              disabled={multiAccount}
-              onChange={(e) => setAccountId(e.target.value)}
-            >
-              <option value="">
-                {multiAccount ? "Taken from the file" : "Choose account…"}
-              </option>
-              {accounts.data?.map((a) => (
-                <option key={a.id} value={a.id}>
-                  {a.name}
-                </option>
-              ))}
-            </select>
-          </div>
+          {/* Only asked when the file cannot answer it. A statement that names its
+              own accounts is the common case, and being made to pick one first was
+              what hid multi-account import entirely. */}
+          {!multiAccount && (
+            <div className="field">
+              <label htmlFor="imp-account">Account</label>
+              <select
+                id="imp-account"
+                value={accountId}
+                onChange={(e) => setAccountId(e.target.value)}
+              >
+                <option value="">Choose account…</option>
+                {accounts.data?.map((a) => (
+                  <option key={a.id} value={a.id}>
+                    {a.name}
+                  </option>
+                ))}
+              </select>
+            </div>
+          )}
           <div className="field">
             <label htmlFor="imp-file">File (CSV, OFX or QFX)</label>
             <input
@@ -427,108 +485,26 @@ export function ImportPage() {
 
         {sniff && mapping && (
           <>
-            <h2 style={{ marginTop: 12 }}>Column mapping</h2>
-            <div className="row">
-              <div className="field">
-                <label htmlFor="imp-date-col">Date column</label>
-                <ColSelect
-                  id="imp-date-col"
-                  cols={sniff.columns}
-                  value={mapping.date_col}
-                  onChange={(v) => setMap({ date_col: v })}
-                />
-              </div>
-              <div className="field">
-                <label htmlFor="imp-desc-col">Description column</label>
-                <ColSelect
-                  id="imp-desc-col"
-                  cols={sniff.columns}
-                  value={mapping.description_col}
-                  onChange={(v) => setMap({ description_col: v })}
-                />
-              </div>
-              <div className="field">
-                <label htmlFor="imp-amount-mode">Amount format</label>
-                <select
-                  id="imp-amount-mode"
-                  value={mapping.amount_mode}
-                  onChange={(e) =>
-                    setMap({ amount_mode: e.target.value as "single" | "debit_credit" })
-                  }
-                >
-                  <option value="single">Single signed column</option>
-                  <option value="debit_credit">Separate debit / credit</option>
-                </select>
-              </div>
-            </div>
-            <div className="row">
-              {mapping.amount_mode === "single" ? (
-                <div className="field">
-                  <label htmlFor="imp-amount-col">Amount column</label>
-                  <ColSelect
-                    id="imp-amount-col"
-                    cols={sniff.columns}
-                    value={mapping.amount_col ?? 0}
-                    onChange={(v) => setMap({ amount_col: v })}
-                  />
-                </div>
-              ) : (
-                <>
-                  <div className="field">
-                    <label htmlFor="imp-debit-col">Debit column</label>
-                    <ColSelect
-                      id="imp-debit-col"
-                      cols={sniff.columns}
-                      value={mapping.debit_col ?? 0}
-                      onChange={(v) => setMap({ debit_col: v })}
-                    />
-                  </div>
-                  <div className="field">
-                    <label htmlFor="imp-credit-col">Credit column</label>
-                    <ColSelect
-                      id="imp-credit-col"
-                      cols={sniff.columns}
-                      value={mapping.credit_col ?? 0}
-                      onChange={(v) => setMap({ credit_col: v })}
-                    />
-                  </div>
-                </>
-              )}
-            </div>
+            <ColumnMapper
+              profileName={profile?.name ?? null}
+              sniff={sniff}
+              mapping={mapping}
+              roles={roles}
+              detected={detected}
+              onRole={setRole}
+              onMapping={(patch) => {
+                setMap(patch);
+                // Re-reading the file with a different separator or header row changes
+                // what the columns even are, so nothing derived from them survives.
+                setScan(null);
+                setPreview(null);
+              }}
+            />
+          </>
+        )}
 
-            <div className="field" style={{ marginTop: 4 }}>
-              <label>
-                <input
-                  type="checkbox"
-                  checked={multiAccount}
-                  onChange={(e) =>
-                    setAccountCol(
-                      e.target.checked ? (sniff.suggested_account_col ?? 0) : null,
-                    )
-                  }
-                />{" "}
-                Rows in this file belong to more than one account
-              </label>
-              {!multiAccount && sniff.suggested_account_col !== null && (
-                <div className="muted" style={{ fontSize: 12 }}>
-                  The “{sniff.columns[sniff.suggested_account_col]}” column looks like it
-                  names an account.
-                </div>
-              )}
-            </div>
-
-            {multiAccount && (
-              <>
-                <div className="field">
-                  <label htmlFor="imp-account-col">Account column</label>
-                  <ColSelect
-                    id="imp-account-col"
-                    cols={sniff.columns}
-                    value={mapping.account_col ?? 0}
-                    onChange={(v) => setAccountCol(v)}
-                  />
-                </div>
-
+        {multiAccount && (
+          <>
                 {scan && (
                   <>
                     <h2 style={{ marginTop: 12 }}>Which account is which?</h2>
@@ -548,13 +524,8 @@ export function ImportPage() {
                             <li className="stack-card" key={s.value}>
                               <div className="stack-card-head">
                                 <strong>{s.value}</strong>
-                                <span className="muted">{s.row_count} rows</span>
                               </div>
-                              {s.sample_description && (
-                                <div className="muted" style={{ fontSize: 12 }}>
-                                  e.g. {s.sample_description}
-                                </div>
-                              )}
+                              {accountIdentity(s)}
                               {accountPicker(s)}
                             </li>
                           ))}
@@ -581,12 +552,8 @@ export function ImportPage() {
                             {scanTable.rows.map((s) => (
                               <tr key={s.value}>
                                 <td>
-                                  {s.value}
-                                  {s.sample_description && (
-                                    <div className="muted" style={{ fontSize: 12 }}>
-                                      e.g. {s.sample_description}
-                                    </div>
-                                  )}
+                                  <div>{s.value}</div>
+                                  {accountIdentity(s)}
                                 </td>
                                 <td className="num muted">{s.row_count}</td>
                                 <td>{accountPicker(s)}</td>
@@ -604,8 +571,6 @@ export function ImportPage() {
                     )}
                   </>
                 )}
-              </>
-            )}
           </>
         )}
 
