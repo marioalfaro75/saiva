@@ -295,3 +295,84 @@ describe("Starting again", () => {
     expect(screen.getByLabelText("These transactions all belong to")).toHaveValue("");
   });
 });
+
+/**
+ * Re-importing a file you already imported: thousands of rows already filed, and a
+ * handful that look close enough to something existing to want a decision. Those few
+ * were unreachable — the preview showed the first 200 rows of one flat list, and the
+ * definite duplicates that sort ahead of them numbered in the thousands.
+ */
+describe("Preview of a file that is almost all duplicates", () => {
+  const row = (i: number, status: string) => ({
+    row_index: i,
+    txn_date: "2026-05-29",
+    amount_cents: -119954,
+    raw_description: status === "duplicate_probable" ? `NEEDS A LOOK ${i}` : `SEEN ${i}`,
+    merchant: null,
+    suggested_category_id: null,
+    suggested_category_name: null,
+    confidence: null,
+    is_duplicate: true,
+    status,
+    duplicate_reason: null,
+    matched_txn_id: null,
+    matched_date: null,
+    matched_description: null,
+    will_import: false,
+  });
+
+  beforeEach(() =>
+    stubApi({
+      ...STUBS,
+      "/imports/preview": {
+        rows: [
+          ...Array.from({ length: 2229 }, (_, i) => row(i, "duplicate_exact")),
+          ...Array.from({ length: 6 }, (_, i) => row(2229 + i, "duplicate_probable")),
+        ],
+        duplicate_count: 2229,
+        probable_count: 6,
+        unassigned_count: 0,
+        accounts: [],
+      },
+    }),
+  );
+
+  const preview = async () => {
+    await startImport();
+    fireEvent.click(screen.getByRole("button", { name: /^Preview/ }));
+    await screen.findByText("Preview", { selector: "h2" });
+  };
+
+  it("opens on the rows that need a decision, not the ones that do not", async () => {
+    await preview();
+    expect(await screen.findByRole("tab", { name: "Needs review (6)" })).toHaveAttribute(
+      "aria-selected",
+      "true",
+    );
+    expect(screen.getByRole("tab", { name: "Already imported (2229)" })).toHaveAttribute(
+      "aria-selected",
+      "false",
+    );
+  });
+
+  it("shows every row needing review — including the last of 2,235", async () => {
+    await preview();
+    // Row 2,234 was past the old 200-row cap with no sort order that reached it.
+    expect(await screen.findByText("NEEDS A LOOK 2234")).toBeInTheDocument();
+    for (let i = 2229; i < 2235; i += 1) {
+      expect(screen.getByText(`NEEDS A LOOK ${i}`)).toBeInTheDocument();
+    }
+  });
+
+  it("keeps the already-imported rows capped, and says what it held back", async () => {
+    await preview();
+    fireEvent.click(screen.getByRole("tab", { name: "Already imported (2229)" }));
+    expect(await screen.findByText(/2029 need no decision from you/)).toBeInTheDocument();
+  });
+
+  it("says so plainly when a segment is empty rather than showing a bare table", async () => {
+    await preview();
+    fireEvent.click(screen.getByRole("tab", { name: "Will import (0)" }));
+    expect(await screen.findByText("Nothing new in this file.")).toBeInTheDocument();
+  });
+});
