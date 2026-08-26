@@ -5,6 +5,12 @@ All notable changes to Saiva are documented here. The project follows
 
 ## [Unreleased]
 
+
+## [0.14.0] — 2026-08-26
+
+The import page asks for a statement and nothing else, and works out the rest from
+the file. Also fixes an OFX download covering several accounts being filed into one.
+
 ### Added
 - **The import page asks for a file, and nothing else.** It used to open with an
   account dropdown beside the file input — a two-field form whose first question was
@@ -332,6 +338,7 @@ personal financial advice.
 - On the first GHCR publish, set the `saiva-api` / `saiva-web` packages to public
   (or `docker login ghcr.io` on the host) so image pulls are authorised.
 
+[0.14.0]: https://github.com/marioalfaro75/saiva/compare/v0.13.0...v0.14.0
 [0.13.0]: https://github.com/marioalfaro75/saiva/compare/v0.12.0...v0.13.0
 [0.12.0]: https://github.com/marioalfaro75/saiva/compare/v0.11.0...v0.12.0
 [0.11.0]: https://github.com/marioalfaro75/saiva/compare/v0.10.1...v0.11.0
