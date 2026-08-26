@@ -311,6 +311,7 @@ export const api = {
     fileFormat: string,
     mapping: unknown,
     assignments?: AccountAssignment[],
+    signal?: AbortSignal,
   ) => {
     const form = new FormData();
     form.append("file", file);
@@ -318,7 +319,9 @@ export const api = {
     form.append("file_format", fileFormat);
     if (mapping) form.append("mapping", JSON.stringify(mapping));
     if (assignments?.length) form.append("assignments", JSON.stringify(assignments));
-    return request<ImportPreview>("/imports/preview", { method: "POST", body: form });
+    // Cancellable because it is read-only. Committing deliberately is not: the server
+    // finishes regardless, so a cancel button there would be a lie.
+    return request<ImportPreview>("/imports/preview", { method: "POST", body: form, signal });
   },
   commit: (
     file: File,

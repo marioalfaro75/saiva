@@ -1,5 +1,5 @@
 import { useQuery } from "@tanstack/react-query";
-import { useState } from "react";
+import { useRef, useState } from "react";
 
 import { ApiError, api } from "../api/client";
 import type {
@@ -13,6 +13,7 @@ import type {
 } from "../api/types";
 import { PHONE, useMediaQuery } from "../hooks/useMediaQuery";
 import { ColumnMapper } from "../import/ColumnMapper";
+import { DropZone } from "../import/DropZone";
 import { mappingFromRoles, rolesFromMapping, type Role, type Roles } from "../import/mapping";
 import { SortChips } from "../table/MobileControls";
 import { TABLE_MIN, TableWrap } from "../table/TableWrap";
@@ -101,6 +102,9 @@ export function ImportPage() {
   // Bumped to remount the file input: clearing `file` leaves the native control
   // still showing the name of the file that was just imported.
   const [fileInputKey, setFileInputKey] = useState(0);
+  // Live preview request, so it can be called off. Only the preview: the server
+  // finishes a commit regardless, so offering to cancel one would be a lie.
+  const previewRun = useRef<AbortController | null>(null);
   const narrow = !useMediaQuery(PHONE);
 
   const reset = () => {
@@ -122,6 +126,23 @@ export function ImportPage() {
   // What the API is sent: the roles on screen, resolved into the shape it expects.
   const effectiveMapping =
     mapping && format === "csv" ? mappingFromRoles(roles, mapping) : null;
+
+  /** Abandon this file and everything derived from it, back to an empty page. */
+  const startAgain = () => {
+    previewRun.current?.abort();
+    setFile(null);
+    setFileInputKey((n) => n + 1);
+    setAccountId("");
+    setRoles({});
+    setDetected({});
+    reset();
+  };
+
+  const cancelPreview = () => {
+    previewRun.current?.abort();
+    previewRun.current = null;
+    setBusy(false);
+  };
 
   const onFile = async (f: File | null) => {
     setFile(f);
@@ -221,6 +242,24 @@ export function ImportPage() {
 
   const unchosen = (scan ?? []).filter((r) => (choices[r.value]?.mode ?? "") === "").length;
   const readyToRun = !!file && (multiAccount ? !!scan : !!accountId) && !busy;
+
+  /** What was understood from the file, stated before you are asked to act on it. */
+  const fileSummary = (() => {
+    const parts: string[] = [];
+    if (scan?.length) {
+      const rows = scan.reduce((n, a) => n + a.row_count, 0);
+      parts.push(`${rows.toLocaleString()} rows`);
+      const dates = [...scan.map((a) => a.first_date), ...scan.map((a) => a.last_date)]
+        .filter((d): d is string => Boolean(d))
+        .sort();
+      const [first, last] = [dates[0], dates[dates.length - 1]];
+      if (first && last) parts.push(`${formatDate(first)} – ${formatDate(last)}`);
+      parts.push(`${scan.length} account${scan.length === 1 ? "" : "s"}`);
+    } else if (sniff) {
+      parts.push(`${sniff.columns.length} columns`);
+    }
+    return parts.join(" · ");
+  })();
 
   /**
    * Everything the preview is computed from, as one comparable value.
@@ -424,6 +463,8 @@ export function ImportPage() {
         setFileInputKey((n) => n + 1);
         reset();
       } else {
+        const run = new AbortController();
+        previewRun.current = run;
         setPreview(
           await api.preview(
             file,
@@ -431,14 +472,19 @@ export function ImportPage() {
             format,
             csvMapping,
             accountAssignments,
+            run.signal,
           ),
         );
         setPreviewKey(ranWith);
         setDecisions({});
       }
     } catch (e) {
-      setError(e instanceof ApiError ? e.message : "Import failed");
+      // Calling off a preview is a decision, not a failure.
+      if (!(e instanceof DOMException && e.name === "AbortError")) {
+        setError(e instanceof ApiError ? e.message : "Import failed");
+      }
     } finally {
+      previewRun.current = null;
       setBusy(false);
     }
   };
@@ -450,37 +496,20 @@ export function ImportPage() {
       {result && <div className="notice">{result}</div>}
 
       <div className="card">
-        <div className="row">
-          {/* Only asked when the file cannot answer it. A statement that names its
-              own accounts is the common case, and being made to pick one first was
-              what hid multi-account import entirely. */}
-          {!multiAccount && (
-            <div className="field">
-              <label htmlFor="imp-account">Account</label>
-              <select
-                id="imp-account"
-                value={accountId}
-                onChange={(e) => setAccountId(e.target.value)}
-              >
-                <option value="">Choose account…</option>
-                {accounts.data?.map((a) => (
-                  <option key={a.id} value={a.id}>
-                    {a.name}
-                  </option>
-                ))}
-              </select>
-            </div>
-          )}
-          <div className="field">
-            <label htmlFor="imp-file">File (CSV, OFX or QFX)</label>
-            <input
-              key={fileInputKey}
-              id="imp-file"
-              type="file"
-              accept=".csv,.ofx,.qfx"
-              onChange={(e) => void onFile(e.target.files?.[0] ?? null)}
-            />
+        {/* Nothing but the file until there is one. Anything else on screen at this
+            point is a question asked before the only thing that can answer it. */}
+        {!file ? (
+          <DropZone key={fileInputKey} onFile={(f) => void onFile(f)} />
+        ) : (
+          <>
+        <div className="spread file-bar">
+          <div>
+            <strong>{file.name}</strong>
+            {fileSummary && <div className="muted">{fileSummary}</div>}
           </div>
+          <button type="button" className="btn btn-ghost" onClick={startAgain}>
+            Start again
+          </button>
         </div>
 
         {sniff && mapping && (
@@ -501,6 +530,31 @@ export function ImportPage() {
               }}
             />
           </>
+        )}
+
+        {/* Asked only once the file has been read and could not answer it — and
+            phrased as a consequence of that, with the way to correct a missed
+            account column pointed at rather than left to be discovered. */}
+        {!multiAccount && (
+          <div className="field" style={{ marginTop: 12 }}>
+            <label htmlFor="imp-account">These transactions all belong to</label>
+            <select
+              id="imp-account"
+              value={accountId}
+              onChange={(e) => setAccountId(e.target.value)}
+            >
+              <option value="">Choose account…</option>
+              {accounts.data?.map((a) => (
+                <option key={a.id} value={a.id}>
+                  {a.name}
+                </option>
+              ))}
+            </select>
+            <p className="muted" style={{ fontSize: 12, marginTop: 6 }}>
+              Nothing in this file says which account its rows are for. Pick one — or
+              if a column does say, mark it <strong>Account</strong> above.
+            </p>
+          </div>
         )}
 
         {multiAccount && (
@@ -585,6 +639,11 @@ export function ImportPage() {
           >
             {stale ? "Preview again" : "Preview"}
           </button>
+          {busy && previewRun.current && (
+            <button type="button" className="btn btn-ghost" onClick={cancelPreview}>
+              Cancel
+            </button>
+          )}
           <button
             className="btn"
             onClick={() => void run(true)}
@@ -596,6 +655,8 @@ export function ImportPage() {
               : "Import"}
           </button>
         </div>
+          </>
+        )}
       </div>
 
       {preview && (

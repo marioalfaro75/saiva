@@ -1103,3 +1103,41 @@ th.actions {
   padding: 1px 5px;
   border-radius: 4px;
 }
+
+/* ---- Import: the file is the only question until it is answered ---- */
+.dropzone {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+  padding: 40px 24px;
+  border: 2px dashed var(--border);
+  border-radius: var(--radius);
+  text-align: center;
+  transition: border-color 0.15s ease, background 0.15s ease;
+}
+.dropzone.over {
+  border-color: var(--accent-strong);
+  background: rgba(45, 212, 191, 0.06);
+}
+.dropzone-lead {
+  margin: 0;
+  font-size: 17px;
+  font-weight: 600;
+}
+.dropzone-note {
+  margin: 4px 0 0;
+  max-width: 46ch;
+  font-size: 13px;
+}
+/* The input is visually hidden but still focusable, so its label carries the ring. */
+.dropzone input:focus-visible + label,
+.dropzone label:focus-within {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+.file-bar {
+  padding-bottom: 12px;
+  margin-bottom: 4px;
+  border-bottom: 1px solid var(--border);
+}

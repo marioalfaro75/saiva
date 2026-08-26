@@ -79,21 +79,25 @@ const STUBS = {
 
 const csv = () => new File(["Date,Details,Amount,Acct\n"], "statement.csv", { type: "text/csv" });
 
-/** Picks an account and a file, then waits for the sniffed mapping to appear. */
+const chooseFile = () =>
+  fireEvent.change(screen.getByLabelText("Choose a file"), { target: { files: [csv()] } });
+
+/** Drops a file, then answers the account question the file could not. */
 async function startImport() {
   const view = renderApp(<ImportPage />);
-  await screen.findByRole("option", { name: "Everyday" });
-  fireEvent.change(screen.getByLabelText("Account"), { target: { value: "a1" } });
-  fireEvent.change(screen.getByLabelText(/^File/), { target: { files: [csv()] } });
+  chooseFile();
   await screen.findByText("What is in each column?");
+  // Asked only now, and only because this file names no accounts of its own.
+  fireEvent.change(screen.getByLabelText("These transactions all belong to"), {
+    target: { value: "a1" },
+  });
   return view;
 }
 
-/** Picks a file whose account column is recognised, so no account is chosen first. */
+/** A file whose account column is recognised, so the question never arises. */
 async function startMultiAccountImport() {
   const view = renderApp(<ImportPage />);
-  await screen.findByRole("option", { name: "Everyday" });
-  fireEvent.change(screen.getByLabelText(/^File/), { target: { files: [csv()] } });
+  chooseFile();
   await screen.findByText("What is in each column?");
   return view;
 }
@@ -145,7 +149,9 @@ describe("Import: a preview stops being an answer when the question changes", ()
 
   it("notices when the destination account changes", async () => {
     await preview();
-    fireEvent.change(screen.getByLabelText("Account"), { target: { value: "a2" } });
+    fireEvent.change(screen.getByLabelText("These transactions all belong to"), {
+      target: { value: "a2" },
+    });
     await expectStale();
   });
 
@@ -233,5 +239,59 @@ describe("Import on a phone", () => {
     const first = container.querySelectorAll(".stack-card")[0] as HTMLElement;
     expect(within(first).getByLabelText("Import Coles")).toBeChecked();
     expect(screen.getByRole("group", { name: "Sort by" })).toBeInTheDocument();
+  });
+});
+
+/**
+ * The page used to open with an account dropdown beside the file input, which reads
+ * as a form to fill in and puts the account question first — at the one moment
+ * nothing can answer it, since whether the file covers one account or names its own
+ * is not yet known.
+ */
+describe("Import before a file is chosen", () => {
+  beforeEach(() => stubApi(STUBS));
+
+  it("asks for the file and nothing else", () => {
+    renderApp(<ImportPage />);
+    expect(screen.getByLabelText("Choose a file")).toBeInTheDocument();
+    expect(screen.queryByLabelText(/belong to/)).toBeNull();
+    expect(screen.queryByRole("button", { name: /^Preview/ })).toBeNull();
+    expect(screen.queryByRole("button", { name: /^Import/ })).toBeNull();
+  });
+
+  it("says the account question may not arise at all", () => {
+    renderApp(<ImportPage />);
+    expect(screen.getByText(/you will not be asked to choose one/i)).toBeInTheDocument();
+  });
+
+  it("takes a dropped file the same way as a chosen one", async () => {
+    const { container } = renderApp(<ImportPage />);
+    const zone = container.querySelector(".dropzone") as HTMLElement;
+    fireEvent.drop(zone, { dataTransfer: { files: [csv()] } });
+    expect(await screen.findByText("What is in each column?")).toBeInTheDocument();
+  });
+});
+
+describe("Starting again", () => {
+  beforeEach(() => stubApi(STUBS));
+
+  it("puts the page back to asking for a file", async () => {
+    await startImport();
+    expect(screen.getByText("statement.csv")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Start again" }));
+
+    expect(screen.getByLabelText("Choose a file")).toBeInTheDocument();
+    expect(screen.queryByText("What is in each column?")).toBeNull();
+    expect(screen.queryByText("statement.csv")).toBeNull();
+  });
+
+  it("forgets the account that was chosen for the abandoned file", async () => {
+    await startImport();
+    fireEvent.click(screen.getByRole("button", { name: "Start again" }));
+    chooseFile();
+    await screen.findByText("What is in each column?");
+    // Carried over, the old choice would silently apply to a different file.
+    expect(screen.getByLabelText("These transactions all belong to")).toHaveValue("");
   });
 });
