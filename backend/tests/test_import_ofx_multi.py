@@ -107,3 +107,68 @@ def test_an_unclosed_acctfrom_still_yields_the_account() -> None:
     </STMTRS></STMTTRNRS></BANKMSGSRSV1></OFX>"""
     (txn,) = importers.parse_ofx(ofx)
     assert txn.account_value == "777666555"
+
+
+def _post(client, path, content, **data):
+    resp = client.post(
+        f"/api/imports/{path}",
+        files={"file": ("s.ofx", content, "application/x-ofx")},
+        data={"file_format": "ofx", **data},
+    )
+    return resp
+
+
+def test_committing_a_two_account_file_files_each_row_where_it_belongs(auth_client) -> None:
+    """The parser knew which account each transaction came from; the import did not.
+    `multi` was read off a CSV mapping column, which OFX has none of, so every row
+    fell through to the single chosen account — the merge this was meant to fix."""
+    import json
+
+    from conftest import create_account
+
+    savings = create_account(auth_client, "Savings", "savings")
+    card = create_account(auth_client, "Visa", "credit_card")
+    resp = _post(
+        auth_client,
+        "commit",
+        TWO_ACCOUNTS,
+        account_id="",
+        assignments=json.dumps(
+            [
+                {"value": "111222333", "account_id": savings["id"]},
+                {"value": "4111111111115263", "account_id": card["id"]},
+            ]
+        ),
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["added"] == 3
+
+    rows = auth_client.get("/api/transactions", params={"page_size": 50}).json()["items"]
+    by_account: dict[str, set[str]] = {}
+    for r in rows:
+        by_account.setdefault(r["account_name"], set()).add(r["raw_description"].split()[0])
+    assert by_account == {
+        "Savings": {"WOOLWORTHS", "SALARY"},
+        "Visa": {"NETFLIX"},
+    }
+
+
+def test_choosing_one_account_for_a_multi_account_file_is_refused(auth_client) -> None:
+    """Silently merging them is precisely the bug. Better to say so than to obey."""
+    from conftest import create_account
+
+    account = create_account(auth_client)
+    resp = _post(auth_client, "commit", TWO_ACCOUNTS, account_id=account["id"])
+    assert resp.status_code == 400
+    assert "covers 2 accounts" in resp.json()["detail"]
+
+
+def test_a_single_account_file_still_imports_where_it_is_told(auth_client) -> None:
+    """A statement carrying its own account number is not a reason to stop honouring
+    the account the user picked."""
+    from conftest import create_account
+
+    account = create_account(auth_client)
+    resp = _post(auth_client, "commit", ONE_ACCOUNT, account_id=account["id"])
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["added"] == 1

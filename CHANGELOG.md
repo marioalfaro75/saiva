@@ -6,6 +6,15 @@ All notable changes to Saiva are documented here. The project follows
 ## [Unreleased]
 
 ### Added
+- **The import page asks for a file, and nothing else.** It used to open with an
+  account dropdown beside the file input — a two-field form whose first question was
+  the one nobody can answer yet, since whether the file covers one account or names
+  its own is not known until it is read. Now there is a drop zone and a sentence
+  saying the account question may not arise at all. If it does, it is asked
+  afterwards, in context, as *"These transactions all belong to…"*.
+- **Start again**, to abandon a file and everything derived from it, and **Cancel**
+  while a preview is running. Importing has no cancel on purpose: the server finishes
+  regardless, so the button would be a lie.
 - **The import wizard reads a file instead of interrogating you.** It lists every
   column with the first few values from your own file and asks what each one is —
   Date, Description, Money in, Money out, Amount, Account, Balance or Ignore. An
@@ -36,7 +45,8 @@ All notable changes to Saiva are documented here. The project follows
 - **An OFX file covering more than one account no longer merges them.** Every
   transaction in the download was filed under whichever single account you picked,
   silently — a bank statement download routinely covers several. Each statement's
-  transactions now keep the account they came from.
+  transactions now keep the account they came from, and choosing a single account for
+  a file that covers several is refused rather than obeyed.
 - **Excel-mangled account numbers are flagged.** Opening a statement in Excel turns a
   long account number into something like `7.34364E+11`, losing its digits. The import
   still handles it, says what happened, and declines to remember a value that can
