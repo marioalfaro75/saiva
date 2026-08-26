@@ -1,5 +1,5 @@
 import { useQuery } from "@tanstack/react-query";
-import { useRef, useState } from "react";
+import { useMemo, useRef, useState } from "react";
 
 import { ApiError, api } from "../api/client";
 import type {
@@ -15,6 +15,12 @@ import { PHONE, useMediaQuery } from "../hooks/useMediaQuery";
 import { ColumnMapper } from "../import/ColumnMapper";
 import { DropZone } from "../import/DropZone";
 import { mappingFromRoles, rolesFromMapping, type Role, type Roles } from "../import/mapping";
+import {
+  openingSegment,
+  segmentsOf,
+  visible,
+  type SegmentId,
+} from "../import/segments";
 import { SortChips } from "../table/MobileControls";
 import { TABLE_MIN, TableWrap } from "../table/TableWrap";
 import { formatCents, formatDate } from "../format";
@@ -237,8 +243,15 @@ export function ImportPage() {
     });
 
   const scanTable = useTable(scan ?? [], SCAN_COLUMNS);
-  // Sorting by Status groups every possible duplicate together for review.
-  const previewTable = useTable(preview?.rows ?? [], PREVIEW_COLUMNS);
+
+  // The preview, split by what it wants from you. A re-import is thousands of rows
+  // that need nothing and a handful that need an answer; showing them as one list
+  // capped at 200 put the answerable ones out of reach entirely.
+  const segments = useMemo(() => segmentsOf(preview?.rows ?? []), [preview]);
+  const [segment, setSegment] = useState<SegmentId>("importing");
+  const shown = segments.find((x) => x.id === segment) ?? segments[1];
+  const { rows: segmentRows, hidden } = visible(shown);
+  const previewTable = useTable(segmentRows, PREVIEW_COLUMNS);
 
   const unchosen = (scan ?? []).filter((r) => (choices[r.value]?.mode ?? "") === "").length;
   const readyToRun = !!file && (multiAccount ? !!scan : !!accountId) && !busy;
@@ -465,18 +478,18 @@ export function ImportPage() {
       } else {
         const run = new AbortController();
         previewRun.current = run;
-        setPreview(
-          await api.preview(
-            file,
-            multiAccount ? "" : accountId,
-            format,
-            csvMapping,
-            accountAssignments,
-            run.signal,
-          ),
+        const fresh = await api.preview(
+          file,
+          multiAccount ? "" : accountId,
+          format,
+          csvMapping,
+          accountAssignments,
+          run.signal,
         );
+        setPreview(fresh);
         setPreviewKey(ranWith);
         setDecisions({});
+        setSegment(openingSegment(segmentsOf(fresh.rows)));
       }
     } catch (e) {
       // Calling off a preview is a decision, not a failure.
@@ -675,13 +688,32 @@ export function ImportPage() {
               {preview.probable_count > 0 && ` · ${preview.probable_count} to review`}
             </span>
           </div>
-          {preview.probable_count > 0 && (
+
+          {/* The counts above are the summary; these are the same counts made usable.
+              Opening on whichever wants an answer is what stops a re-import burying
+              its handful of ambiguous rows behind thousands that need nothing. */}
+          <div className="tabs" role="tablist" aria-label="Preview rows">
+            {segments.map((seg) => (
+              <button
+                key={seg.id}
+                type="button"
+                role="tab"
+                aria-selected={seg.id === segment}
+                className={`tab ${seg.id === segment ? "active" : ""}`}
+                onClick={() => setSegment(seg.id)}
+              >
+                {seg.label} ({seg.rows.length})
+              </button>
+            ))}
+          </div>
+
+          {shown.id === "review" && shown.rows.length > 0 && (
             <p className="muted" style={{ marginTop: 0 }}>
-              Rows marked <strong>Possible duplicate</strong> look like transactions you already
-              have — same amount, around the same date. They are left out by default; tick one to
-              import it anyway.
+              These look like transactions you already have — same amount, around the same
+              date. They are left out by default; tick one to import it anyway.
             </p>
           )}
+          {shown.rows.length === 0 && <p className="muted">{shown.empty}</p>}
           {preview.accounts.length > 0 && (
             <p className="muted" style={{ marginTop: 0 }}>
               {preview.accounts.map((a) => (
@@ -712,7 +744,7 @@ export function ImportPage() {
                 }
               />
               <ul className="stack-cards">
-                {previewTable.rows.slice(0, 200).map((r) => (
+                {previewTable.rows.map((r) => (
                   <li
                     className="stack-card"
                     key={r.row_index}
@@ -776,7 +808,7 @@ export function ImportPage() {
                   </tr>
                 </thead>
                 <tbody>
-                  {previewTable.rows.slice(0, 200).map((r) => (
+                  {previewTable.rows.map((r) => (
                     <tr key={r.row_index} style={{ opacity: willImport(r) ? 1 : 0.55 }}>
                       <td>{importBox(r)}</td>
                       <td className="muted">{formatDate(r.txn_date)}</td>
@@ -793,8 +825,13 @@ export function ImportPage() {
               </table>
             </TableWrap>
           )}
-          {preview.rows.length > 200 && (
-            <p className="muted">Showing the first 200 of {preview.rows.length} rows.</p>
+          {hidden > 0 && (
+            /* Only ever said of rows that want nothing from you — a segment that needs
+               a decision is never capped, so this cannot be hiding one. */
+            <p className="muted">
+              Showing {segmentRows.length} of {shown.rows.length} already imported. The
+              other {hidden} need no decision from you.
+            </p>
           )}
         </div>
       )}

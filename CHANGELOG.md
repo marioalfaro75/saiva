@@ -6,6 +6,22 @@ All notable changes to Saiva are documented here. The project follows
 ## [Unreleased]
 
 
+## [0.14.1] — 2026-08-26
+
+Patch release: the handful of rows an import wants you to look at were unreachable
+when the file was mostly duplicates.
+
+### Fixed
+- **The rows an import wants you to look at can now be reached.** Re-importing a
+  statement you already have is thousands of rows that need nothing and a handful
+  that look close enough to something existing to want a decision — and the preview
+  showed the first 200 rows of one long list, so those few were invisible. Sorting by
+  status was meant to be the way to them and is not, because the definite duplicates
+  sort ahead and there are thousands of them. The preview now separates what needs an
+  answer from what does not, opens on the former, and never holds back a row that
+  wants one. Rows you are only reading stay capped, and it says how many and of what.
+
+
 ## [0.14.0] — 2026-08-26
 
 The import page asks for a statement and nothing else, and works out the rest from
@@ -338,6 +354,7 @@ personal financial advice.
 - On the first GHCR publish, set the `saiva-api` / `saiva-web` packages to public
   (or `docker login ghcr.io` on the host) so image pulls are authorised.
 
+[0.14.1]: https://github.com/marioalfaro75/saiva/compare/v0.14.0...v0.14.1
 [0.14.0]: https://github.com/marioalfaro75/saiva/compare/v0.13.0...v0.14.0
 [0.13.0]: https://github.com/marioalfaro75/saiva/compare/v0.12.0...v0.13.0
 [0.12.0]: https://github.com/marioalfaro75/saiva/compare/v0.11.0...v0.12.0
