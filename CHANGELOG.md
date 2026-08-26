@@ -15,6 +15,22 @@ All notable changes to Saiva are documented here. The project follows
 - **Start again**, to abandon a file and everything derived from it, and **Cancel**
   while a preview is running. Importing has no cancel on purpose: the server finishes
   regardless, so the button would be a lie.
+
+### Fixed
+- **An OFX file covering more than one account no longer merges them.** Every
+  transaction in the download was filed under whichever single account you picked,
+  silently — a bank statement download routinely covers several. Each statement's
+  transactions now keep the account they came from, and choosing a single account for
+  a file that covers several is refused rather than obeyed.
+
+
+## [0.13.0] — 2026-08-26
+
+The import wizard reads a statement instead of interrogating you: it shows what is
+in each column and asks you to confirm, and a file that names its own accounts is
+mapped without being asked to choose one.
+
+### Added
 - **The import wizard reads a file instead of interrogating you.** It lists every
   column with the first few values from your own file and asks what each one is —
   Date, Description, Money in, Money out, Amount, Account, Balance or Ignore. An
@@ -42,11 +58,6 @@ All notable changes to Saiva are documented here. The project follows
   text contains commas is routinely mis-detected and then reads as a single column.
 
 ### Fixed
-- **An OFX file covering more than one account no longer merges them.** Every
-  transaction in the download was filed under whichever single account you picked,
-  silently — a bank statement download routinely covers several. Each statement's
-  transactions now keep the account they came from, and choosing a single account for
-  a file that covers several is refused rather than obeyed.
 - **Excel-mangled account numbers are flagged.** Opening a statement in Excel turns a
   long account number into something like `7.34364E+11`, losing its digits. The import
   still handles it, says what happened, and declines to remember a value that can
@@ -321,6 +332,7 @@ personal financial advice.
 - On the first GHCR publish, set the `saiva-api` / `saiva-web` packages to public
   (or `docker login ghcr.io` on the host) so image pulls are authorised.
 
+[0.13.0]: https://github.com/marioalfaro75/saiva/compare/v0.12.0...v0.13.0
 [0.12.0]: https://github.com/marioalfaro75/saiva/compare/v0.11.0...v0.12.0
 [0.11.0]: https://github.com/marioalfaro75/saiva/compare/v0.10.1...v0.11.0
 [0.10.1]: https://github.com/marioalfaro75/saiva/compare/v0.10.0...v0.10.1
