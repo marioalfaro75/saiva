@@ -13,9 +13,19 @@ Runs in a container, HTTPS‑only.
 ## Features
 
 **Accounts & import**
-- File import — **CSV** (guided column mapping) and **OFX/QFX** — including statements
-  that **cover several accounts** (map each account‑column value to an account, or create
-  one inline), with robust Australian date handling.
+- File import — **CSV** and **OFX/QFX**. Saiva shows what is in each column, with the
+  first few values from your own file, and asks you to confirm — so an unfamiliar header
+  is no obstacle and nothing is left out without saying so. What it works out is
+  remembered per shape of file, and still shown every time, so a bank adding a column is
+  noticed rather than absorbed.
+- **Statements covering several accounts** are handled without being asked to pick one:
+  a CSV column of account numbers, or an OFX download carrying several statements, is
+  recognised and each account matched to yours — or created inline. Each one is shown
+  with its rows, date range and closing balance, because a bare account number tells
+  you nothing.
+- **Australian dates by default**, and it says so against a real value from your file:
+  `01/07/2025` parses either way round, so the wrong assumption would file a year of
+  transactions into the wrong months without a single row failing.
 - **Duplicate‑proof imports** — overlapping date ranges never double up: matching uses the
   bank's own transaction id where present, then exact matches counted by occurrence, then
   near matches (re‑dated or re‑worded rows) flagged for review. Genuine repeat purchases
