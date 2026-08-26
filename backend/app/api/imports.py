@@ -282,10 +282,42 @@ def _decide(
     return out
 
 
+def _named_accounts(parsed: list[importers.ParsedTxn]) -> set[str]:
+    """The accounts the file itself names.
+
+    Read from the parsed rows rather than from a CSV mapping column, because OFX says
+    it a different way — one statement per account — and keying off the column meant
+    every OFX transaction fell through to the single chosen account no matter which
+    statement it came from.
+    """
+    return {v for p in parsed if (v := (p.account_value or "").strip())}
+
+
+def _import_mode(named: set[str], account_id: str | None) -> bool:
+    """Whether to file rows by what the file says, rather than into one chosen account.
+
+    Naming an account explicitly wins — a single-account statement that happens to
+    carry its own number should still import where it is told. What is refused is the
+    contradiction: choosing one account for a file covering several is how every
+    statement in the file used to end up merged into one, silently.
+    """
+    if not named:
+        return False
+    if not account_id:
+        return True
+    if len(named) > 1:
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            f"This file covers {len(named)} accounts. Map each one instead of "
+            "choosing a single account for all of them.",
+        )
+    return False
+
+
 def _resolver(
-    mapping: schemas.CsvMapping | None, targets: dict[str, _Target], single: _Target
+    multi: bool, targets: dict[str, _Target], single: _Target
 ) -> Callable[[importers.ParsedTxn], _Target]:
-    if mapping is None or mapping.account_col is None:
+    if not multi:
         return lambda _p: single
     return lambda p: targets.get((p.account_value or "").strip(), _UNASSIGNED)
 
@@ -404,7 +436,13 @@ async def preview(
     db: Session = Depends(get_db),
 ) -> schemas.ImportPreviewOut:
     parsed_mapping = _parse_mapping(mapping)
-    multi = parsed_mapping is not None and parsed_mapping.account_col is not None
+    content = await _read(file)
+    try:
+        parsed = importers.parse_file(content, file_format, parsed_mapping)
+    except ValueError as exc:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc)) from exc
+
+    multi = _import_mode(_named_accounts(parsed), account_id)
     single = _Target(name="", skip=True)
     if not multi:
         if not account_id:
@@ -415,17 +453,11 @@ async def preview(
         db, user.household_id, _parse_assignments(assignments), create=False
     )
 
-    content = await _read(file)
-    try:
-        parsed = importers.parse_file(content, file_format, parsed_mapping)
-    except ValueError as exc:
-        raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc)) from exc
-
     categoriser = build_categoriser(db, user.household_id)
     names = _category_names(db, user.household_id)
 
     rows: list[schemas.PreviewRow] = []
-    resolve = _resolver(parsed_mapping, targets, single)
+    resolve = _resolver(multi, targets, single)
     for index, p, target, verdict in _decide(db, parsed, resolve):
         result = categoriser.categorise(p.raw_description, p.merchant)
         rows.append(
@@ -482,19 +514,19 @@ async def commit(
     db: Session = Depends(get_db),
 ) -> schemas.ImportCommitOut:
     parsed_mapping = _parse_mapping(mapping)
-    multi = parsed_mapping is not None and parsed_mapping.account_col is not None
+    content = await _read(file)
+    try:
+        parsed = importers.parse_file(content, file_format, parsed_mapping)
+    except ValueError as exc:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc)) from exc
+
+    multi = _import_mode(_named_accounts(parsed), account_id)
     single = _Target(name="", skip=True)
     if not multi:
         if not account_id:
             raise HTTPException(status.HTTP_400_BAD_REQUEST, "Choose an account")
         account = _account_or_404(db, account_id, user.household_id)
         single = _Target(name=account.name, account_id=account.id, dedup_key=account.id)
-
-    content = await _read(file)
-    try:
-        parsed = importers.parse_file(content, file_format, parsed_mapping)
-    except ValueError as exc:
-        raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc)) from exc
 
     # Creates any accounts the user asked for, so rows can be attributed below.
     account_assignments = _parse_assignments(assignments)
@@ -534,7 +566,7 @@ async def commit(
 
     added = 0
     skipped = 0
-    resolve = _resolver(parsed_mapping, targets, single)
+    resolve = _resolver(multi, targets, single)
     for index, p, target, verdict in _decide(db, parsed, resolve):
         if target.account_id is None or not _will_import(verdict, index, forced, skipped_rows):
             skipped += 1
