@@ -15,6 +15,13 @@ from .security import CSRF_COOKIE, CSRF_HEADER, csrf_valid
 settings = get_settings()
 SAFE_METHODS = {"GET", "HEAD", "OPTIONS"}
 
+# Endpoints authenticated by a header the caller must know, not by an ambient cookie.
+# CSRF exists because a browser attaches cookies to cross-site requests without being
+# asked; a request that must carry a secret header cannot be forged that way, and there
+# is nothing for the double-submit check to protect. Requiring it here only broke the
+# documented cron integration, which could never send a CSRF cookie it was never given.
+CSRF_EXEMPT_PATHS = frozenset({"/api/notifications/run"})
+
 app = FastAPI(
     title="Saiva API",
     version=settings.saiva_version,
@@ -41,6 +48,7 @@ async def security_middleware(
     if (
         request.method not in SAFE_METHODS
         and request.url.path.startswith("/api")
+        and request.url.path not in CSRF_EXEMPT_PATHS
         and not csrf_valid(request.cookies.get(CSRF_COOKIE), request.headers.get(CSRF_HEADER))
     ):
         return JSONResponse({"detail": "CSRF token missing or invalid"}, status_code=403)

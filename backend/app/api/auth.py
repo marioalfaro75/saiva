@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import datetime as dt
+import secrets
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from sqlalchemy import select
@@ -18,6 +19,10 @@ from ..services.seed import seed_household_defaults
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 settings = get_settings()
+
+# Hashed once at import from a value nobody knows, purely so the no-such-user path can
+# do the same work the real one does.
+_TIMING_EQUALISER = security.hash_password(secrets.token_urlsafe(32))
 
 
 def _client_ip(request: Request) -> str | None:
@@ -112,9 +117,14 @@ def login(
 ) -> schemas.MeOut:
     email = payload.email.lower()
     user = db.execute(select(models.User).where(models.User.email == email)).scalar_one_or_none()
-    if user is None or not user.is_active or not security.verify_password(
-        user.password_hash, payload.password
-    ):
+    if user is None or not user.is_active:
+        # Verify against a throwaway hash so an unknown address costs the same Argon2
+        # work as a known one. Without this the reply comes back immediately, and the
+        # gap is wide enough to enumerate which addresses have accounts.
+        security.verify_password(_TIMING_EQUALISER, payload.password)
+        audit.record(db, action="login_failed", ip=_client_ip(request), detail={"email": email})
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Invalid email or password")
+    if not security.verify_password(user.password_hash, payload.password):
         audit.record(db, action="login_failed", ip=_client_ip(request), detail={"email": email})
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Invalid email or password")
 

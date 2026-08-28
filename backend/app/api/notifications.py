@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import datetime as dt
+import hmac
 
 from fastapi import APIRouter, Depends, Header, HTTPException, status
 from sqlalchemy import select
@@ -137,7 +138,9 @@ def run(
     db: Session = Depends(get_db),
 ) -> schemas.NotificationRunOut:
     token = get_settings().notifications_token
-    if not token or x_notify_token != token:
+    # compare_digest, not !=: a plain comparison returns as soon as two bytes differ,
+    # so how long the rejection takes tells the caller how much of the prefix was right.
+    if not token or not hmac.compare_digest(x_notify_token or "", token):
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Invalid notifications token")
     totals = svc.run_all(db)
     return schemas.NotificationRunOut(**totals)
