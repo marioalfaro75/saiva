@@ -10,7 +10,10 @@ name: Security scan
 # the weekly run is the point — it finds the CVE published after the code merged.
 on:
   push:
-    branches: [main]
+    # Feature branches too, not only main: a scanner nobody has watched run is
+    # indistinguishable from one that is silently broken, and the point of finding
+    # something is to find it before it merges.
+    branches: [main, "claude/**"]
   pull_request:
     branches: [main]
   schedule:
