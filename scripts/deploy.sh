@@ -205,5 +205,5 @@ case "$url" in
     echo "        warning until you trust its root CA (see the README's LAN section)."
     ;;
 esac
-[ "$SEED" -eq 1 ] && echo "  Demo login: demo@saiva.app / demodemodemo"
+# The demo password is generated per install and printed by the seed step above.
 exit 0

@@ -82,7 +82,7 @@ and DB password), builds the images, starts the stack, and waits until it's heal
 
 ```bash
 make deploy            # equivalently: ./scripts/deploy.sh
-make deploy SEED=1     # also load demo data (login: demo@saiva.app / demodemodemo)
+make deploy SEED=1     # also load demo data (prints a generated demo password)
 ```
 
 <details>
@@ -234,7 +234,10 @@ npm install
 npm run dev                          # http://localhost:5173 (proxies /api → :8000)
 ```
 
-Demo login (after seeding): `demo@saiva.app` / `demodemodemo`.
+Demo login (after seeding): `demo@saiva.app`, with a password generated during
+seeding and printed once. Seeding is refused on an install that already has real
+accounts — the demo user is an owner, and adding one to a household in use would
+be indistinguishable from planting a way in.
 
 ## Testing & quality gates
 

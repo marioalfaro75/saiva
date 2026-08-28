@@ -438,3 +438,34 @@ def test_deleting_one_leg_releases_the_other(auth_client: TestClient) -> None:
     )
     assert survivor["is_transfer"] is False
     assert _summary(auth_client)["income_cents"] == 100000
+
+
+# ---------------------------------------------------------------- demo seeding
+
+
+def test_the_demo_password_is_generated_not_published() -> None:
+    """`make deploy SEED=1` is documented, and it created an owner-role account whose
+    password was the literal string "demodemodemo" — in this repository, in the README,
+    and printed by the deploy script. An owner can read every transaction and export
+    the household."""
+    from app.db import SessionLocal
+    from app.services import seed
+
+    with SessionLocal() as db:
+        _user, _household, first = seed.setup_demo(db)
+    with SessionLocal() as db:
+        _user, _household, second = seed.setup_demo(db)
+
+    assert first != "demodemodemo"
+    assert len(first) >= 12
+    assert first != second, "a fresh password each time, since the hash cannot be read back"
+
+
+def test_seeding_is_refused_once_real_accounts_exist(auth_client: TestClient) -> None:
+    """The flag is easy to pass again on a redeploy. Adding an owner to a household
+    already in use is indistinguishable from planting a way in."""
+    from app.db import SessionLocal
+    from app.services import seed
+
+    with SessionLocal() as db, pytest.raises(seed.DemoRefused):
+        seed.setup_demo(db)
