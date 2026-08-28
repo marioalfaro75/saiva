@@ -671,16 +671,45 @@ def _respond(
 
 
 def _check_endpoint(ai: models.AiSettings) -> None:
-    """Refuse to make the request if the configured endpoint points inside the network.
+    """Decide whether this configured endpoint may be requested at all.
 
-    Checked here rather than only when the setting is saved, because a value stored
-    before this rule existed — or by a future path that forgets — must not be able to
-    turn the server into a proxy for its own network.
+    Two rules meet here. For the ordinary modes the endpoint must be public, or the
+    server becomes a proxy for its own network — checked before every request rather
+    than only on save, because a value stored before that rule existed must not still
+    be fetched.
+
+    For `local_only` the rule inverts. The advisor page labels that mode "nothing
+    leaves your network", and it used to mean only that a different amount of context
+    was assembled — the data still went to whichever cloud provider was configured. It
+    now means what it says: the endpoint has to be on your own network, which is where
+    a self-hosted model runs, and a remote one is refused rather than quietly used.
     """
+    local = ai.privacy_mode == "local_only"
+    if local and not ai.base_url:
+        raise ProviderError(
+            "Privacy mode is 'Local only', which sends your data to a model running on "
+            "your own network — so it needs a Base URL pointing at one, for example "
+            "http://localhost:11434/v1 for Ollama. Choose another privacy mode to use a "
+            "cloud provider."
+        )
     try:
-        provider_url.check(ai.base_url)
+        provider_url.check(ai.base_url, allow_local=local)
     except provider_url.ProviderUrlError as exc:
         raise ProviderError(str(exc)) from exc
+    if local and _is_public(ai.base_url):
+        raise ProviderError(
+            "Privacy mode is 'Local only', but the Base URL points outside your network. "
+            "Point it at a model on your own machine, or choose another privacy mode."
+        )
+
+
+def _is_public(base_url: str | None) -> bool:
+    """Whether this endpoint is out on the internet. The inverse of the SSRF check."""
+    try:
+        provider_url.check(base_url)
+    except provider_url.ProviderUrlError:
+        return False
+    return True
 
 
 def chat(

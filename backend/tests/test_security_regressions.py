@@ -202,7 +202,10 @@ def test_the_check_runs_again_before_the_request(monkeypatch: pytest.MonkeyPatch
     the service boundary, since the API layer would refuse to store it now."""
     from app.services import advisor
 
-    stored = type("Ai", (), {"base_url": "https://169.254.169.254", "provider": "openai"})()
+    stored = type(
+        "Ai", (), {"base_url": "https://169.254.169.254", "provider": "openai",
+                   "privacy_mode": "full"}
+    )()
     with pytest.raises(advisor.ProviderError, match="inside your own network"):
         advisor._check_endpoint(stored)
 
@@ -211,4 +214,50 @@ def test_an_unset_base_url_is_fine() -> None:
     """Unset means the provider's own public endpoint, which is the common case."""
     from app.services import advisor
 
-    advisor._check_endpoint(type("Ai", (), {"base_url": None, "provider": "openai"})())
+    advisor._check_endpoint(
+        type("Ai", (), {"base_url": None, "provider": "openai", "privacy_mode": "full"})()
+    )
+
+
+# ---------------------------------------------------------------- local-only means local
+
+
+def _ai(mode: str, base_url: str | None):
+    return type("Ai", (), {"privacy_mode": mode, "base_url": base_url, "provider": "openai"})()
+
+
+def test_local_only_refuses_a_cloud_provider() -> None:
+    """The advisor page labels this mode "nothing leaves your network". It used to mean
+    only that a different amount of context was assembled — the data still went to
+    whichever cloud provider was configured. That made the interface state something
+    untrue about a family's financial records."""
+    from app.services import advisor
+
+    with pytest.raises(advisor.ProviderError, match="outside your network"):
+        advisor._check_endpoint(_ai("local_only", "https://api.openai.com/v1"))
+
+
+def test_local_only_requires_an_endpoint_to_be_local_to() -> None:
+    from app.services import advisor
+
+    with pytest.raises(advisor.ProviderError, match="Base URL"):
+        advisor._check_endpoint(_ai("local_only", None))
+
+
+def test_local_only_allows_a_model_on_your_own_machine() -> None:
+    """Ollama and the like run on loopback over plain http, which the SSRF rule refuses
+    for every other mode. This is the one place that exception belongs."""
+    from app.services import advisor
+
+    advisor._check_endpoint(_ai("local_only", "http://localhost:11434/v1"))
+    advisor._check_endpoint(_ai("local_only", "http://192.168.1.50:11434/v1"))
+
+
+def test_the_other_modes_still_refuse_a_local_endpoint() -> None:
+    """The local exception must not leak into modes that talk to the internet, or it
+    becomes the SSRF hole again by another name."""
+    from app.services import advisor
+
+    for mode in ("full", "aggregates"):
+        with pytest.raises(advisor.ProviderError):
+            advisor._check_endpoint(_ai(mode, "http://127.0.0.1:8080"))
