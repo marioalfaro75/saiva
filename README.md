@@ -287,6 +287,35 @@ tag is a mutable pointer its owner can move, which is exactly how the
 `tj-actions/changed-files` compromise (CVE-2025-30066) reached thousands of repositories.
 Dependabot understands SHA pins and keeps them current.
 
+## Rate limiting and the reverse proxy
+
+Login, first-run setup and password change share one per-caller ceiling; file
+import, the AI advisor and PDF reports each get their own, so exhausting one cannot
+lock a household out of signing in. Tune them with `RATE_LIMIT_LOGIN_PER_MINUTE`,
+`RATE_LIMIT_IMPORT_PER_MINUTE`, `RATE_LIMIT_AI_PER_MINUTE` and
+`RATE_LIMIT_REPORT_PER_MINUTE` (0 disables one).
+
+Behind a proxy, `request.client.host` is the proxy, so every visitor would share a
+bucket and every audit-log row would record the same address. `TRUSTED_PROXIES`
+(comma-separated IPs, CIDRs or hostnames) names the proxies whose
+`X-Forwarded-For` may be believed — the shipped Compose file sets it to `caddy`.
+Leave it empty when nothing fronts the API: an unset value means the header is
+ignored, which is the safe default, because a client can send that header itself.
+
+## Automatic updates and the Docker socket
+
+The in-app "Update now" button asks Watchtower to pull and recreate the app
+containers. Watchtower talks to a filtering socket proxy on an internal network
+rather than holding `/var/run/docker.sock` itself, which blocks the API sections it
+has no use for — exec, volumes, networks, build, swarm.
+
+Be clear about what that buys: updating a container means creating one, and
+anything that can create a container can create a privileged one and take the host.
+The proxy narrows the blast radius of a bug in Watchtower; it does not contain an
+attacker who reaches it. If you would rather not make that trade, delete the
+`watchtower` and `docker-socket-proxy` services and update by hand — `docker compose
+pull && docker compose up -d`. Everything works the same, minus the button.
+
 ### Repository settings to set by hand
 
 Two protections cannot be committed to the repo and must be set in GitHub's settings:

@@ -46,6 +46,25 @@ def looks_like_a_transfer(out: models.Transaction, inflow: models.Transaction) -
     return SequenceMatcher(None, a, b).ratio() >= DESCRIPTION_SIMILARITY
 
 
+def candidates(
+    inflows_by_day: dict[tuple[int, dt.date], list[models.Transaction]],
+    out: models.Transaction,
+    window_days: int,
+) -> list[models.Transaction]:
+    """Inflows that could possibly pair with this outflow.
+
+    Only the days inside the window, rather than every inflow that happens to share
+    an amount. Grouping on amount alone meant 600 outflows each walked 600 inflows
+    to reach the twenty or so in range, and a file crafted with tens of thousands of
+    identical amounts turned that into an import that never finished.
+    """
+    amount = abs(out.amount_cents)
+    found: list[models.Transaction] = []
+    for offset in range(-window_days, window_days + 1):
+        found.extend(inflows_by_day.get((amount, out.txn_date + dt.timedelta(days=offset)), ()))
+    return found
+
+
 def detect_transfers(
     db: Session,
     household_id: str,
@@ -70,39 +89,43 @@ def detect_transfers(
         )
     ).scalar_one_or_none()
 
-    by_amount: dict[int, list[models.Transaction]] = defaultdict(list)
+    # Bucketed on (amount, date) rather than amount alone. Only a few days either
+    # side can ever pair, so scanning every same-amount inflow for every outflow did
+    # quadratic work for no extra matches — and an import of tens of thousands of
+    # identical amounts turned that into a stall anyone could trigger with a file.
+    outflows: list[models.Transaction] = []
+    inflows_by_day: dict[tuple[int, dt.date], list[models.Transaction]] = defaultdict(list)
     for t in txns:
-        by_amount[abs(t.amount_cents)].append(t)
+        amount = abs(t.amount_cents)
+        if amount == 0:
+            continue
+        if t.amount_cents < 0:
+            outflows.append(t)
+        else:
+            inflows_by_day[(amount, t.txn_date)].append(t)
 
     used: set[str] = set()
     linked = 0
-    for amount, group in by_amount.items():
-        if amount == 0:
+    for out in outflows:
+        if out.id in used:
             continue
-        outflows = [t for t in group if t.amount_cents < 0]
-        inflows = [t for t in group if t.amount_cents > 0]
-        for out in outflows:
-            if out.id in used:
+        for inflow in candidates(inflows_by_day, out, window_days):
+            if inflow.id in used or inflow.account_id == out.account_id:
                 continue
-            for inflow in inflows:
-                if inflow.id in used or inflow.account_id == out.account_id:
-                    continue
-                if abs((inflow.txn_date - out.txn_date).days) > window_days:
-                    continue
-                if not looks_like_a_transfer(out, inflow):
-                    continue
-                group_id = uuid4().hex
-                for t in (out, inflow):
-                    t.is_transfer = True
-                    t.transfer_group_id = group_id
-                    # A locked category is a decision the user made explicitly.
-                    # categorise.py already refuses to overwrite one; this path did not,
-                    # so a category someone had pinned was replaced without a word.
-                    if transfer_category_id and not t.category_locked:
-                        t.category_id = transfer_category_id
-                used.update({out.id, inflow.id})
-                linked += 2
-                break
+            if not looks_like_a_transfer(out, inflow):
+                continue
+            group_id = uuid4().hex
+            for t in (out, inflow):
+                t.is_transfer = True
+                t.transfer_group_id = group_id
+                # A locked category is a decision the user made explicitly.
+                # categorise.py already refuses to overwrite one; this path did not,
+                # so a category someone had pinned was replaced without a word.
+                if transfer_category_id and not t.category_locked:
+                    t.category_id = transfer_category_id
+            used.update({out.id, inflow.id})
+            linked += 2
+            break
 
     db.commit()
     return linked

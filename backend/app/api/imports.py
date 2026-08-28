@@ -14,6 +14,7 @@ from sqlalchemy.orm import Session
 from .. import models, schemas
 from ..db import get_db
 from ..deps import get_current_user, require_writer
+from ..ratelimit import rate_limit_import
 from ..services import audit, dedup, importers
 from ..services.categorise import build_categoriser
 from ..services.transfers import detect_transfers
@@ -366,6 +367,7 @@ def _will_import(
 @router.post("/sniff", response_model=schemas.ImportSniffOut)
 async def sniff(
     file: UploadFile = File(...),
+    _rl: None = Depends(rate_limit_import),
     user: models.User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> schemas.ImportSniffOut:
@@ -389,6 +391,7 @@ async def sniff(
 @router.post("/accounts/scan", response_model=list[schemas.AccountScanRow])
 async def scan_accounts(
     file: UploadFile = File(...),
+    _rl: None = Depends(rate_limit_import),
     mapping: str | None = Form(None),
     file_format: str = Form("csv"),
     user: models.User = Depends(get_current_user),
@@ -443,6 +446,7 @@ async def scan_accounts(
 @router.post("/preview", response_model=schemas.ImportPreviewOut)
 async def preview(
     file: UploadFile = File(...),
+    _rl: None = Depends(rate_limit_import),
     account_id: str | None = Form(None),
     file_format: str = Form("csv"),
     mapping: str | None = Form(None),
@@ -519,6 +523,7 @@ async def preview(
 @router.post("/commit", response_model=schemas.ImportCommitOut)
 async def commit(
     file: UploadFile = File(...),
+    _rl: None = Depends(rate_limit_import),
     account_id: str | None = Form(None),
     file_format: str = Form("csv"),
     mapping: str | None = Form(None),

@@ -13,7 +13,13 @@ os.environ["DATABASE_URL"] = f"sqlite+pysqlite:///{tempfile.mkdtemp()}/test.db"
 os.environ["SECRET_KEY"] = "test-secret-key-not-for-production"
 os.environ["COOKIE_SECURE"] = "false"
 os.environ["CORS_ORIGINS"] = ""
+# Effectively off by default: a test that hammers an endpoint is testing that
+# endpoint, and a stray 429 would read as the feature being broken. The tests
+# that are about the limiter set their own ceilings.
 os.environ["RATE_LIMIT_LOGIN_PER_MINUTE"] = "1000"
+os.environ["RATE_LIMIT_IMPORT_PER_MINUTE"] = "10000"
+os.environ["RATE_LIMIT_AI_PER_MINUTE"] = "10000"
+os.environ["RATE_LIMIT_REPORT_PER_MINUTE"] = "10000"
 
 from collections.abc import Iterator  # noqa: E402
 
@@ -25,6 +31,14 @@ from app.db import Base, engine  # noqa: E402
 from app.main import app  # noqa: E402
 
 DEFAULT_PASSWORD = "password123!"
+
+
+@pytest.fixture(autouse=True)
+def _fresh_rate_limiter() -> None:
+    """The limiter is process-lifetime state; without this it leaks across tests."""
+    from app import ratelimit
+
+    ratelimit.reset()
 
 
 @pytest.fixture(autouse=True)

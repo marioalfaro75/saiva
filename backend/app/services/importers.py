@@ -7,6 +7,7 @@ import csv
 import datetime as dt
 import hashlib
 import io
+import math
 import re
 from dataclasses import dataclass
 from typing import Literal
@@ -35,6 +36,18 @@ class ParsedTxn:
     balance_cents: int | None = None
 
 
+# A statement row outside this range is not a typo, and an unbounded one stretched
+# every chart axis and every period the forecast walks over.
+MIN_TXN_DATE = dt.date(1900, 1, 1)
+MAX_TXN_DATE = dt.date(2100, 12, 31)
+
+
+def _in_range(value: dt.date) -> dt.date:
+    if not MIN_TXN_DATE <= value <= MAX_TXN_DATE:
+        raise ValueError(f"date {value} is outside {MIN_TXN_DATE}..{MAX_TXN_DATE}")
+    return value
+
+
 def parse_date(value: str, fmt: str | None = None, dayfirst: bool = True) -> dt.date:
     """Read a date, day first unless told otherwise.
 
@@ -45,13 +58,19 @@ def parse_date(value: str, fmt: str | None = None, dayfirst: bool = True) -> dt.
     """
     v = (value or "").strip()
     if fmt:
-        return dt.datetime.strptime(v, fmt).date()
+        return _in_range(dt.datetime.strptime(v, fmt).date())
     for f in DAY_FIRST_FORMATS if dayfirst else MONTH_FIRST_FORMATS:
         try:
-            return dt.datetime.strptime(v, f).date()
+            return _in_range(dt.datetime.strptime(v, f).date())
         except ValueError:
             continue
-    return dateparser.parse(v, dayfirst=dayfirst).date()
+    return _in_range(dateparser.parse(v, dayfirst=dayfirst).date())
+
+
+# A trillion dollars, in cents. Far beyond any household statement and far inside
+# the range of a 64-bit column, so the bound rejects nonsense without ever rejecting
+# a real transaction.
+MAX_AMOUNT_CENTS = 100_000_000_000_000
 
 
 def to_cents(value: str, decimal: str = ".") -> int:
@@ -67,8 +86,17 @@ def to_cents(value: str, decimal: str = ".") -> int:
     elif s.startswith("+"):
         s = s[1:]
     try:
-        cents = round(float(s) * 100)
+        amount = float(s)
     except ValueError:
+        return 0
+    # `float()` happily returns inf for "1e400" and nan for "nan", and round() then
+    # raises OverflowError/ValueError — a 500 from one cell of an uploaded file. A
+    # merely large finite value is no better: it parses, then overflows the column's
+    # integer on commit. Both are treated the way any other unreadable amount is.
+    if not math.isfinite(amount):
+        return 0
+    cents = round(amount * 100)
+    if abs(cents) > MAX_AMOUNT_CENTS:
         return 0
     return -cents if negative else cents
 

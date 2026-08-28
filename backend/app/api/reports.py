@@ -12,6 +12,7 @@ from sqlalchemy.orm import Session
 from .. import models, schemas
 from ..db import get_db
 from ..deps import get_current_user
+from ..ratelimit import rate_limit_report
 from ..services import reports as reports_service
 from ..services.periods import fy_bounds
 
@@ -49,6 +50,7 @@ def fy_years(
 @router.get("/fy")
 def fy_report_pdf(
     year: int | None = Query(default=None, ge=2000, le=2100),
+    _rl: None = Depends(rate_limit_report),
     user: models.User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> Response:

@@ -502,6 +502,12 @@ def split_txn(
             source="manual",
             notes=s.notes,
             split_parent_id=parent.id,
+            # Dashboard totals count split children and skip their parent, so a child
+            # that did not inherit these flags put an internal transfer back into
+            # income and expenses — splitting a transfer inflated both sides of the
+            # household's figures with money that never entered or left it.
+            is_transfer=parent.is_transfer,
+            transfer_group_id=parent.transfer_group_id,
             dedup_hash=dedup_hash(
                 parent.account_id, parent.txn_date, s.amount_cents,
                 f"{parent.raw_description}#split{i}",

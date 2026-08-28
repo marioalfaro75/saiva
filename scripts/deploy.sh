@@ -143,6 +143,19 @@ else
   set_env_var SAIVA_BIND_ADDR "127.0.0.1"
 fi
 
+# HSTS only where a browser can actually verify the certificate. Caddy's `internal`
+# CA is not in any trust store, and a non-zero max-age there turns the certificate
+# warning into a dead end with no way past it — on a LAN IP that may later belong to
+# a different machine entirely. An explicit 0 also clears a stale policy from a host
+# that used to serve HSTS.
+tls_mode="$(grep -E '^SAIVA_TLS=' .env | cut -d= -f2- || true)"
+if [ -n "$tls_mode" ] && [ "$tls_mode" != "internal" ]; then
+  set_env_var SAIVA_HSTS_MAX_AGE "31536000"
+  echo "  → HSTS enabled (publicly trusted certificate)"
+else
+  set_env_var SAIVA_HSTS_MAX_AGE "0"
+fi
+
 # 3. Build (or pull) and start.
 if [ "$PULL" -eq 1 ]; then
   echo "Pulling prebuilt images from GHCR and starting…"

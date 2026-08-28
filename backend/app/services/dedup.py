@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import datetime as dt
 import re
+from collections.abc import Iterator
 from dataclasses import dataclass
 from difflib import SequenceMatcher
 
@@ -31,6 +32,12 @@ DATE_WINDOW_DAYS = 3
 # is already identical and the date within the window by this point, so this only
 # has to establish "plausibly the same merchant".
 SIMILARITY_THRESHOLD = 0.82
+
+# Backstop for the near-match scan. Bucketing by (amount, date) already keeps this
+# small for real statements; a file crafted to put tens of thousands of rows in one
+# bucket stops being matched exhaustively rather than stalling the import. Giving up
+# early can only report a row as new, never as a duplicate it is not.
+MAX_NEAR_MATCH_CANDIDATES = 500
 
 NEW = "new"
 DUPLICATE_PROVIDER = "duplicate_provider"
@@ -69,6 +76,19 @@ class Candidate:
     dedup_hash: str
     provider_txn_id: str | None
     consumed: bool = False
+    _norm: str | None = None
+
+    @property
+    def norm(self) -> str:
+        """Normalised description, computed once.
+
+        It used to be recomputed for every incoming row that reached the near-match
+        tier, so importing n rows against n stored rows of the same amount ran the
+        regex pipeline n² times before SequenceMatcher had even started.
+        """
+        if self._norm is None:
+            self._norm = fuzzy_norm(self.raw_description)
+        return self._norm
 
 
 @dataclass
@@ -121,12 +141,30 @@ class DuplicateMatcher:
     def __init__(self, existing: list[Candidate]) -> None:
         self._by_provider: dict[str, list[Candidate]] = {}
         self._by_hash: dict[str, list[Candidate]] = {}
-        self._by_amount: dict[int, list[Candidate]] = {}
+        # Keyed on (amount, date), not amount alone. The near-match tier only ever
+        # considers candidates inside the date window, so bucketing on amount alone
+        # meant walking every stored transaction that shared an amount — a file of
+        # 50,000 identical $4.50 rows against a history of the same made the import
+        # quadratic, which is a denial of service anyone with an upload form can run.
+        self._by_amount_and_date: dict[tuple[int, dt.date], list[Candidate]] = {}
         for c in existing:
             if c.provider_txn_id:
                 self._by_provider.setdefault(c.provider_txn_id, []).append(c)
             self._by_hash.setdefault(c.dedup_hash, []).append(c)
-            self._by_amount.setdefault(c.amount_cents, []).append(c)
+            self._by_amount_and_date.setdefault((c.amount_cents, c.txn_date), []).append(c)
+
+    def _window(self, p: ParsedTxn) -> Iterator[Candidate]:
+        """Unconsumed candidates with this amount, within the date window."""
+        seen = 0
+        for offset in range(-DATE_WINDOW_DAYS, DATE_WINDOW_DAYS + 1):
+            day = p.txn_date + dt.timedelta(days=offset)
+            for c in self._by_amount_and_date.get((p.amount_cents, day), ()):
+                if c.consumed:
+                    continue
+                seen += 1
+                if seen > MAX_NEAR_MATCH_CANDIDATES:
+                    return
+                yield c
 
     @staticmethod
     def _take(bucket: list[Candidate] | None) -> Candidate | None:
@@ -151,10 +189,8 @@ class DuplicateMatcher:
         best: Candidate | None = None
         best_score = 0.0
         norm = fuzzy_norm(p.raw_description)
-        for c in self._by_amount.get(p.amount_cents, ()):
-            if c.consumed or abs((c.txn_date - p.txn_date).days) > DATE_WINDOW_DAYS:
-                continue
-            score = similarity(norm, fuzzy_norm(c.raw_description))
+        for c in self._window(p):
+            score = similarity(norm, c.norm)
             if score > best_score:
                 best, best_score = c, score
         if best is not None and best_score >= SIMILARITY_THRESHOLD:

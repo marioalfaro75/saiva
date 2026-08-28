@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session
 from .. import models, schemas
 from ..db import get_db
 from ..deps import get_current_user, optional_period, require_writer
+from ..ratelimit import rate_limit_ai
 from ..services import advisor, crypto, periods, provider_url
 from ..services import audit as audit_service
 
@@ -62,6 +63,7 @@ def update_ai_settings(
 @router.post("/chat", response_model=schemas.ChatReply)
 def chat(
     payload: schemas.ChatRequest,
+    _rl: None = Depends(rate_limit_ai),
     window: periods.ResolvedPeriod | None = Depends(optional_period),
     user: models.User = Depends(require_writer),
     db: Session = Depends(get_db),
@@ -101,6 +103,7 @@ def _require_configured(db: Session, household_id: str) -> models.AiSettings:
 @router.get("/models", response_model=list[schemas.AiModelOut])
 def list_ai_models(
     provider: str | None = None,
+    _rl: None = Depends(rate_limit_ai),
     user: models.User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> list[schemas.AiModelOut]:
@@ -121,7 +124,9 @@ def list_ai_models(
 
 @router.post("/test", response_model=schemas.MessageOut)
 def test_ai_connection(
-    user: models.User = Depends(require_writer), db: Session = Depends(get_db)
+    _rl: None = Depends(rate_limit_ai),
+    user: models.User = Depends(require_writer),
+    db: Session = Depends(get_db),
 ) -> schemas.MessageOut:
     ai = _require_configured(db, user.household_id)
     try:

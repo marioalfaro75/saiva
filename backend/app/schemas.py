@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 import datetime as dt
-from typing import Literal
+from typing import Annotated, Literal
 
-from pydantic import BaseModel, ConfigDict, EmailStr, Field
+from pydantic import AfterValidator, BaseModel, ConfigDict, EmailStr, Field
 
 # --------------------------------------------------------------------------- auth
 
@@ -276,6 +276,26 @@ class AccountAssignment(BaseModel):
     skip: bool = False
 
 
+# A transaction outside this range is not a date anyone typed by mistake. Unbounded,
+# a single row dated 9999-12-31 stretched every chart axis and every period the
+# forecast walks, and one dated 0001-01-01 did the same in the other direction.
+# Mirrors importers.MAX_AMOUNT_CENTS: an amount a caller supplies directly needs
+# the same ceiling as one read out of a file, or the column overflows on commit.
+MAX_AMOUNT_CENTS = 100_000_000_000_000
+
+MIN_TXN_DATE = dt.date(1900, 1, 1)
+MAX_TXN_DATE = dt.date(2100, 12, 31)
+
+
+def _bounded_date(value: dt.date) -> dt.date:
+    if not MIN_TXN_DATE <= value <= MAX_TXN_DATE:
+        raise ValueError(f"date must be between {MIN_TXN_DATE} and {MAX_TXN_DATE}")
+    return value
+
+
+BoundedDate = Annotated[dt.date, AfterValidator(_bounded_date)]
+
+
 class PreviewRow(BaseModel):
     row_index: int  # position in the parsed file; how commit decisions refer to a row
     txn_date: dt.date
@@ -409,8 +429,8 @@ class TxnGroupsOut(BaseModel):
 
 class ManualTxnCreate(BaseModel):
     account_id: str
-    txn_date: dt.date
-    amount_cents: int
+    txn_date: BoundedDate
+    amount_cents: int = Field(ge=-MAX_AMOUNT_CENTS, le=MAX_AMOUNT_CENTS)
     description: str = Field(min_length=1, max_length=400)
     category_id: str | None = None
     notes: str | None = None
@@ -418,7 +438,7 @@ class ManualTxnCreate(BaseModel):
 
 
 class SplitItem(BaseModel):
-    amount_cents: int
+    amount_cents: int = Field(ge=-MAX_AMOUNT_CENTS, le=MAX_AMOUNT_CENTS)
     category_id: str | None = None
     notes: str | None = None
 

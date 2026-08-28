@@ -10,6 +10,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from .. import models, schemas, security
+from ..clientip import client_ip
 from ..config import get_settings
 from ..db import get_db
 from ..deps import get_current_user
@@ -26,7 +27,10 @@ _TIMING_EQUALISER = security.hash_password(secrets.token_urlsafe(32))
 
 
 def _client_ip(request: Request) -> str | None:
-    return request.client.host if request.client else None
+    # Resolved through the trusted-proxy rules rather than read straight off the
+    # socket: behind Caddy the peer is always Caddy, so every audit row used to
+    # record one container IP and told you nothing about who did the thing.
+    return client_ip(request)
 
 
 def _set_session_cookie(response: Response, token: str) -> None:
@@ -156,6 +160,7 @@ def change_password(
     payload: schemas.PasswordChange,
     request: Request,
     response: Response,
+    _rl: None = Depends(rate_limit_login),
     user: models.User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> schemas.MessageOut:

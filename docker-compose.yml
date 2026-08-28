@@ -29,6 +29,11 @@ services:
       ENVIRONMENT: ${ENVIRONMENT:-production}
       COOKIE_SECURE: ${COOKIE_SECURE:-true}
       CORS_ORIGINS: ${CORS_ORIGINS:-}
+      # Caddy is the only thing that can reach the API (it is `expose`d, not
+      # published), so its X-Forwarded-For is worth believing. Without this the
+      # rate limiter and the audit log both see Caddy's container IP and nothing
+      # else — one shared bucket for every visitor, and a useless audit trail.
+      TRUSTED_PROXIES: ${TRUSTED_PROXIES:-caddy}
     depends_on:
       db:
         condition: service_healthy
@@ -53,6 +58,8 @@ services:
       SAIVA_SITE_ADDRESS: ${SAIVA_SITE_ADDRESS:-localhost}
       SAIVA_SITE_HOST: ${SAIVA_SITE_HOST:-localhost}
       SAIVA_TLS: ${SAIVA_TLS:-internal}
+      # 0 unless a publicly trusted certificate is in use — see infra/Caddyfile.
+      SAIVA_HSTS_MAX_AGE: ${SAIVA_HSTS_MAX_AGE:-0}
     # Bound to the loopback address unless a site address was chosen, because Docker
     # publishes on 0.0.0.0 by default and inserts NAT rules that bypass the host
     # firewall. Caddy routes on the Host header, not on the listening address, so a

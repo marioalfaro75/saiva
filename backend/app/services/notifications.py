@@ -237,6 +237,42 @@ def _alerts_body(notes: list[models.Notification]) -> str:
     return "\n".join(lines)
 
 
+# How far back an un-emailed alert is still worth an email. Past this it is history,
+# and the app's own feed is the right place to read it.
+EMAIL_BACKLOG_DAYS = 7
+# Ceiling on one email's contents, so a first run after a quiet week is a digest
+# rather than a wall.
+MAX_ALERTS_PER_EMAIL = 25
+
+
+def _pending_email(
+    db: Session, household_id: str, today: dt.date
+) -> list[models.Notification]:
+    """Alerts that still need emailing — not merely the ones created just now.
+
+    `generate` is idempotent on `key`, and the notifications feed calls it on every
+    read. So whenever a browser tab loaded before the cron ran, the row already
+    existed, `generate` returned nothing new, and the alert was never emailed to
+    anybody. The condition that matters is "has this been sent", which is what
+    `emailed_at` records; anything already read in the app is dropped, since the
+    household has plainly seen it.
+    """
+    cutoff = dt.datetime.combine(today - dt.timedelta(days=EMAIL_BACKLOG_DAYS), dt.time.min)
+    rows = db.execute(
+        select(models.Notification)
+        .where(
+            models.Notification.household_id == household_id,
+            models.Notification.emailed_at.is_(None),
+            models.Notification.read_at.is_(None),
+            models.Notification.severity.in_(("alert", "warn")),
+            models.Notification.created_at >= cutoff,
+        )
+        .order_by(models.Notification.created_at.desc())
+        .limit(MAX_ALERTS_PER_EMAIL)
+    ).scalars().all()
+    return list(rows)
+
+
 def run_for_household(
     db: Session, household: models.Household, today: dt.date | None = None
 ) -> dict[str, int]:
@@ -249,7 +285,7 @@ def run_for_household(
 
     if ns.email_enabled and get_settings().smtp_configured:
         recipients = _recipients(db, household.id)
-        urgent = [n for n in created if n.severity in ("alert", "warn") and n.emailed_at is None]
+        urgent = _pending_email(db, household.id, today)
         if urgent and recipients and send_email(
             recipients, f"{len(urgent)} new alert(s) from Saiva", _alerts_body(urgent)
         ):

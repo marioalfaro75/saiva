@@ -27,12 +27,19 @@
 		reverse_proxy web:8080
 	}
 
-	# Defense-in-depth headers (the API sets its own too). No HSTS here on purpose: with the
-	# internal CA it would block the browser's "proceed" on the untrusted-cert warning.
+	# Defense-in-depth headers (the API sets its own too).
+	#
+	# HSTS is set from SAIVA_HSTS_MAX_AGE, which deploy.sh derives from the certificate
+	# actually in use. It defaults to 0 — meaning "forget any HSTS for this host" —
+	# because with the internal CA a non-zero max-age turns the untrusted-certificate
+	# warning into a dead end with no "proceed" button, on a LAN address that may later
+	# belong to something else entirely. With a real certificate from Let's Encrypt the
+	# deploy sets a year, which is what stops a downgrade to plain HTTP.
 	header {
 		X-Content-Type-Options "nosniff"
 		X-Frame-Options "DENY"
 		Referrer-Policy "strict-origin-when-cross-origin"
+		Strict-Transport-Security "max-age={$SAIVA_HSTS_MAX_AGE:0}"
 		-Server
 	}
 }

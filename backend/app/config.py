@@ -25,7 +25,18 @@ class Settings(BaseSettings):
     # Additional allowed CORS origins (comma-separated). Empty in same-origin deployments.
     cors_origins: str = ""
 
+    # Per-caller, per-minute ceilings. 0 disables one. Credentials cover login,
+    # first-run setup and password change; the rest are the endpoints that cost the
+    # most per request, which is what makes them worth sending in a loop.
     rate_limit_login_per_minute: int = 10
+    rate_limit_import_per_minute: int = 20
+    rate_limit_ai_per_minute: int = 20
+    rate_limit_report_per_minute: int = 30
+
+    # Reverse proxies whose X-Forwarded-For may be believed: comma-separated IPs,
+    # CIDRs, or hostnames (Compose service names resolve here). Empty means trust
+    # nothing and use the peer address, which is correct when nothing fronts the API.
+    trusted_proxies: str = ""
 
     default_currency: str = "AUD"
     default_locale: str = "en-AU"
