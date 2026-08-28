@@ -69,6 +69,10 @@ def _backup_database() -> None:
         env["PGPASSWORD"] = engine.url.password
 
     print(f"Saiva: backing up database to {gz_path} before migrating…", flush=True)
+    # nosemgrep: python.lang.security.audit.dangerous-subprocess-use-tainted-env-args
+    # Semgrep flags DATABASE_URL as user-controlled. It is operator-controlled, and
+    # more to the point `_pg_dump_cmd` returns a fixed argv list with no shell, so
+    # each value is one argument and cannot become a command.
     result = subprocess.run(  # nosec B603 B607 - fixed argv, no shell; pg_dump via PATH
         _pg_dump_cmd(engine.url, sql_path),
         env=env,

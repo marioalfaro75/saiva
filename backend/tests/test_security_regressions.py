@@ -530,3 +530,45 @@ def test_a_report_filename_cannot_escape_its_header() -> None:
         out = _ascii_filename(hostile)
         assert '"' not in out and "\n" not in out and "\\" not in out
     assert _ascii_filename("FY2025–26 Report") == "FY2025-26_Report"
+
+
+# --- Semgrep findings, triaged ---------------------------------------------------
+
+
+def test_the_update_check_refuses_a_repo_that_is_not_owner_slash_name() -> None:
+    """`repo` is interpolated into a URL path, so its shape decides the URL.
+
+    Not reachable from a request — it comes from UPDATE_REPO in the environment —
+    but a value with traversal in it silently points the update check somewhere
+    other than the release it claims to read.
+    """
+    from app.services import updates
+
+    for bad in ("../../evil", "owner/name/../../x", "https://evil.example.com", "", "owner"):
+        assert updates._safe_repo(bad) is None, bad
+    assert updates._safe_repo("marioalfaro75/saiva") == "marioalfaro75/saiva"
+
+
+def test_the_watchtower_trigger_refuses_a_non_http_url() -> None:
+    """It sends a bearer token, and urllib honours file:// among other things.
+
+    One wrong line in a .env either reads a local file or hands the update token to
+    somebody else's server; neither should be possible rather than merely unlikely.
+    """
+    from app.services import updates
+
+    for bad in ("file:///etc/passwd", "gopher://x", "ftp://x/y", "", "not a url"):
+        assert updates._http_url(bad) is None, bad
+    assert updates._http_url("http://watchtower:8080") == "http://watchtower:8080"
+    assert updates._http_url("https://example.com") == "https://example.com"
+
+
+def test_a_bad_watchtower_url_sends_nothing_at_all() -> None:
+    """The guard has to stop the request, not just fail to build a good one."""
+    from unittest.mock import patch
+
+    from app.services import updates
+
+    with patch("urllib.request.urlopen") as opened:
+        updates.trigger_watchtower("file:///etc/passwd", "secret-token")
+        assert not opened.called, "a file:// URL still reached urlopen"

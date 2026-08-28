@@ -5,7 +5,9 @@ touches the Docker socket itself)."""
 from __future__ import annotations
 
 import json
+import re
 import time
+import urllib.parse
 import urllib.request
 from dataclasses import dataclass
 
@@ -35,6 +37,31 @@ def is_newer(latest: str, current: str) -> bool:
     return latest_v > current_v
 
 
+# Neither of these URLs is settable through the API — both come from the process
+# environment — so nothing here is reachable by a request. What these guards remove
+# is the quieter failure: `urllib` honours `file://`, and `trigger_watchtower` sends
+# a bearer token to whatever WATCHTOWER_URL says, so one wrong line in a .env either
+# reads a local file or hands the update token to someone else's server.
+_REPO_NAME = re.compile(r"^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$")
+
+
+def _safe_repo(repo: str) -> str | None:
+    """`owner/name` and nothing else — no path traversal into another URL."""
+    repo = (repo or "").strip()
+    return repo if _REPO_NAME.match(repo) else None
+
+
+def _http_url(raw: str) -> str | None:
+    """An http(s) URL with a host, or nothing."""
+    try:
+        parsed = urllib.parse.urlparse(raw)
+    except ValueError:
+        return None
+    if parsed.scheme not in ("http", "https") or not parsed.netloc:
+        return None
+    return raw
+
+
 @dataclass
 class Release:
     tag: str
@@ -45,8 +72,12 @@ class Release:
 
 def fetch_latest_release(repo: str) -> Release | None:
     """Fetch the latest GitHub release for `repo`. Returns None on any failure."""
+    safe = _safe_repo(repo)
+    if safe is None:
+        return None
+    # nosemgrep: python.lang.security.audit.dynamic-urllib-use-detected
     request = urllib.request.Request(
-        _GITHUB_LATEST.format(repo=repo),
+        _GITHUB_LATEST.format(repo=safe),
         headers={"Accept": "application/vnd.github+json", "User-Agent": "saiva-update-check"},
     )
     try:
@@ -79,8 +110,12 @@ def latest_release_cached(repo: str, force: bool = False) -> Release | None:
 
 def trigger_watchtower(base_url: str, token: str) -> None:
     """Ask Watchtower to pull + recreate the labelled containers (api/web)."""
+    safe = _http_url(base_url.rstrip("/"))
+    if safe is None:
+        return
+    # nosemgrep: python.lang.security.audit.dynamic-urllib-use-detected
     request = urllib.request.Request(
-        f"{base_url.rstrip('/')}/v1/update",
+        f"{safe}/v1/update",
         method="POST",
         headers={"Authorization": f"Bearer {token}"},
     )

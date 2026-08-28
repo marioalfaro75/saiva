@@ -256,8 +256,10 @@ top of the commands above it adds a Postgres migration check (`alembic upgrade h
 `alembic check`), bandit SAST, a gitleaks secret scan, and **blocking** dependency
 audits (`pip-audit`, `npm audit --audit-level=high`).
 
-[`.github/workflows/security-scan.yml`](.github/workflows/security-scan.yml) runs Semgrep
-and Trivy on every PR and weekly, reporting into the repository's Security tab. It is
+[`.github/workflows/security-scan.yml`](.github/workflows/security-scan.yml) runs Semgrep,
+Trivy and hadolint on every PR and weekly, reporting into the repository's Security tab
+and printing findings to the run log — a scan whose results live only in a SARIF file
+is one nobody reads. Trivy also emits a CycloneDX SBOM, kept with the run for 90 days. It is
 separate from the gates on purpose: those scanners re-fetch their rules and CVE data on
 every run, so their verdict on an unchanged commit changes over time, and a tag that
 built on Tuesday should not fail on Wednesday for a reason nobody introduced. The weekly
