@@ -1,6 +1,7 @@
-/// <reference types="vitest" />
 import react from "@vitejs/plugin-react";
-import { defineConfig } from "vite";
+// vitest 4 no longer merges its `test` block into vite's config type, so the
+// config helper has to come from vitest rather than vite.
+import { defineConfig } from "vitest/config";
 
 export default defineConfig({
   plugins: [react()],

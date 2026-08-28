@@ -3,7 +3,8 @@
 FROM python:3.11-slim-bookworm AS base
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
-    PIP_NO_CACHE_DIR=1
+    PIP_NO_CACHE_DIR=1 \
+    PYTHONPATH=/app
 WORKDIR /app
 
 ARG SAIVA_VERSION=dev
@@ -26,11 +27,19 @@ RUN . /etc/os-release \
  && apt-get purge -y curl && apt-get autoremove -y \
  && rm -rf /var/lib/apt/lists/*
 
+# Dependencies come from the hash-pinned lockfile, not from the ranges in
+# pyproject.toml: `--require-hashes` means the build gets exactly the artefacts
+# recorded in requirements.lock or it fails outright, so a compromised release
+# published inside one of those ranges cannot walk into the image on a rebuild.
+# Copied on its own line so the layer caches until the lockfile itself changes.
+COPY requirements.lock ./
+RUN pip install --upgrade pip \
+ && pip install --require-hashes --no-deps -r requirements.lock
+
 COPY pyproject.toml ./
 COPY app ./app
 COPY alembic.ini ./
 COPY migrations ./migrations
-RUN pip install --upgrade pip && pip install .
 
 # Least privilege: run as a non-root user. /backups holds pre-migration dumps and
 # is created here so a named volume mounted there inherits appuser ownership.

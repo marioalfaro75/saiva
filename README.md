@@ -249,9 +249,52 @@ cd backend && ruff check . && mypy app && pytest --cov=app
 cd frontend && npm run lint && npm run build && npm run test
 ```
 
-CI ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)) runs the same gates plus a
-Postgres migration check (`alembic upgrade head` + `alembic check`) and security scans
-(bandit SAST, pip‑audit, gitleaks secret scan) on every push/PR.
+The gates themselves live in [`.github/workflows/checks.yml`](.github/workflows/checks.yml)
+as a reusable workflow, so every path that publishes an image — the `edge` build on
+`main`, a `v*` tag, and the manual "Cut release" — runs exactly the same jobs first. On
+top of the commands above it adds a Postgres migration check (`alembic upgrade head` +
+`alembic check`), bandit SAST, a gitleaks secret scan, and **blocking** dependency
+audits (`pip-audit`, `npm audit --audit-level=high`).
+
+[`.github/workflows/security-scan.yml`](.github/workflows/security-scan.yml) runs Semgrep
+and Trivy on every PR and weekly, reporting into the repository's Security tab. It is
+separate from the gates on purpose: those scanners re-fetch their rules and CVE data on
+every run, so their verdict on an unchanged commit changes over time, and a tag that
+built on Tuesday should not fail on Wednesday for a reason nobody introduced. The weekly
+run is the point — it finds the CVE published after the code merged.
+
+## Dependency pinning
+
+The API image installs from [`backend/requirements.lock`](backend/requirements.lock) with
+`pip install --require-hashes`, not from the ranges in `pyproject.toml`. Ranges are right
+for humans and wrong for a production build: anything published inside `httpx>=0.27`
+would otherwise land in the image on the next rebuild, unreviewed.
+
+After changing `[project].dependencies`, regenerate the lock:
+
+```bash
+pip install pip-tools
+cd backend && pip-compile --generate-hashes --strip-extras --no-header \
+    --output-file=requirements.lock pyproject.toml
+# keep the explanatory header at the top of the file
+```
+
+`scripts/check_lockfile.py` runs in CI and fails if the two files disagree, so a
+dependency added to `pyproject.toml` cannot quietly miss the image.
+
+Third-party GitHub Actions are pinned to 40-character commit SHAs rather than tags — a
+tag is a mutable pointer its owner can move, which is exactly how the
+`tj-actions/changed-files` compromise (CVE-2025-30066) reached thousands of repositories.
+Dependabot understands SHA pins and keeps them current.
+
+### Repository settings to set by hand
+
+Two protections cannot be committed to the repo and must be set in GitHub's settings:
+
+- **Tag protection for `v*`** — branch protection does not cover tags. Without it,
+  anyone who can push a tag can start a release build.
+- **Require the `Checks` status** on pull requests to `main`, so the gates cannot be
+  merged past.
 
 ## Database migrations
 

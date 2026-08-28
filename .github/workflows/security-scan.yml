@@ -1,0 +1,100 @@
+name: Security scan
+
+# Semgrep (code patterns) and Trivy (dependency + container + IaC CVEs), reporting
+# into the repository's Security tab rather than only into a log that scrolls past.
+#
+# Deliberately *not* in checks.yml: these scanners re-fetch their rule sets and the
+# CVE database on every run, so their verdict on an unchanged commit changes over
+# time. Gating a release on that means a tag that built on Tuesday fails on
+# Wednesday for a reason nobody introduced. They run on every PR and weekly, and
+# the weekly run is the point — it finds the CVE published after the code merged.
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    - cron: "27 6 * * 1"   # Mondays, 06:27 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: security-scan-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  semgrep:
+    name: Semgrep (SAST)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+    container:
+      image: semgrep/semgrep
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Scan
+        # Explicit rule packs rather than `--config=auto`, which needs an account
+        # and silently scans with nothing when the token is absent.
+        run: |
+          semgrep scan \
+            --config=p/security-audit \
+            --config=p/secrets \
+            --config=p/python \
+            --config=p/typescript \
+            --config=p/react \
+            --config=p/dockerfile \
+            --sarif --output=semgrep.sarif \
+            --metrics=off \
+            --exclude=node_modules --exclude=dist --exclude='*.lock'
+      - name: Upload to code scanning
+        if: always()
+        uses: github/codeql-action/upload-sarif@a45bef097606dca6eac8285c279babedd70e6dfd # v3.37.9
+        with:
+          sarif_file: semgrep.sarif
+          category: semgrep
+
+  trivy:
+    name: Trivy (dependencies, IaC)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      # Reads requirements.lock and package-lock.json — the resolved versions that
+      # actually ship, not the ranges in the manifests.
+      - name: Dependency CVEs
+        uses: aquasecurity/trivy-action@57a97c7e7821a5776cebc9bb87c984fa69cba8f1 # 0.35.0
+        with:
+          scan-type: fs
+          scanners: vuln,secret
+          format: sarif
+          output: trivy-deps.sarif
+          severity: CRITICAL,HIGH,MEDIUM
+          ignore-unfixed: true
+      - name: Upload dependency findings
+        if: always()
+        uses: github/codeql-action/upload-sarif@a45bef097606dca6eac8285c279babedd70e6dfd # v3.37.9
+        with:
+          sarif_file: trivy-deps.sarif
+          category: trivy-dependencies
+
+      # Dockerfile and compose misconfiguration: root containers, missing user,
+      # published ports, writable filesystems.
+      - name: Infrastructure misconfiguration
+        uses: aquasecurity/trivy-action@57a97c7e7821a5776cebc9bb87c984fa69cba8f1 # 0.35.0
+        with:
+          scan-type: config
+          format: sarif
+          output: trivy-config.sarif
+          severity: CRITICAL,HIGH
+      - name: Upload misconfiguration findings
+        if: always()
+        uses: github/codeql-action/upload-sarif@a45bef097606dca6eac8285c279babedd70e6dfd # v3.37.9
+        with:
+          sarif_file: trivy-config.sarif
+          category: trivy-config
