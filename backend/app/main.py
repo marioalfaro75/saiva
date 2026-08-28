@@ -22,6 +22,10 @@ SAFE_METHODS = {"GET", "HEAD", "OPTIONS"}
 # documented cron integration, which could never send a CSRF cookie it was never given.
 CSRF_EXEMPT_PATHS = frozenset({"/api/notifications/run"})
 
+# Slightly above the import cap, to leave room for multipart framing around a
+# maximum-size file rather than rejecting a legitimate one on overhead.
+MAX_REQUEST_BYTES = 12 * 1024 * 1024
+
 app = FastAPI(
     title="Saiva API",
     version=settings.saiva_version,
@@ -52,6 +56,13 @@ async def security_middleware(
         and not csrf_valid(request.cookies.get(CSRF_COOKIE), request.headers.get(CSRF_HEADER))
     ):
         return JSONResponse({"detail": "CSRF token missing or invalid"}, status_code=403)
+
+    # Refuse an oversized body on its declared length, before anything reads it. The
+    # route-level cap still applies — a client can lie about Content-Length — but this
+    # turns the common case into a rejection at the door.
+    declared = request.headers.get("content-length")
+    if declared and declared.isdigit() and int(declared) > MAX_REQUEST_BYTES:
+        return JSONResponse({"detail": "Request too large"}, status_code=413)
 
     response = await call_next(request)
 

@@ -20,6 +20,8 @@ from ..services.transfers import detect_transfers
 
 router = APIRouter(prefix="/imports", tags=["imports"])
 MAX_UPLOAD_BYTES = 10 * 1024 * 1024
+# Read in pieces so an oversized body is refused partway through rather than after.
+_CHUNK_BYTES = 64 * 1024
 
 
 def _parse_mapping(mapping_json: str | None) -> schemas.CsvMapping | None:
@@ -40,10 +42,23 @@ def _account_or_404(db: Session, account_id: str, household_id: str) -> models.A
 
 
 async def _read(file: UploadFile) -> bytes:
-    content = await file.read()
-    if len(content) > MAX_UPLOAD_BYTES:
-        raise HTTPException(status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, "File too large (max 10 MB)")
-    return content
+    """Read an upload, refusing to hold more than the cap in memory.
+
+    `await file.read()` buffers the whole body before the size is looked at, so a 4 GB
+    upload was written to the container's disk — the one the pre-migration database
+    dumps share — and then loaded into memory, all before the limit was consulted. The
+    cap has to be enforced while reading, not after.
+    """
+    chunks: list[bytes] = []
+    total = 0
+    while chunk := await file.read(_CHUNK_BYTES):
+        total += len(chunk)
+        if total > MAX_UPLOAD_BYTES:
+            raise HTTPException(
+                status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, "File too large (max 10 MB)"
+            )
+        chunks.append(chunk)
+    return b"".join(chunks)
 
 
 def _category_names(db: Session, household_id: str) -> dict[str, str]:

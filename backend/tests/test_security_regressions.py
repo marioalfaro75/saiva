@@ -261,3 +261,66 @@ def test_the_other_modes_still_refuse_a_local_endpoint() -> None:
     for mode in ("full", "aggregates"):
         with pytest.raises(advisor.ProviderError):
             advisor._check_endpoint(_ai(mode, "http://127.0.0.1:8080"))
+
+
+# ---------------------------------------------------------------- denial of service
+
+
+def test_a_catastrophic_rule_pattern_returns_instead_of_hanging() -> None:
+    """Rule patterns are written by household members and run against every transaction
+    on every import. Under the stdlib engine "^(a+)+$" against 31 characters takes about
+    55 seconds, with nothing bounding it — so any signed-in member, a read-only viewer
+    included, could pin a core for as long as they liked."""
+    import time
+
+    from app.services.categorise import _regex_matches
+
+    started = time.monotonic()
+    assert _regex_matches(r"^(a+)+$", "a" * 40 + "!") is False
+    assert time.monotonic() - started < 1.0
+
+
+def test_ordinary_rule_patterns_still_work() -> None:
+    from app.services.categorise import _regex_matches
+
+    assert _regex_matches(r"wool\w+", "WOOLWORTHS METRO") is True
+    assert _regex_matches(r"^COLES", "WOOLWORTHS") is False
+    assert _regex_matches(r"[unclosed", "anything") is False
+
+
+def test_an_unterminated_ofx_tag_does_not_backtrack() -> None:
+    """`<TAG>(.*?)</TAG>` backtracks quadratically when a tag is opened and never
+    closed. 10 MB of `<STMTTRN>` — which any member can upload to /imports/preview —
+    cost hours of CPU. The scanner is linear whatever the input."""
+    import time
+
+    from app.services import importers
+
+    payload = b"<STMTTRN>" * 120_000  # ~1 MB, all unterminated
+    started = time.monotonic()
+    assert importers.parse_ofx(payload) == []
+    assert time.monotonic() - started < 2.0
+
+
+def test_an_oversized_body_is_refused_on_its_declared_length(
+    auth_client: TestClient,
+) -> None:
+    """The cap used to be checked after `await file.read()` had buffered the whole body,
+    so a 4 GB upload landed on the disk the database dumps share before anything looked
+    at its size."""
+    resp = auth_client.post(
+        "/api/imports/sniff",
+        files={"file": ("big.csv", b"x" * 100, "text/csv")},
+        headers={"Content-Length": str(50 * 1024 * 1024)},
+    )
+    assert resp.status_code == 413
+
+
+def test_a_file_over_the_cap_is_refused_while_reading(auth_client: TestClient) -> None:
+    """Content-Length can be absent or a lie, so the route-level cap still has to hold —
+    now enforced chunk by chunk rather than after the fact."""
+    resp = auth_client.post(
+        "/api/imports/sniff",
+        files={"file": ("big.csv", b"x" * (11 * 1024 * 1024), "text/csv")},
+    )
+    assert resp.status_code == 413

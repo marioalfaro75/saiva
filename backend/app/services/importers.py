@@ -442,9 +442,38 @@ def scan_account_values(
     return account_values(parse_file(content, file_format, mapping))
 
 
-_STATEMENT = re.compile(r"<(STMTRS|CCSTMTRS)>(.*?)</\1>", re.S | re.I)
-_ACCTFROM = re.compile(r"<(?:BANK|CC)ACCTFROM>(.*?)</(?:BANK|CC)ACCTFROM>", re.S | re.I)
-_TXN = re.compile(r"<STMTTRN>(.*?)</STMTTRN>", re.S | re.I)
+def _blocks(text: str, open_tag: str, close_tag: str) -> list[str]:
+    """Every region between an opening and closing tag, found by scanning.
+
+    Deliberately not a regex. `<TAG>(.*?)</TAG>` backtracks quadratically when a tag is
+    opened and never closed, so 10 MB of `<STMTTRN>` — which a file can trivially
+    contain — cost hours of CPU on an endpoint any signed-in member can reach. An
+    index scan is linear whatever the input, and an unclosed tag simply ends the search
+    instead of driving it.
+    """
+    out: list[str] = []
+    lower = text.lower()
+    start, cursor = open_tag.lower(), close_tag.lower()
+    i = lower.find(start)
+    while i != -1:
+        body_at = i + len(start)
+        end = lower.find(cursor, body_at)
+        if end == -1:
+            break  # unterminated: nothing further can close, so stop rather than retry
+        out.append(text[body_at:end])
+        i = lower.find(start, end + len(cursor))
+    return out
+
+
+def _statement_blocks(text: str) -> list[tuple[str, str]]:
+    """(kind, body) for each statement aggregate, bank and credit-card alike."""
+    found: list[tuple[str, str]] = []
+    for kind in ("STMTRS", "CCSTMTRS"):
+        # CCSTMTRS contains no nested STMTRS, but "<STMTRS>" is a substring of
+        # "<CCSTMTRS>" only with the angle bracket, which the tags below include —
+        # so the two searches cannot claim each other's blocks.
+        found.extend((kind, body) for body in _blocks(text, f"<{kind}>", f"</{kind}>"))
+    return found
 
 
 def _ofx_tag(name: str, block: str) -> str:
@@ -460,12 +489,15 @@ def _statement_account(block: str) -> str | None:
     Scoped to that aggregate rather than the whole block: a transfer's STMTTRN can
     carry its own ACCTID for the other side, which would otherwise be picked up.
     """
-    m = _ACCTFROM.search(block)
-    if m:
-        return _ofx_tag("ACCTID", m.group(1)) or None
+    aggregates = _blocks(block, "<BANKACCTFROM>", "</BANKACCTFROM>") or _blocks(
+        block, "<CCACCTFROM>", "</CCACCTFROM>"
+    )
+    if aggregates:
+        return _ofx_tag("ACCTID", aggregates[0]) or None
     # Some issuers leave ACCTFROM unclosed. Anything before the first transaction is
     # still statement-level, so look only there.
-    head = block[: m.start()] if (m := _TXN.search(block)) else block
+    first_txn = block.lower().find("<stmttrn>")
+    head = block[:first_txn] if first_txn != -1 else block
     return _ofx_tag("ACCTID", head) or None
 
 
@@ -480,7 +512,7 @@ def _statements(text: str) -> list[tuple[str | None, str]]:
     A document with no recognisable statement wrapper is treated as a single
     unattributed statement, so unusual exports still import as they always did.
     """
-    blocks = [(_statement_account(body), body) for _kind, body in _STATEMENT.findall(text)]
+    blocks = [(_statement_account(body), body) for _kind, body in _statement_blocks(text)]
     return blocks or [(None, text)]
 
 
@@ -488,7 +520,7 @@ def parse_ofx(content: bytes) -> list[ParsedTxn]:
     text = _decode(content)
     out: list[ParsedTxn] = []
     for account_value, statement in _statements(text):
-        for block in _TXN.findall(statement):
+        for block in _blocks(statement, "<STMTTRN>", "</STMTTRN>"):
             raw_date = _ofx_tag("DTPOSTED", block)[:8]
             try:
                 date = dt.datetime.strptime(raw_date, "%Y%m%d").date()
