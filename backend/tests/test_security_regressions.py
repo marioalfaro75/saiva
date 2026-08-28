@@ -324,3 +324,117 @@ def test_a_file_over_the_cap_is_refused_while_reading(auth_client: TestClient) -
         files={"file": ("big.csv", b"x" * (11 * 1024 * 1024), "text/csv")},
     )
     assert resp.status_code == 413
+
+
+# ---------------------------------------------------------------- transfer detection
+
+
+def _txn(client: TestClient, account_id: str, date: str, cents: int, desc: str) -> dict:
+    resp = client.post(
+        "/api/transactions",
+        json={"account_id": account_id, "txn_date": date, "amount_cents": cents,
+              "description": desc},
+    )
+    assert resp.status_code == 201, resp.text
+    return resp.json()
+
+
+def _summary(client: TestClient) -> dict:
+    return client.get(
+        "/api/dashboard/summary",
+        params={"period": "custom", "start": "2025-03-01", "end": "2025-03-31"},
+    ).json()
+
+
+def test_a_rent_payment_and_a_salary_are_not_the_same_money(auth_client: TestClient) -> None:
+    """Equal amount, different accounts, a day apart — and nothing else in common. That
+    was enough to link them, which marked both as internal and removed them from every
+    figure the app reports: overview, budgets, benchmarks, the forecast, and the FY
+    report you would hand an accountant.
+    """
+    from conftest import create_account
+
+    everyday = create_account(auth_client, "Everyday", "everyday")
+    savings = create_account(auth_client, "Savings", "savings")
+    _txn(auth_client, everyday["id"], "2025-03-14", -250000, "RENT PAYMENT REALTY")
+    _txn(auth_client, savings["id"], "2025-03-15", 250000, "ACME PAYROLL SALARY")
+
+    assert auth_client.post("/api/transactions/detect-transfers").json()["linked"] == 0
+
+    after = _summary(auth_client)
+    assert after["income_cents"] == 250000
+    assert after["expense_cents"] == 250000
+
+
+def test_a_genuine_transfer_is_still_recognised(auth_client: TestClient) -> None:
+    """The evidence rule has to admit real transfers, or it has only traded one wrong
+    answer for another."""
+    from conftest import create_account
+
+    everyday = create_account(auth_client, "Everyday", "everyday")
+    savings = create_account(auth_client, "Savings", "savings")
+    _txn(auth_client, everyday["id"], "2025-03-14", -250000, "TRANSFER TO SAVINGS")
+    _txn(auth_client, savings["id"], "2025-03-14", 250000, "TRANSFER FROM EVERYDAY")
+
+    assert auth_client.post("/api/transactions/detect-transfers").json()["linked"] == 2
+    assert _summary(auth_client)["income_cents"] == 0
+
+
+def test_identically_described_legs_count_as_evidence(auth_client: TestClient) -> None:
+    """Some banks label both sides the same and use no transfer word at all."""
+    from conftest import create_account
+
+    a = create_account(auth_client, "Everyday", "everyday")
+    b = create_account(auth_client, "Offset", "offset")
+    _txn(auth_client, a["id"], "2025-03-14", -100000, "NETBANK MOVE 4471")
+    _txn(auth_client, b["id"], "2025-03-14", 100000, "NETBANK MOVE 4471")
+
+    assert auth_client.post("/api/transactions/detect-transfers").json()["linked"] == 2
+
+
+def test_a_locked_category_is_never_overwritten(auth_client: TestClient) -> None:
+    """categorise.py refuses to touch a locked category; this path did not, so a
+    decision the user had pinned was replaced with "Internal transfers" in silence."""
+    from conftest import create_account
+
+    a = create_account(auth_client, "Everyday", "everyday")
+    b = create_account(auth_client, "Savings", "savings")
+    out = _txn(auth_client, a["id"], "2025-03-14", -100000, "TRANSFER TO SAVINGS")
+    _txn(auth_client, b["id"], "2025-03-14", 100000, "TRANSFER FROM EVERYDAY")
+
+    categories = auth_client.get("/api/categories").json()
+    leaf = next(c for c in categories if c["parent_id"])
+    auth_client.post(
+        f"/api/transactions/{out['id']}/recategorise",
+        json={"category_id": leaf["id"], "scope": "none"},
+    )
+    auth_client.patch(f"/api/transactions/{out['id']}", json={"category_locked": True})
+
+    auth_client.post("/api/transactions/detect-transfers")
+
+    after = auth_client.get("/api/transactions?q=TRANSFER TO SAVINGS").json()["items"][0]
+    assert after["category_id"] == leaf["id"], "a locked category must survive"
+
+
+def test_deleting_one_leg_releases_the_other(auth_client: TestClient) -> None:
+    """A transfer group says two rows are the same money. With one deleted the survivor
+    is an ordinary transaction again — left flagged, it stayed out of every total with
+    nothing on screen to explain why, and no way to undo it."""
+    from conftest import create_account
+
+    a = create_account(auth_client, "Everyday", "everyday")
+    b = create_account(auth_client, "Savings", "savings")
+    out = _txn(auth_client, a["id"], "2025-03-14", -100000, "TRANSFER TO SAVINGS")
+    inflow = _txn(auth_client, b["id"], "2025-03-14", 100000, "TRANSFER FROM EVERYDAY")
+    auth_client.post("/api/transactions/detect-transfers")
+    assert _summary(auth_client)["income_cents"] == 0
+
+    assert auth_client.delete(f"/api/transactions/{out['id']}").status_code == 204
+
+    survivor = next(
+        t
+        for t in auth_client.get("/api/transactions", params={"page_size": 50}).json()["items"]
+        if t["id"] == inflow["id"]
+    )
+    assert survivor["is_transfer"] is False
+    assert _summary(auth_client)["income_cents"] == 100000

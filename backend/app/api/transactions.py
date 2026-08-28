@@ -531,6 +531,23 @@ def delete_txn(
         .all()
     ):
         db.delete(child)
+    # Release the other leg. A transfer group describes two rows being the same money;
+    # with one gone the survivor is an ordinary transaction again, and leaving it
+    # flagged kept it out of every total with nothing left on screen to explain why.
+    if t.transfer_group_id:
+        for other in (
+            db.execute(
+                select(models.Transaction).where(
+                    models.Transaction.household_id == user.household_id,
+                    models.Transaction.transfer_group_id == t.transfer_group_id,
+                    models.Transaction.id != t.id,
+                )
+            )
+            .scalars()
+            .all()
+        ):
+            other.is_transfer = False
+            other.transfer_group_id = None
     db.delete(t)
     db.commit()
     return Response(status_code=status.HTTP_204_NO_CONTENT)

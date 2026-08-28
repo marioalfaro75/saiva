@@ -610,7 +610,11 @@ async def commit(
     batch.added_count = added
     batch.skipped_count = skipped
     db.commit()
-    transfers_linked = detect_transfers(db, user.household_id)
+    # Scoped to the dates this file covered. Re-deciding the whole history after every
+    # import is how a crafted row could reach back years and pair itself with a real
+    # expense, taking both out of every figure the app reports.
+    earliest = min((p.txn_date for p in parsed), default=None)
+    transfers_linked = detect_transfers(db, user.household_id, since=earliest)
     audit.record(
         db, action="import_commit", household_id=user.household_id, actor_user_id=user.id,
         entity="import_batch", entity_id=batch.id, detail={"added": added, "skipped": skipped},
