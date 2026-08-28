@@ -146,9 +146,26 @@ def detect_delimiter(content: bytes) -> str:
 
 
 def read_rows(content: bytes, delimiter: str | None = None) -> list[list[str]]:
+    """Rows from a CSV, with the two ways `csv` refuses a file turned into 400s.
+
+    `newline=""` is what the csv module asks for: without it a bare carriage return
+    inside an unquoted field — which banks do emit — raises `_csv.Error` rather than
+    parsing, and `_csv.Error` is not a `ValueError`, so it sailed past the API's
+    handler and reached the user as a 500 on an ordinary upload.
+
+    The field-size limit is a real limit worth keeping: a single 10MB "description"
+    is not a statement. It just has to arrive as a message rather than a crash.
+    """
     text = _decode(content)
-    reader = csv.reader(io.StringIO(text), delimiter=delimiter or detect_delimiter(content))
-    return [row for row in reader if any((c or "").strip() for c in row)]
+    reader = csv.reader(
+        io.StringIO(text, newline=""), delimiter=delimiter or detect_delimiter(content)
+    )
+    try:
+        return [row for row in reader if any((c or "").strip() for c in row)]
+    except csv.Error as exc:
+        raise ValueError(
+            f"This file could not be read as {delimiter or 'delimited'} text: {exc}"
+        ) from exc
 
 
 def _find(headers: list[str], keys: list[str], exclude: set[int] | None = None) -> int | None:

@@ -40,7 +40,9 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - name: Scan
         # Explicit rule packs rather than `--config=auto`, which needs an account
-        # and silently scans with nothing when the token is absent.
+        # and silently scans with nothing when the token is absent. `--text` as well
+        # as SARIF: with SARIF alone the log said "3 findings" and not one word about
+        # what they were, which is a scan you cannot act on without leaving the page.
         run: |
           semgrep scan \
             --config=p/security-audit \
@@ -49,7 +51,7 @@ jobs:
             --config=p/typescript \
             --config=p/react \
             --config=p/dockerfile \
-            --sarif --output=semgrep.sarif \
+            --text --sarif-output=semgrep.sarif \
             --metrics=off \
             --exclude=node_modules --exclude=dist --exclude='*.lock'
       - name: Upload to code scanning
@@ -86,6 +88,15 @@ jobs:
           sarif_file: trivy-deps.sarif
           category: trivy-dependencies
 
+      - name: Findings, readable
+        uses: aquasecurity/trivy-action@57a97c7e7821a5776cebc9bb87c984fa69cba8f1 # 0.35.0
+        with:
+          scan-type: fs
+          scanners: vuln,secret
+          format: table
+          severity: CRITICAL,HIGH,MEDIUM
+          ignore-unfixed: true
+
       # Dockerfile and compose misconfiguration: root containers, missing user,
       # published ports, writable filesystems.
       - name: Infrastructure misconfiguration
@@ -101,3 +112,33 @@ jobs:
         with:
           sarif_file: trivy-config.sarif
           category: trivy-config
+
+      # An inventory of what actually shipped, so the next advisory can be answered
+      # with "yes, version X, in these images" rather than by reading Dockerfiles.
+      - name: Software bill of materials
+        uses: aquasecurity/trivy-action@57a97c7e7821a5776cebc9bb87c984fa69cba8f1 # 0.35.0
+        with:
+          scan-type: fs
+          format: cyclonedx
+          output: saiva-sbom.cdx.json
+          scanners: license
+      - name: Keep the SBOM with the run
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: sbom-cyclonedx
+          path: saiva-sbom.cdx.json
+          retention-days: 90
+
+  hadolint:
+    name: Dockerfile lint
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        dockerfile: [backend/Dockerfile, frontend/Dockerfile]
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: hadolint ${{ matrix.dockerfile }}
+        uses: hadolint/hadolint-action@54c9adbab1582c2ef04b2016b760714a4bfde3cf # v3.1.0
+        with:
+          dockerfile: ${{ matrix.dockerfile }}
+          failure-threshold: error

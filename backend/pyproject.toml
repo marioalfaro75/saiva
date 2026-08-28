@@ -40,6 +40,10 @@ dev = [
   "mypy>=1.13",
   "bandit>=1.7",
   "pip-audit>=2.7",
+  # Property-based fuzzing of the statement parsers — the app's only untrusted
+  # input surface that does real work. It found the `_csv.Error` a bare carriage
+  # return produced, which reached the user as a 500 on an ordinary upload.
+  "hypothesis>=6.100",
   "types-python-dateutil",
 ]
 

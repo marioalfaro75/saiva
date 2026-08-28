@@ -371,7 +371,13 @@ async def sniff(
     user: models.User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> schemas.ImportSniffOut:
-    out = importers.sniff_csv(await _read(file))
+    try:
+        out = importers.sniff_csv(await _read(file))
+    except ValueError as exc:
+        # The first look at an uploaded file is the likeliest place to meet one the
+        # parser cannot read. Every other import endpoint already answered with a
+        # message; this one answered with a 500.
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc)) from exc
     profile = db.execute(
         select(models.ImportProfile).where(
             models.ImportProfile.household_id == user.household_id,

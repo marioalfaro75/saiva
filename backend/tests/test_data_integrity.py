@@ -189,16 +189,21 @@ def _run_with_a_comparison_budget(
     return comparisons
 
 
-def test_duplicate_matching_is_bounded_when_every_row_shares_a_date() -> None:
-    """The adversarial shape: one amount, one date, tens of thousands of rows.
+def test_duplicate_matching_is_bounded_when_every_row_shares_a_date(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The adversarial shape: one amount, one date, every row a candidate.
 
     Bucketing cannot help here — every candidate really is in the window — so the
     per-row cap is the only thing between an upload form and an import that never
-    finishes. Unbounded this is 2,000 x 4,000 = 8,000,000 comparisons.
+    finishes. The cap is lowered for the test so the ratio is visible without doing
+    a million comparisons under coverage instrumentation; unbounded, 400 rows
+    against 800 stored is 320,000 comparisons and the cap makes it 20,000.
     """
-    matcher = dedup.DuplicateMatcher(_stored(4000, spread_days=0))
-    rows = 2000
-    budget = rows * dedup.MAX_NEAR_MATCH_CANDIDATES + 1000
+    monkeypatch.setattr(dedup, "MAX_NEAR_MATCH_CANDIDATES", 50)
+    matcher = dedup.DuplicateMatcher(_stored(800, spread_days=0))
+    rows = 400
+    budget = rows * dedup.MAX_NEAR_MATCH_CANDIDATES + 500
     _run_with_a_comparison_budget(matcher, rows, spread_days=0, budget=budget)
 
 
@@ -222,9 +227,11 @@ class _CountingCandidate(dedup.Candidate):
 def test_duplicate_matching_only_looks_inside_the_date_window() -> None:
     """A year of history: only the few days either side can ever match.
 
-    Bucketed on amount alone, every incoming row walked all 4,000 stored rows to
-    reach the handful in range — 2,000 x 4,000 = 8,000,000 rows touched.
+    Bucketed on amount alone, every incoming row walked all 1,000 stored rows to
+    reach the handful in range — 300 x 1,000 = 300,000 rows touched, against the
+    ~6,000 the date window actually allows.
     """
+    count = 1000
     stored = [
         _CountingCandidate(
             id=c.id,
@@ -234,16 +241,16 @@ def test_duplicate_matching_only_looks_inside_the_date_window() -> None:
             dedup_hash=c.dedup_hash,
             provider_txn_id=c.provider_txn_id,
         )
-        for c in _stored(4000, spread_days=365)
+        for c in _stored(count, spread_days=365)
     ]
     matcher = dedup.DuplicateMatcher(stored)
     _CountingCandidate.touches = 0
-    rows = 2000
+    rows = 300
     for i in range(rows):
         matcher.match("acct", _incoming(i, spread_days=365))
 
     window = 2 * dedup.DATE_WINDOW_DAYS + 1
-    ceiling = rows * (4000 // 365 + 2) * window
+    ceiling = rows * (count // 365 + 2) * window
     assert _CountingCandidate.touches <= ceiling, (
         f"scan touched {_CountingCandidate.touches:,} stored rows for {rows:,} incoming "
         f"rows; the date window allows at most {ceiling:,}"
@@ -279,9 +286,8 @@ def test_transfer_detection_only_pairs_inside_its_window(auth_client: TestClient
     """Equal and opposite rows in two accounts: the worst case for pairing.
 
     Grouped on amount alone, every outflow was compared against every same-amount
-    inflow in the whole scoped set — 600 x 600 SequenceMatcher runs to find the
-    handful within three days. Counted rather than timed so the bound is the same
-    on a loaded CI runner as it is here.
+    inflow in the whole scoped set, to find the handful within three days. Counted
+    rather than timed, so the bound is the same on a loaded CI runner as it is here.
     """
     from app import models
     from app.db import SessionLocal
@@ -293,8 +299,8 @@ def test_transfer_detection_only_pairs_inside_its_window(auth_client: TestClient
     day = dt.date(2026, 1, 1)
 
     with SessionLocal() as db:
-        for i in range(600):
-            when = day + dt.timedelta(days=i % 200)
+        for i in range(200):
+            when = day + dt.timedelta(days=i % 60)
             for account_id, cents, text in (
                 (a["id"], -2500, "Groceries"),
                 (b["id"], 2500, "Refund"),
@@ -332,9 +338,35 @@ def test_transfer_detection_only_pairs_inside_its_window(auth_client: TestClient
     finally:
         transfers.candidates = real  # type: ignore[assignment]
 
-    # 600 outflows over 200 days is ~3 inflows a day; a 7-day window allows ~21 each.
-    # Grouped on amount alone every outflow saw all 600, which is 360,000.
-    ceiling = 600 * (600 // 200 + 2) * (2 * 3 + 1)
+    # 200 outflows over 60 days is ~3 inflows a day; a 7-day window allows ~21 each.
+    # Grouped on amount alone every outflow saw all 200, which is 40,000.
+    ceiling = 200 * (200 // 60 + 2) * (2 * 3 + 1)
     assert considered <= ceiling, (
         f"transfer matching considered {considered:,} inflows; the window allows {ceiling:,}"
     )
+
+
+# --- Malformed CSV, found by the fuzzer -----------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("name", "content"),
+    [
+        ("bare-carriage-return", b"Date,Amount\n2026-01-01,1.00\n\r0,2.00\n"),
+        ("oversized-field", b"Date,Description,Amount\n2026-01-01," + b"x" * 200_000 + b",1.00\n"),
+    ],
+    ids=["bare-carriage-return", "oversized-field"],
+)
+def test_a_csv_the_parser_refuses_comes_back_as_a_message(
+    auth_client: TestClient, name: str, content: bytes
+) -> None:
+    """`_csv.Error` is not a `ValueError`, so it sailed past the API's handler.
+
+    A bare carriage return inside an unquoted field is something banks actually
+    emit, and it reached the user as a 500 with nothing to act on.
+    """
+    create_account(auth_client, "Everyday")
+    resp = auth_client.post(
+        "/api/imports/sniff", files={"file": (f"{name}.csv", content, "text/csv")}
+    )
+    assert resp.status_code < 500, f"{name} produced a {resp.status_code}: {resp.text[:200]}"

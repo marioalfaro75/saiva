@@ -287,6 +287,22 @@ tag is a mutable pointer its owner can move, which is exactly how the
 `tj-actions/changed-files` compromise (CVE-2025-30066) reached thousands of repositories.
 Dependabot understands SHA pins and keeps them current.
 
+## The AI advisor and untrusted text
+
+Transaction descriptions come from statement files, which come from banks, which
+pass through whatever a payee typed into a payment reference. That text reaches the
+model's system prompt, and the model has tools.
+
+Two things keep that bounded. The tools are bound to the caller's session household
+and the privacy mode is re-checked when each one runs, so no amount of prompt
+trickery reaches another household, writes anything, or sees detail the household
+asked to keep back. And the statement text is fenced inside a labelled block, with
+the fence markers and control characters stripped out of it, so a merchant named
+"IGNORE ALL PREVIOUS INSTRUCTIONS" cannot close the fence and address the model
+directly.
+
+`backend/tests/test_prompt_injection.py` pins both.
+
 ## Rate limiting and the reverse proxy
 
 Login, first-run setup and password change share one per-caller ceiling; file
