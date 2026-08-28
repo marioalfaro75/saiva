@@ -16,7 +16,7 @@ from sqlalchemy.orm import Session
 
 from .. import models
 from ..constants import UNCATEGORISED
-from . import advisor_tools, crypto, periods
+from . import advisor_tools, crypto, periods, provider_url
 from . import forecast as forecast_service
 from . import recurring as recurring_service
 from .budgets import list_budgets
@@ -670,6 +670,19 @@ def _respond(
         return _call_provider(ai, system, messages)
 
 
+def _check_endpoint(ai: models.AiSettings) -> None:
+    """Refuse to make the request if the configured endpoint points inside the network.
+
+    Checked here rather than only when the setting is saved, because a value stored
+    before this rule existed — or by a future path that forgets — must not be able to
+    turn the server into a proxy for its own network.
+    """
+    try:
+        provider_url.check(ai.base_url)
+    except provider_url.ProviderUrlError as exc:
+        raise ProviderError(str(exc)) from exc
+
+
 def chat(
     db: Session,
     household: models.Household,
@@ -681,6 +694,7 @@ def chat(
     ai = settings_for(db, household.id)
     if ai.provider not in ("anthropic", "openai", "gemini"):
         raise NotConfiguredError("AI is not configured")
+    _check_endpoint(ai)
     if window is None:
         fy_start, _ = fy_bounds(household, dt.date.today())
         window = periods.resolve(household, f"fy:{fy_start.year}")
@@ -789,6 +803,7 @@ def available_models(ai: models.AiSettings) -> list[dict[str, str]]:
     the provider's own live list when a key is set (deduped, curated first, curated
     labels kept). Never raises for a missing/invalid key — the baseline still shows
     and key problems surface via Test connection instead of an empty dropdown."""
+    _check_endpoint(ai)
     out = curated_models(ai.provider, ai.base_url)
     seen = {m["id"] for m in out}
     # Only hit the network when it can plausibly succeed: key-based providers need a

@@ -162,3 +162,53 @@ def test_the_documented_cron_call_reaches_the_token_check(
 
     bad = client.post("/api/notifications/run", headers={"X-Notify-Token": "wrong"})
     assert bad.status_code == 401, "exempt from CSRF, still authenticated"
+
+
+# ---------------------------------------------------------------- SSRF
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "http://127.0.0.1:8080",
+        "http://localhost/v1",
+        "https://169.254.169.254/latest/meta-data/",  # cloud metadata
+        "https://watchtower:8080",                    # the neighbouring container
+        "https://10.0.0.5/v1",
+        "https://192.168.1.10",
+        "file:///etc/passwd",
+        "gopher://internal",
+    ],
+)
+def test_a_provider_url_pointing_inward_is_refused_on_save(
+    auth_client: TestClient, url: str
+) -> None:
+    """base_url was written straight through and the advisor POSTed to it, so any adult
+    could aim the server at whatever the container can reach — including the Watchtower
+    API on the same Compose network, which holds the Docker socket."""
+    resp = auth_client.patch("/api/ai/settings", json={"provider": "openai", "base_url": url})
+    assert resp.status_code == 400, f"{url} should be refused, got {resp.status_code}"
+
+
+def test_a_real_provider_endpoint_is_accepted(auth_client: TestClient) -> None:
+    resp = auth_client.patch(
+        "/api/ai/settings", json={"provider": "openai", "base_url": "https://api.openai.com/v1"}
+    )
+    assert resp.status_code == 200, resp.text
+
+
+def test_the_check_runs_again_before_the_request(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A value stored before this rule existed must not still be requested. Asserted at
+    the service boundary, since the API layer would refuse to store it now."""
+    from app.services import advisor
+
+    stored = type("Ai", (), {"base_url": "https://169.254.169.254", "provider": "openai"})()
+    with pytest.raises(advisor.ProviderError, match="inside your own network"):
+        advisor._check_endpoint(stored)
+
+
+def test_an_unset_base_url_is_fine() -> None:
+    """Unset means the provider's own public endpoint, which is the common case."""
+    from app.services import advisor
+
+    advisor._check_endpoint(type("Ai", (), {"base_url": None, "provider": "openai"})())

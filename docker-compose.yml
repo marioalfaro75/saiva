@@ -53,9 +53,14 @@ services:
       SAIVA_SITE_ADDRESS: ${SAIVA_SITE_ADDRESS:-localhost}
       SAIVA_SITE_HOST: ${SAIVA_SITE_HOST:-localhost}
       SAIVA_TLS: ${SAIVA_TLS:-internal}
+    # Bound to the loopback address unless a site address was chosen, because Docker
+    # publishes on 0.0.0.0 by default and inserts NAT rules that bypass the host
+    # firewall. Caddy routes on the Host header, not on the listening address, so a
+    # default "localhost" install was reachable from the whole LAN by anyone sending
+    # Host: localhost — while the README promised it was confined to this machine.
     ports:
-      - "80:80"
-      - "443:443"
+      - "${SAIVA_BIND_ADDR:-127.0.0.1}:80:80"
+      - "${SAIVA_BIND_ADDR:-127.0.0.1}:443:443"
     volumes:
       - ./infra/Caddyfile:/etc/caddy/Caddyfile:ro
       - caddy_data:/data

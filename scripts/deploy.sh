@@ -133,7 +133,14 @@ if [ -n "$SITE" ]; then
   set_env_var SAIVA_SITE_ADDRESS "$SITE"
   host="${SITE#http://}"; host="${host#https://}"; host="${host%%/*}"
   set_env_var SAIVA_SITE_HOST "$host"
-  echo "  → serving at ${SITE}"
+  # Asking to be served at an address is asking to be reachable at it, so the published
+  # ports follow the same decision. Left alone, they stay on loopback: the default
+  # install is meant to be this machine only, and the binding now says so as well as
+  # the docs.
+  set_env_var SAIVA_BIND_ADDR "0.0.0.0"
+  echo "  → serving at ${SITE} (published on all interfaces)"
+else
+  set_env_var SAIVA_BIND_ADDR "127.0.0.1"
 fi
 
 # 3. Build (or pull) and start.
