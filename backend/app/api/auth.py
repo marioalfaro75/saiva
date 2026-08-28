@@ -99,7 +99,7 @@ def setup(
     db.refresh(user)
     db.refresh(household)
 
-    _set_session_cookie(response, security.create_session_token(user.id))
+    _set_session_cookie(response, security.create_session_token(user.id, user.session_epoch))
     csrf = security.generate_csrf_token()
     _set_csrf_cookie(response, csrf)
     audit.record(db, action="setup", household_id=household.id, actor_user_id=user.id,
@@ -136,7 +136,7 @@ def login(
     household = db.get(models.Household, user.household_id)
     assert household is not None
 
-    _set_session_cookie(response, security.create_session_token(user.id))
+    _set_session_cookie(response, security.create_session_token(user.id, user.session_epoch))
     csrf = security.generate_csrf_token()
     _set_csrf_cookie(response, csrf)
     audit.record(db, action="login", household_id=user.household_id, actor_user_id=user.id,
@@ -149,6 +149,54 @@ def logout(response: Response) -> dict[str, str]:
     response.delete_cookie(security.SESSION_COOKIE, path="/")
     response.delete_cookie(security.CSRF_COOKIE, path="/")
     return {"message": "Signed out"}
+
+
+@router.post("/password", response_model=schemas.MessageOut)
+def change_password(
+    payload: schemas.PasswordChange,
+    request: Request,
+    response: Response,
+    user: models.User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> schemas.MessageOut:
+    """Change a password, ending every other session.
+
+    There was no way to change a password at all, and signing out only cleared the
+    browser's cookie while the token stayed valid for its full term — so a household
+    that suspected a password was known had no move available. Raising the epoch is
+    what makes the change mean something: tokens issued before it stop working.
+    """
+    if not security.verify_password(user.password_hash, payload.current_password):
+        audit.record(db, action="password_change_failed", household_id=user.household_id,
+                     actor_user_id=user.id, ip=_client_ip(request))
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "Current password is incorrect")
+
+    user.password_hash = security.hash_password(payload.new_password)
+    user.session_epoch += 1
+    db.commit()
+    db.refresh(user)
+    # This browser keeps working; every other one is signed out.
+    _set_session_cookie(response, security.create_session_token(user.id, user.session_epoch))
+    audit.record(db, action="password_changed", household_id=user.household_id,
+                 actor_user_id=user.id, ip=_client_ip(request))
+    return schemas.MessageOut(message="Password changed. Other devices have been signed out.")
+
+
+@router.post("/sign-out-everywhere", response_model=schemas.MessageOut)
+def sign_out_everywhere(
+    request: Request,
+    response: Response,
+    user: models.User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> schemas.MessageOut:
+    """End every session for this account, including this one."""
+    user.session_epoch += 1
+    db.commit()
+    audit.record(db, action="sign_out_everywhere", household_id=user.household_id,
+                 actor_user_id=user.id, ip=_client_ip(request))
+    response.delete_cookie(security.SESSION_COOKIE, path="/")
+    response.delete_cookie(security.CSRF_COOKIE, path="/")
+    return schemas.MessageOut(message="Signed out on every device.")
 
 
 @router.get("/me", response_model=schemas.MeOut)

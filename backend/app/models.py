@@ -74,6 +74,11 @@ class User(Base, TimestampMixin):
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
     totp_secret: Mapped[str | None] = mapped_column(String(64), nullable=True)
     last_login_at: Mapped[dt.datetime | None] = mapped_column(DateTime, nullable=True)
+    # Stamped into every session token and compared on each request. Raising it
+    # invalidates outstanding tokens without a session table — the app's sessions are
+    # stateless JWTs, so signing out could previously only clear the browser's cookie
+    # while the token itself stayed valid for its full fourteen days.
+    session_epoch: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
 
     household: Mapped[Household] = relationship(back_populates="users")
 

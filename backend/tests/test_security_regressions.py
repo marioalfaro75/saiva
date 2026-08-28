@@ -469,3 +469,64 @@ def test_seeding_is_refused_once_real_accounts_exist(auth_client: TestClient) ->
 
     with SessionLocal() as db, pytest.raises(seed.DemoRefused):
         seed.setup_demo(db)
+
+
+# ---------------------------------------------------------------- revocation
+
+
+def test_changing_a_password_ends_other_sessions(client: TestClient) -> None:
+    """There was no way to change a password, and signing out cleared the browser's
+    cookie while the 14-day token stayed valid — so a household that suspected a
+    password was known had no move available at all."""
+    from conftest import DEFAULT_PASSWORD, sync_csrf
+
+    setup_owner(client)
+    stolen = client.cookies.get("saiva_session")
+    assert stolen
+
+    changed = client.post(
+        "/api/auth/password",
+        json={"current_password": DEFAULT_PASSWORD, "new_password": "a-much-better-one"},
+    )
+    assert changed.status_code == 200, changed.text
+    # The browser that made the change carries on.
+    assert client.get("/api/auth/me").status_code == 200
+
+    # A copy of the old token does not.
+    other = TestClient(client.app)
+    other.cookies.set("saiva_session", stolen)
+    sync_csrf(other)
+    assert other.get("/api/auth/me").status_code == 401
+
+
+def test_the_current_password_is_required_to_change_it(auth_client: TestClient) -> None:
+    resp = auth_client.post(
+        "/api/auth/password",
+        json={"current_password": "not-the-password", "new_password": "a-much-better-one"},
+    )
+    assert resp.status_code == 403
+
+
+def test_signing_out_everywhere_invalidates_this_session_too(client: TestClient) -> None:
+    setup_owner(client)
+    token = client.cookies.get("saiva_session")
+    assert client.post("/api/auth/sign-out-everywhere").status_code == 200
+
+    from conftest import sync_csrf
+
+    other = TestClient(client.app)
+    other.cookies.set("saiva_session", token)
+    sync_csrf(other)
+    assert other.get("/api/auth/me").status_code == 401
+
+
+def test_a_report_filename_cannot_escape_its_header() -> None:
+    """A household name is chosen by a member and lands inside a quoted
+    Content-Disposition value. Folding to ASCII is not sanitising — quotes, backslashes
+    and newlines are all ASCII."""
+    from app.api.reports import _ascii_filename
+
+    for hostile in ["Smith\" attack=\"x", "line\nbreak", "back\\slash", "a\";b"]:
+        out = _ascii_filename(hostile)
+        assert '"' not in out and "\n" not in out and "\\" not in out
+    assert _ascii_filename("FY2025–26 Report") == "FY2025-26_Report"

@@ -19,12 +19,16 @@ def get_current_user(request: Request, db: Session = Depends(get_db)) -> models.
     token = request.cookies.get(security.SESSION_COOKIE)
     if not token:
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Not authenticated")
-    user_id = security.decode_session_token(token)
-    if not user_id:
+    decoded = security.decode_session_token(token)
+    if not decoded:
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Invalid or expired session")
+    user_id, epoch = decoded
     user = db.get(models.User, user_id)
     if user is None or not user.is_active:
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "User not found or inactive")
+    if epoch != user.session_epoch:
+        # Signed out everywhere, or the password was changed, since this was issued.
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Session has been ended")
     return user
 
 

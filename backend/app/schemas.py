@@ -19,6 +19,11 @@ class SetupRequest(BaseModel):
     period_basis: Literal["calendar", "weekly", "fortnightly", "monthly"] = "calendar"
 
 
+class PasswordChange(BaseModel):
+    current_password: str
+    new_password: str = Field(min_length=10, max_length=200)
+
+
 class LoginRequest(BaseModel):
     email: EmailStr
     password: str
