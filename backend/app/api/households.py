@@ -8,7 +8,7 @@ from sqlalchemy.orm import Session
 
 from .. import models, schemas, security
 from ..db import get_db
-from ..deps import get_current_user, require_owner, require_writer
+from ..deps import get_current_user, require_owner
 
 router = APIRouter(prefix="/household", tags=["household"])
 
@@ -25,9 +25,17 @@ def get_household(
 @router.patch("", response_model=schemas.HouseholdOut)
 def update_household(
     payload: schemas.HouseholdUpdate,
-    user: models.User = Depends(require_writer),
+    user: models.User = Depends(require_owner),
     db: Session = Depends(get_db),
 ) -> models.Household:
+    """Household-wide configuration. Owner only.
+
+    `fy_start_month`, `period_basis` and `pay_cycle_anchor` decide where every period
+    boundary falls, so changing one silently restates every figure the household has
+    ever been shown — budgets, dashboards, the tax-year report. Adding a user is
+    already owner-only; reshaping everyone's history should not have been a rung
+    below it.
+    """
     household = db.get(models.Household, user.household_id)
     assert household is not None
     for key, value in payload.model_dump(exclude_unset=True).items():

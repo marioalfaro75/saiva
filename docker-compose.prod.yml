@@ -35,6 +35,11 @@ services:
       ENVIRONMENT: ${ENVIRONMENT:-production}
       COOKIE_SECURE: ${COOKIE_SECURE:-true}
       CORS_ORIGINS: ${CORS_ORIGINS:-}
+      # Caddy is the only thing that can reach the API (it is `expose`d, not
+      # published), so its X-Forwarded-For is worth believing. Without this the
+      # rate limiter and the audit log both see Caddy's container IP and nothing
+      # else — one shared bucket for every visitor, and a useless audit trail.
+      TRUSTED_PROXIES: ${TRUSTED_PROXIES:-caddy}
       # Lets the in-app "Update now" button ask Watchtower to pull + recreate.
       WATCHTOWER_URL: http://watchtower:8080
       WATCHTOWER_TOKEN: ${WATCHTOWER_TOKEN:-}
@@ -64,9 +69,16 @@ services:
       SAIVA_SITE_ADDRESS: ${SAIVA_SITE_ADDRESS:-localhost}
       SAIVA_SITE_HOST: ${SAIVA_SITE_HOST:-localhost}
       SAIVA_TLS: ${SAIVA_TLS:-internal}
+      # 0 unless a publicly trusted certificate is in use — see infra/Caddyfile.
+      SAIVA_HSTS_MAX_AGE: ${SAIVA_HSTS_MAX_AGE:-0}
+    # Bound to the loopback address unless a site address was chosen, because Docker
+    # publishes on 0.0.0.0 by default and inserts NAT rules that bypass the host
+    # firewall. Caddy routes on the Host header, not on the listening address, so a
+    # default "localhost" install was reachable from the whole LAN by anyone sending
+    # Host: localhost — while the README promised it was confined to this machine.
     ports:
-      - "80:80"
-      - "443:443"
+      - "${SAIVA_BIND_ADDR:-127.0.0.1}:80:80"
+      - "${SAIVA_BIND_ADDR:-127.0.0.1}:443:443"
     volumes:
       - ./infra/Caddyfile:/etc/caddy/Caddyfile:ro
       - caddy_data:/data
@@ -80,16 +92,70 @@ services:
   watchtower:
     image: nickfedor/watchtower
     restart: unless-stopped
+    depends_on:
+      - docker-socket-proxy
     environment:
       WATCHTOWER_HTTP_API_UPDATE: "true"
       WATCHTOWER_HTTP_API_TOKEN: ${WATCHTOWER_TOKEN:?set WATCHTOWER_TOKEN in .env}
       WATCHTOWER_LABEL_ENABLE: "true"
       WATCHTOWER_CLEANUP: "true"
+      # Talks to the filtering proxy instead of the socket. See its comment below.
+      DOCKER_HOST: tcp://docker-socket-proxy:2375
       # Optional Docker API version override; blank = auto-negotiate (the default,
       # and correct on modern daemons). Set only if your daemon requires a fixed one.
       DOCKER_API_VERSION: "${DOCKER_API_VERSION:-}"
+    networks:
+      - default
+      - docker-api
+
+  # A filtering front end for the Docker socket, so Watchtower — a container that
+  # accepts HTTP requests — is not the thing holding a direct line to the daemon.
+  #
+  # Be clear about what this does and does not buy. It blocks the parts of the API
+  # Watchtower has no use for: exec, volumes, networks, build, swarm, the system
+  # endpoints. It does NOT make the remaining access safe, because updating a
+  # container means creating one, and anything that can create a container can
+  # create a privileged one and own the host. This narrows the blast radius of a
+  # Watchtower bug; it does not contain a determined attacker who reaches the proxy.
+  #
+  # If that trade is not one you want, drop this service and Watchtower with it and
+  # update by hand: `docker compose pull && docker compose up -d`. The app works
+  # exactly the same, minus the in-app "Update now" button.
+  docker-socket-proxy:
+    image: tecnativa/docker-socket-proxy:0.3.0
+    restart: unless-stopped
+    environment:
+      # Read: what Watchtower needs to see.
+      CONTAINERS: 1
+      IMAGES: 1
+      VERSION: 1
+      PING: 1
+      # Write: pull an image, stop the old container, start the new one.
+      POST: 1
+      # Everything else stays off. These are the ones that matter most:
+      EXEC: 0
+      VOLUMES: 0
+      NETWORKS: 0
+      BUILD: 0
+      SWARM: 0
+      SYSTEM: 0
+      SECRETS: 0
+      CONFIGS: 0
+      SERVICES: 0
+      TASKS: 0
+      NODES: 0
+      PLUGINS: 0
+      # No ports: are published, so only the docker-api network can reach it.
     volumes:
-      - /var/run/docker.sock:/var/run/docker.sock
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    networks:
+      - docker-api
+
+networks:
+  # Isolated: only Watchtower and the proxy are on it, so nothing that faces the
+  # internet shares a network with something holding the Docker socket.
+  docker-api:
+    internal: true
 
 volumes:
   db_data:

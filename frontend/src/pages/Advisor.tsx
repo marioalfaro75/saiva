@@ -8,7 +8,9 @@ import type { ChatMessage } from "../api/types";
 import { PageHead } from "../components/PageHead";
 
 const PRIVACY_LABEL: Record<string, string> = {
-  local_only: "Local only — nothing leaves your network",
+  // "Nothing leaves your network" is now enforced rather than described: the mode
+  // requires a Base URL on your own network and refuses a cloud provider outright.
+  local_only: "Local only — a model on your own network, full detail",
   aggregates: "Aggregates only — category totals & summaries, no raw transactions",
   full: "Full detail — includes recent transactions",
 };

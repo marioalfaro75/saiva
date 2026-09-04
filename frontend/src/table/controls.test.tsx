@@ -1,4 +1,5 @@
 import { fireEvent, render, screen } from "@testing-library/react";
+import type { Mock } from "vitest";
 import { describe, expect, it, vi } from "vitest";
 
 import { FilterRow, FilterToggle } from "./FilterRow";
@@ -14,18 +15,25 @@ import type { TableControls } from "./useTable";
  */
 
 type Callbacks = "toggleSort" | "setFilter" | "clearFilters" | "toggleFilters";
-/** The callbacks stay spies — only the state around them is worth overriding. */
-type MockedControls = Omit<TableControls, Callbacks> & Record<Callbacks, ReturnType<typeof vi.fn>>;
+/**
+ * The callbacks stay spies — only the state around them is worth overriding. Each
+ * spy carries its real signature rather than a bare `vi.fn()`: an untyped mock
+ * satisfies any call, so a test could assert on arguments the component never
+ * actually passes and still go green.
+ */
+type MockedControls = Omit<TableControls, Callbacks> & {
+  [K in Callbacks]: Mock<TableControls[K]>;
+};
 
 function controls(over: Partial<Omit<TableControls, Callbacks>> = {}): MockedControls {
   return {
     sort: null,
-    toggleSort: vi.fn(),
+    toggleSort: vi.fn<TableControls["toggleSort"]>(),
     filters: {},
-    setFilter: vi.fn(),
-    clearFilters: vi.fn(),
+    setFilter: vi.fn<TableControls["setFilter"]>(),
+    clearFilters: vi.fn<TableControls["clearFilters"]>(),
     filtersOpen: true,
-    toggleFilters: vi.fn(),
+    toggleFilters: vi.fn<TableControls["toggleFilters"]>(),
     activeFilterCount: 0,
     matched: 0,
     total: 0,

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import datetime as dt
+import re
 import unicodedata
 
 from fastapi import APIRouter, Depends, Query, Response
@@ -11,6 +12,7 @@ from sqlalchemy.orm import Session
 from .. import models, schemas
 from ..db import get_db
 from ..deps import get_current_user
+from ..ratelimit import rate_limit_report
 from ..services import reports as reports_service
 from ..services.periods import fy_bounds
 
@@ -25,7 +27,12 @@ def _ascii_filename(name: str) -> str:
     ascii_only = (
         unicodedata.normalize("NFKD", folded).encode("ascii", "ignore").decode("ascii")
     )
-    return ascii_only or "report.pdf"
+    # Folding to ASCII is not sanitising: quotes, backslashes and newlines are all
+    # ASCII, and this value goes inside a quoted header. A household name is chosen by
+    # a member, so `Smith" attack="` would have closed the quoted string and added a
+    # header parameter. Keep to characters a filename actually needs.
+    safe = re.sub(r"[^A-Za-z0-9._-]", "", ascii_only).lstrip(".")
+    return safe or "report.pdf"
 
 
 @router.get("/years", response_model=list[schemas.FYReportOption])
@@ -43,6 +50,7 @@ def fy_years(
 @router.get("/fy")
 def fy_report_pdf(
     year: int | None = Query(default=None, ge=2000, le=2100),
+    _rl: None = Depends(rate_limit_report),
     user: models.User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> Response:

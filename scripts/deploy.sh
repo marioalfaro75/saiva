@@ -133,7 +133,27 @@ if [ -n "$SITE" ]; then
   set_env_var SAIVA_SITE_ADDRESS "$SITE"
   host="${SITE#http://}"; host="${host#https://}"; host="${host%%/*}"
   set_env_var SAIVA_SITE_HOST "$host"
-  echo "  → serving at ${SITE}"
+  # Asking to be served at an address is asking to be reachable at it, so the published
+  # ports follow the same decision. Left alone, they stay on loopback: the default
+  # install is meant to be this machine only, and the binding now says so as well as
+  # the docs.
+  set_env_var SAIVA_BIND_ADDR "0.0.0.0"
+  echo "  → serving at ${SITE} (published on all interfaces)"
+else
+  set_env_var SAIVA_BIND_ADDR "127.0.0.1"
+fi
+
+# HSTS only where a browser can actually verify the certificate. Caddy's `internal`
+# CA is not in any trust store, and a non-zero max-age there turns the certificate
+# warning into a dead end with no way past it — on a LAN IP that may later belong to
+# a different machine entirely. An explicit 0 also clears a stale policy from a host
+# that used to serve HSTS.
+tls_mode="$(grep -E '^SAIVA_TLS=' .env | cut -d= -f2- || true)"
+if [ -n "$tls_mode" ] && [ "$tls_mode" != "internal" ]; then
+  set_env_var SAIVA_HSTS_MAX_AGE "31536000"
+  echo "  → HSTS enabled (publicly trusted certificate)"
+else
+  set_env_var SAIVA_HSTS_MAX_AGE "0"
 fi
 
 # 3. Build (or pull) and start.
@@ -198,5 +218,5 @@ case "$url" in
     echo "        warning until you trust its root CA (see the README's LAN section)."
     ;;
 esac
-[ "$SEED" -eq 1 ] && echo "  Demo login: demo@saiva.app / demodemodemo"
+# The demo password is generated per install and printed by the seed step above.
 exit 0

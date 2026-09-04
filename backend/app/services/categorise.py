@@ -3,9 +3,9 @@ learning ML categoriser (R12). Low-confidence results route to the review queue.
 
 from __future__ import annotations
 
-import re
 from dataclasses import dataclass
 
+import regex
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -33,11 +33,33 @@ def _match(match_type: str, pattern: str, description: str, merchant: str | None
     if match_type == "starts_with":
         return combined.lstrip().startswith(p)
     if match_type == "regex":
-        try:
-            return re.search(pattern, combined, re.IGNORECASE) is not None
-        except re.error:
-            return False
+        return _regex_matches(pattern, combined)
     return False
+
+
+# A rule's pattern is written by a household member and run against every transaction,
+# so it is untrusted input on a hot path. The stdlib engine backtracks catastrophically:
+# "^(a+)+$" against 31 characters takes ~55 seconds, and nothing bounds how long a match
+# may run, so any signed-in member — a viewer included — could pin a core indefinitely.
+# The `regex` engine defeats that class outright, and the timeout catches whatever it
+# does not.
+_REGEX_TIMEOUT_SECONDS = 0.1
+
+
+def _regex_matches(pattern: str, subject: str) -> bool:
+    try:
+        return (
+            regex.search(
+                pattern, subject, regex.IGNORECASE, timeout=_REGEX_TIMEOUT_SECONDS
+            )
+            is not None
+        )
+    except regex.error:
+        return False
+    except TimeoutError:
+        # Treated as "no match" rather than an error: one pathological rule should not
+        # fail an entire import, and the rule simply stops being useful.
+        return False
 
 
 class Categoriser:

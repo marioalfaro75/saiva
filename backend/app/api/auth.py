@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import datetime as dt
+import secrets
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from .. import models, schemas, security
+from ..clientip import client_ip
 from ..config import get_settings
 from ..db import get_db
 from ..deps import get_current_user
@@ -19,9 +21,16 @@ from ..services.seed import seed_household_defaults
 router = APIRouter(prefix="/auth", tags=["auth"])
 settings = get_settings()
 
+# Hashed once at import from a value nobody knows, purely so the no-such-user path can
+# do the same work the real one does.
+_TIMING_EQUALISER = security.hash_password(secrets.token_urlsafe(32))
+
 
 def _client_ip(request: Request) -> str | None:
-    return request.client.host if request.client else None
+    # Resolved through the trusted-proxy rules rather than read straight off the
+    # socket: behind Caddy the peer is always Caddy, so every audit row used to
+    # record one container IP and told you nothing about who did the thing.
+    return client_ip(request)
 
 
 def _set_session_cookie(response: Response, token: str) -> None:
@@ -94,7 +103,7 @@ def setup(
     db.refresh(user)
     db.refresh(household)
 
-    _set_session_cookie(response, security.create_session_token(user.id))
+    _set_session_cookie(response, security.create_session_token(user.id, user.session_epoch))
     csrf = security.generate_csrf_token()
     _set_csrf_cookie(response, csrf)
     audit.record(db, action="setup", household_id=household.id, actor_user_id=user.id,
@@ -112,9 +121,14 @@ def login(
 ) -> schemas.MeOut:
     email = payload.email.lower()
     user = db.execute(select(models.User).where(models.User.email == email)).scalar_one_or_none()
-    if user is None or not user.is_active or not security.verify_password(
-        user.password_hash, payload.password
-    ):
+    if user is None or not user.is_active:
+        # Verify against a throwaway hash so an unknown address costs the same Argon2
+        # work as a known one. Without this the reply comes back immediately, and the
+        # gap is wide enough to enumerate which addresses have accounts.
+        security.verify_password(_TIMING_EQUALISER, payload.password)
+        audit.record(db, action="login_failed", ip=_client_ip(request), detail={"email": email})
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Invalid email or password")
+    if not security.verify_password(user.password_hash, payload.password):
         audit.record(db, action="login_failed", ip=_client_ip(request), detail={"email": email})
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Invalid email or password")
 
@@ -126,7 +140,7 @@ def login(
     household = db.get(models.Household, user.household_id)
     assert household is not None
 
-    _set_session_cookie(response, security.create_session_token(user.id))
+    _set_session_cookie(response, security.create_session_token(user.id, user.session_epoch))
     csrf = security.generate_csrf_token()
     _set_csrf_cookie(response, csrf)
     audit.record(db, action="login", household_id=user.household_id, actor_user_id=user.id,
@@ -139,6 +153,55 @@ def logout(response: Response) -> dict[str, str]:
     response.delete_cookie(security.SESSION_COOKIE, path="/")
     response.delete_cookie(security.CSRF_COOKIE, path="/")
     return {"message": "Signed out"}
+
+
+@router.post("/password", response_model=schemas.MessageOut)
+def change_password(
+    payload: schemas.PasswordChange,
+    request: Request,
+    response: Response,
+    _rl: None = Depends(rate_limit_login),
+    user: models.User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> schemas.MessageOut:
+    """Change a password, ending every other session.
+
+    There was no way to change a password at all, and signing out only cleared the
+    browser's cookie while the token stayed valid for its full term — so a household
+    that suspected a password was known had no move available. Raising the epoch is
+    what makes the change mean something: tokens issued before it stop working.
+    """
+    if not security.verify_password(user.password_hash, payload.current_password):
+        audit.record(db, action="password_change_failed", household_id=user.household_id,
+                     actor_user_id=user.id, ip=_client_ip(request))
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "Current password is incorrect")
+
+    user.password_hash = security.hash_password(payload.new_password)
+    user.session_epoch += 1
+    db.commit()
+    db.refresh(user)
+    # This browser keeps working; every other one is signed out.
+    _set_session_cookie(response, security.create_session_token(user.id, user.session_epoch))
+    audit.record(db, action="password_changed", household_id=user.household_id,
+                 actor_user_id=user.id, ip=_client_ip(request))
+    return schemas.MessageOut(message="Password changed. Other devices have been signed out.")
+
+
+@router.post("/sign-out-everywhere", response_model=schemas.MessageOut)
+def sign_out_everywhere(
+    request: Request,
+    response: Response,
+    user: models.User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> schemas.MessageOut:
+    """End every session for this account, including this one."""
+    user.session_epoch += 1
+    db.commit()
+    audit.record(db, action="sign_out_everywhere", household_id=user.household_id,
+                 actor_user_id=user.id, ip=_client_ip(request))
+    response.delete_cookie(security.SESSION_COOKIE, path="/")
+    response.delete_cookie(security.CSRF_COOKIE, path="/")
+    return schemas.MessageOut(message="Signed out on every device.")
 
 
 @router.get("/me", response_model=schemas.MeOut)

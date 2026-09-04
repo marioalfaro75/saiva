@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import datetime as dt
 import random
+import secrets
 
 from dateutil.relativedelta import relativedelta
 from sqlalchemy import select
@@ -16,8 +17,23 @@ from .importers import dedup_hash
 from .merchants import normalise_merchant
 from .transfers import detect_transfers
 
+
+class DemoRefused(RuntimeError):
+    """Seeding was declined because this install is already in use."""
+
 DEMO_EMAIL = "demo@saiva.app"
-DEMO_PASSWORD = "demodemodemo"  # noqa: S105 — local demo account only
+
+
+def _demo_password() -> str:
+    """A fresh password each time the demo account is created.
+
+    It used to be the fixed string "demodemodemo", published in this repository and
+    printed by `make deploy SEED=1` — a documented flag. That put an owner-role account
+    with publicly known credentials into whatever deployment ran it, and an owner can
+    read every transaction and export the lot. Generated and shown once instead: the
+    demo is just as easy to use, and the password is not in anyone's git history.
+    """
+    return secrets.token_urlsafe(12)
 
 
 def seed_household_defaults(db: Session, household: models.Household) -> None:
@@ -247,27 +263,47 @@ def create_demo_data(db: Session, household: models.Household, months: int = 6) 
 
 
 def setup_demo(db: Session) -> tuple[models.User, models.Household, str]:
+    """Create the demo household, or return the existing one.
+
+    Refuses outright once real accounts exist. Seeding is for looking at an empty
+    install with data in it; adding an owner-role account to a household already in use
+    is indistinguishable from planting a way in, and the flag is easy to pass by
+    accident on a redeploy.
+    """
     existing = db.execute(
         select(models.User).where(models.User.email == DEMO_EMAIL)
     ).scalar_one_or_none()
     if existing:
         household = db.get(models.Household, existing.household_id)
         assert household is not None
-        return existing, household, DEMO_PASSWORD
+        # The stored hash cannot be read back, so a fresh one is issued and shown.
+        password = _demo_password()
+        existing.password_hash = security.hash_password(password)
+        db.commit()
+        return existing, household, password
+
+    if db.execute(
+        select(models.User.id).where(models.User.email != DEMO_EMAIL).limit(1)
+    ).first():
+        raise DemoRefused(
+            "This instance already has real accounts, so the demo account was not "
+            "created. Seeding is for a fresh install."
+        )
 
     household = models.Household(name="Demo Household", state="NSW", period_basis="calendar")
     db.add(household)
     db.flush()
     seed_household_defaults(db, household)
+    password = _demo_password()
     user = models.User(
         household_id=household.id, email=DEMO_EMAIL, name="Demo Owner", role="owner",
-        password_hash=security.hash_password(DEMO_PASSWORD),
+        password_hash=security.hash_password(password),
     )
     db.add(user)
     db.flush()
     create_demo_data(db, household)
     db.commit()
-    return user, household, DEMO_PASSWORD
+    return user, household, password
 
 
 def main() -> None:
@@ -278,9 +314,13 @@ def main() -> None:
     db = SessionLocal()
     try:
         user, _household, password = setup_demo(db)
-        print(f"Saiva demo ready — login: {user.email} / {password}")
+    except DemoRefused as exc:
+        print(f"Demo not seeded: {exc}")
+        return
     finally:
         db.close()
+    print(f"Saiva demo ready — login: {user.email} / {password}")
+    print("This password is shown once and is not stored anywhere in plain text.")
 
 
 if __name__ == "__main__":

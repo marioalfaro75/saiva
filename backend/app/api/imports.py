@@ -14,12 +14,15 @@ from sqlalchemy.orm import Session
 from .. import models, schemas
 from ..db import get_db
 from ..deps import get_current_user, require_writer
+from ..ratelimit import rate_limit_import
 from ..services import audit, dedup, importers
 from ..services.categorise import build_categoriser
 from ..services.transfers import detect_transfers
 
 router = APIRouter(prefix="/imports", tags=["imports"])
 MAX_UPLOAD_BYTES = 10 * 1024 * 1024
+# Read in pieces so an oversized body is refused partway through rather than after.
+_CHUNK_BYTES = 64 * 1024
 
 
 def _parse_mapping(mapping_json: str | None) -> schemas.CsvMapping | None:
@@ -40,10 +43,23 @@ def _account_or_404(db: Session, account_id: str, household_id: str) -> models.A
 
 
 async def _read(file: UploadFile) -> bytes:
-    content = await file.read()
-    if len(content) > MAX_UPLOAD_BYTES:
-        raise HTTPException(status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, "File too large (max 10 MB)")
-    return content
+    """Read an upload, refusing to hold more than the cap in memory.
+
+    `await file.read()` buffers the whole body before the size is looked at, so a 4 GB
+    upload was written to the container's disk — the one the pre-migration database
+    dumps share — and then loaded into memory, all before the limit was consulted. The
+    cap has to be enforced while reading, not after.
+    """
+    chunks: list[bytes] = []
+    total = 0
+    while chunk := await file.read(_CHUNK_BYTES):
+        total += len(chunk)
+        if total > MAX_UPLOAD_BYTES:
+            raise HTTPException(
+                status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, "File too large (max 10 MB)"
+            )
+        chunks.append(chunk)
+    return b"".join(chunks)
 
 
 def _category_names(db: Session, household_id: str) -> dict[str, str]:
@@ -351,10 +367,17 @@ def _will_import(
 @router.post("/sniff", response_model=schemas.ImportSniffOut)
 async def sniff(
     file: UploadFile = File(...),
+    _rl: None = Depends(rate_limit_import),
     user: models.User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> schemas.ImportSniffOut:
-    out = importers.sniff_csv(await _read(file))
+    try:
+        out = importers.sniff_csv(await _read(file))
+    except ValueError as exc:
+        # The first look at an uploaded file is the likeliest place to meet one the
+        # parser cannot read. Every other import endpoint already answered with a
+        # message; this one answered with a 500.
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc)) from exc
     profile = db.execute(
         select(models.ImportProfile).where(
             models.ImportProfile.household_id == user.household_id,
@@ -374,6 +397,7 @@ async def sniff(
 @router.post("/accounts/scan", response_model=list[schemas.AccountScanRow])
 async def scan_accounts(
     file: UploadFile = File(...),
+    _rl: None = Depends(rate_limit_import),
     mapping: str | None = Form(None),
     file_format: str = Form("csv"),
     user: models.User = Depends(get_current_user),
@@ -428,6 +452,7 @@ async def scan_accounts(
 @router.post("/preview", response_model=schemas.ImportPreviewOut)
 async def preview(
     file: UploadFile = File(...),
+    _rl: None = Depends(rate_limit_import),
     account_id: str | None = Form(None),
     file_format: str = Form("csv"),
     mapping: str | None = Form(None),
@@ -504,6 +529,7 @@ async def preview(
 @router.post("/commit", response_model=schemas.ImportCommitOut)
 async def commit(
     file: UploadFile = File(...),
+    _rl: None = Depends(rate_limit_import),
     account_id: str | None = Form(None),
     file_format: str = Form("csv"),
     mapping: str | None = Form(None),
@@ -595,7 +621,11 @@ async def commit(
     batch.added_count = added
     batch.skipped_count = skipped
     db.commit()
-    transfers_linked = detect_transfers(db, user.household_id)
+    # Scoped to the dates this file covered. Re-deciding the whole history after every
+    # import is how a crafted row could reach back years and pair itself with a real
+    # expense, taking both out of every figure the app reports.
+    earliest = min((p.txn_date for p in parsed), default=None)
+    transfers_linked = detect_transfers(db, user.household_id, since=earliest)
     audit.record(
         db, action="import_commit", household_id=user.household_id, actor_user_id=user.id,
         entity="import_batch", entity_id=batch.id, detail={"added": added, "skipped": skipped},

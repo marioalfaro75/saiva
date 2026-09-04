@@ -82,7 +82,7 @@ and DB password), builds the images, starts the stack, and waits until it's heal
 
 ```bash
 make deploy            # equivalently: ./scripts/deploy.sh
-make deploy SEED=1     # also load demo data (login: demo@saiva.app / demodemodemo)
+make deploy SEED=1     # also load demo data (prints a generated demo password)
 ```
 
 <details>
@@ -234,7 +234,10 @@ npm install
 npm run dev                          # http://localhost:5173 (proxies /api → :8000)
 ```
 
-Demo login (after seeding): `demo@saiva.app` / `demodemodemo`.
+Demo login (after seeding): `demo@saiva.app`, with a password generated during
+seeding and printed once. Seeding is refused on an install that already has real
+accounts — the demo user is an owner, and adding one to a household in use would
+be indistinguishable from planting a way in.
 
 ## Testing & quality gates
 
@@ -246,9 +249,99 @@ cd backend && ruff check . && mypy app && pytest --cov=app
 cd frontend && npm run lint && npm run build && npm run test
 ```
 
-CI ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)) runs the same gates plus a
-Postgres migration check (`alembic upgrade head` + `alembic check`) and security scans
-(bandit SAST, pip‑audit, gitleaks secret scan) on every push/PR.
+The gates themselves live in [`.github/workflows/checks.yml`](.github/workflows/checks.yml)
+as a reusable workflow, so every path that publishes an image — the `edge` build on
+`main`, a `v*` tag, and the manual "Cut release" — runs exactly the same jobs first. On
+top of the commands above it adds a Postgres migration check (`alembic upgrade head` +
+`alembic check`), bandit SAST, a gitleaks secret scan, and **blocking** dependency
+audits (`pip-audit`, `npm audit --audit-level=high`).
+
+[`.github/workflows/security-scan.yml`](.github/workflows/security-scan.yml) runs Semgrep,
+Trivy and hadolint on every PR and weekly, reporting into the repository's Security tab
+and printing findings to the run log — a scan whose results live only in a SARIF file
+is one nobody reads. Trivy also emits a CycloneDX SBOM, kept with the run for 90 days. It is
+separate from the gates on purpose: those scanners re-fetch their rules and CVE data on
+every run, so their verdict on an unchanged commit changes over time, and a tag that
+built on Tuesday should not fail on Wednesday for a reason nobody introduced. The weekly
+run is the point — it finds the CVE published after the code merged.
+
+## Dependency pinning
+
+The API image installs from [`backend/requirements.lock`](backend/requirements.lock) with
+`pip install --require-hashes`, not from the ranges in `pyproject.toml`. Ranges are right
+for humans and wrong for a production build: anything published inside `httpx>=0.27`
+would otherwise land in the image on the next rebuild, unreviewed.
+
+After changing `[project].dependencies`, regenerate the lock:
+
+```bash
+pip install pip-tools
+cd backend && pip-compile --generate-hashes --strip-extras --no-header \
+    --output-file=requirements.lock pyproject.toml
+# keep the explanatory header at the top of the file
+```
+
+`scripts/check_lockfile.py` runs in CI and fails if the two files disagree, so a
+dependency added to `pyproject.toml` cannot quietly miss the image.
+
+Third-party GitHub Actions are pinned to 40-character commit SHAs rather than tags — a
+tag is a mutable pointer its owner can move, which is exactly how the
+`tj-actions/changed-files` compromise (CVE-2025-30066) reached thousands of repositories.
+Dependabot understands SHA pins and keeps them current.
+
+## The AI advisor and untrusted text
+
+Transaction descriptions come from statement files, which come from banks, which
+pass through whatever a payee typed into a payment reference. That text reaches the
+model's system prompt, and the model has tools.
+
+Two things keep that bounded. The tools are bound to the caller's session household
+and the privacy mode is re-checked when each one runs, so no amount of prompt
+trickery reaches another household, writes anything, or sees detail the household
+asked to keep back. And the statement text is fenced inside a labelled block, with
+the fence markers and control characters stripped out of it, so a merchant named
+"IGNORE ALL PREVIOUS INSTRUCTIONS" cannot close the fence and address the model
+directly.
+
+`backend/tests/test_prompt_injection.py` pins both.
+
+## Rate limiting and the reverse proxy
+
+Login, first-run setup and password change share one per-caller ceiling; file
+import, the AI advisor and PDF reports each get their own, so exhausting one cannot
+lock a household out of signing in. Tune them with `RATE_LIMIT_LOGIN_PER_MINUTE`,
+`RATE_LIMIT_IMPORT_PER_MINUTE`, `RATE_LIMIT_AI_PER_MINUTE` and
+`RATE_LIMIT_REPORT_PER_MINUTE` (0 disables one).
+
+Behind a proxy, `request.client.host` is the proxy, so every visitor would share a
+bucket and every audit-log row would record the same address. `TRUSTED_PROXIES`
+(comma-separated IPs, CIDRs or hostnames) names the proxies whose
+`X-Forwarded-For` may be believed — the shipped Compose file sets it to `caddy`.
+Leave it empty when nothing fronts the API: an unset value means the header is
+ignored, which is the safe default, because a client can send that header itself.
+
+## Automatic updates and the Docker socket
+
+The in-app "Update now" button asks Watchtower to pull and recreate the app
+containers. Watchtower talks to a filtering socket proxy on an internal network
+rather than holding `/var/run/docker.sock` itself, which blocks the API sections it
+has no use for — exec, volumes, networks, build, swarm.
+
+Be clear about what that buys: updating a container means creating one, and
+anything that can create a container can create a privileged one and take the host.
+The proxy narrows the blast radius of a bug in Watchtower; it does not contain an
+attacker who reaches it. If you would rather not make that trade, delete the
+`watchtower` and `docker-socket-proxy` services and update by hand — `docker compose
+pull && docker compose up -d`. Everything works the same, minus the button.
+
+### Repository settings to set by hand
+
+Two protections cannot be committed to the repo and must be set in GitHub's settings:
+
+- **Tag protection for `v*`** — branch protection does not cover tags. Without it,
+  anyone who can push a tag can start a release build.
+- **Require the `Checks` status** on pull requests to `main`, so the gates cannot be
+  merged past.
 
 ## Database migrations
 

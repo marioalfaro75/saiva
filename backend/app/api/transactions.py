@@ -502,6 +502,12 @@ def split_txn(
             source="manual",
             notes=s.notes,
             split_parent_id=parent.id,
+            # Dashboard totals count split children and skip their parent, so a child
+            # that did not inherit these flags put an internal transfer back into
+            # income and expenses — splitting a transfer inflated both sides of the
+            # household's figures with money that never entered or left it.
+            is_transfer=parent.is_transfer,
+            transfer_group_id=parent.transfer_group_id,
             dedup_hash=dedup_hash(
                 parent.account_id, parent.txn_date, s.amount_cents,
                 f"{parent.raw_description}#split{i}",
@@ -531,6 +537,23 @@ def delete_txn(
         .all()
     ):
         db.delete(child)
+    # Release the other leg. A transfer group describes two rows being the same money;
+    # with one gone the survivor is an ordinary transaction again, and leaving it
+    # flagged kept it out of every total with nothing left on screen to explain why.
+    if t.transfer_group_id:
+        for other in (
+            db.execute(
+                select(models.Transaction).where(
+                    models.Transaction.household_id == user.household_id,
+                    models.Transaction.transfer_group_id == t.transfer_group_id,
+                    models.Transaction.id != t.id,
+                )
+            )
+            .scalars()
+            .all()
+        ):
+            other.is_transfer = False
+            other.transfer_group_id = None
     db.delete(t)
     db.commit()
     return Response(status_code=status.HTTP_204_NO_CONTENT)

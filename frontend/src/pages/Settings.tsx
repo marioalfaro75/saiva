@@ -272,10 +272,17 @@ export function Settings() {
                   setAi({ ...ai, privacy_mode: e.target.value as AiSettings["privacy_mode"] })
                 }
               >
-                <option value="local_only">Local only</option>
-                <option value="aggregates">Aggregates only</option>
-                <option value="full">Full detail</option>
+                <option value="local_only">Local only — a model on your network</option>
+                <option value="aggregates">Aggregates only — no raw transactions</option>
+                <option value="full">Full detail — includes transactions</option>
               </select>
+              {ai.privacy_mode === "local_only" && (
+                <p className="muted" style={{ fontSize: 12, marginTop: 6 }}>
+                  Needs a Base URL pointing at a model on your own network — for example{" "}
+                  <code>http://localhost:11434/v1</code> for Ollama. A cloud provider is
+                  refused in this mode rather than used quietly.
+                </p>
+              )}
             </div>
           </div>
           {ai.provider !== "none" && (

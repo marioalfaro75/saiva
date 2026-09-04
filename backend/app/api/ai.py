@@ -9,7 +9,8 @@ from sqlalchemy.orm import Session
 from .. import models, schemas
 from ..db import get_db
 from ..deps import get_current_user, optional_period, require_writer
-from ..services import advisor, crypto, periods
+from ..ratelimit import rate_limit_ai
+from ..services import advisor, crypto, periods, provider_url
 from ..services import audit as audit_service
 
 router = APIRouter(prefix="/ai", tags=["ai"])
@@ -42,6 +43,14 @@ def update_ai_settings(
     ai = advisor.settings_for(db, user.household_id)
     data = payload.model_dump(exclude_unset=True)
     api_key = data.pop("api_key", None)
+    if "base_url" in data:
+        # Checked here for a clear message while the user is looking at the field, and
+        # again before every request, because a row written before this rule existed
+        # would otherwise sail past it.
+        try:
+            provider_url.check(data["base_url"])
+        except provider_url.ProviderUrlError as exc:
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc)) from exc
     for key, value in data.items():
         setattr(ai, key, value)
     if api_key is not None:
@@ -54,6 +63,7 @@ def update_ai_settings(
 @router.post("/chat", response_model=schemas.ChatReply)
 def chat(
     payload: schemas.ChatRequest,
+    _rl: None = Depends(rate_limit_ai),
     window: periods.ResolvedPeriod | None = Depends(optional_period),
     user: models.User = Depends(require_writer),
     db: Session = Depends(get_db),
@@ -93,6 +103,7 @@ def _require_configured(db: Session, household_id: str) -> models.AiSettings:
 @router.get("/models", response_model=list[schemas.AiModelOut])
 def list_ai_models(
     provider: str | None = None,
+    _rl: None = Depends(rate_limit_ai),
     user: models.User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> list[schemas.AiModelOut]:
@@ -113,7 +124,9 @@ def list_ai_models(
 
 @router.post("/test", response_model=schemas.MessageOut)
 def test_ai_connection(
-    user: models.User = Depends(require_writer), db: Session = Depends(get_db)
+    _rl: None = Depends(rate_limit_ai),
+    user: models.User = Depends(require_writer),
+    db: Session = Depends(get_db),
 ) -> schemas.MessageOut:
     ai = _require_configured(db, user.household_id)
     try:

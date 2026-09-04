@@ -1,0 +1,42 @@
+version: 2
+
+# Every ecosystem this repo actually installs from. Left off the list, an ecosystem
+# simply never gets a security update — which is how a dependency ends up three
+# years and one advisory behind without anyone deciding that.
+updates:
+  # Keeps the SHA pins in .github/workflows fresh. Dependabot understands a
+  # `uses: owner/action@<sha> # v4` pin and updates the SHA *and* the comment, so
+  # pinning does not mean going stale.
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+
+  - package-ecosystem: npm
+    directory: "/frontend"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    groups:
+      # One PR for the routine churn, separate PRs for anything major — the noise
+      # is what makes people stop reading these.
+      minor-and-patch:
+        update-types: ["minor", "patch"]
+
+  # pyproject.toml declares ranges, so most releases need no PR at all; this
+  # catches the ones that fall outside a range. The image installs from
+  # requirements.lock, which scripts/check_lockfile.py forces you to regenerate.
+  - package-ecosystem: pip
+    directory: "/backend"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+
+  - package-ecosystem: docker
+    directories:
+      - "/backend"
+      - "/frontend"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
