@@ -1,6 +1,6 @@
 # Pinned to bookworm: the `python:3.11-slim` tag now tracks Debian trixie, and the
 # PostgreSQL APT repo/codename must match the base OS (see the RUN step below).
-FROM python:3.11-slim-bookworm AS base
+FROM python:3.14-slim-bookworm AS base
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1 \
