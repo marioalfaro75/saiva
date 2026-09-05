@@ -221,7 +221,7 @@ The smallest thing that delivers the core promise.
 ### 8.2 Data ingestion (file import) **[Decision: files in v1]**
 - **R4 (MVP)** Upload one or more files per account: **CSV, OFX, QFX**; **QIF** best‑effort. (Format matrix in [Appendix B](#appendix-b--bank-file-format-support).)
 - **R5 (MVP)** CSV **guided column‑mapping**: detect/choose date, description, amount (single signed column *or* separate debit/credit), balance; AU date formats (DD/MM/YYYY) default; save a reusable **mapping profile per institution** so future imports are one‑click.
-- **R6 (MVP)** **De‑duplication** on re‑import (hash of date+amount+description+account; configurable window) so overlapping exports don't double‑count.
+- **R6 (MVP)** **De‑duplication** on re‑import so overlapping exports don't double‑count, in four tiers, most reliable first: the bank's own transaction id (OFX `FITID`); an exact hash of account+date+amount+description, matched by *occurrence* so genuine same‑day repeats survive; a near match on similar wording within a few days, for rows the bank has re‑dated or re‑worded; and the same normalised merchant for the same amount on the same day, which is what catches one purchase worded differently in two export formats. The last two are reported as *probable* for a human to confirm.
 - **R7 (MVP)** Import preview: show what will be added/skipped before committing; per‑batch undo.
 - **R8 (MVP)** Robust parsing of messy AU bank descriptions (trailing reference numbers, card suffixes, `EFTPOS`, `OSKO`, `PayID`, BPAY, direct‑debit strings).
 - **R9 (P4)** Automated **CDR/Open Banking** account linking via aggregator; same downstream pipeline as files.

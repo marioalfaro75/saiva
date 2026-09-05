@@ -26,10 +26,13 @@ Runs in a container, HTTPS‑only.
 - **Australian dates by default**, and it says so against a real value from your file:
   `01/07/2025` parses either way round, so the wrong assumption would file a year of
   transactions into the wrong months without a single row failing.
-- **Duplicate‑proof imports** — overlapping date ranges never double up: matching uses the
-  bank's own transaction id where present, then exact matches counted by occurrence, then
-  near matches (re‑dated or re‑worded rows) flagged for review. Genuine repeat purchases
-  are kept, not silently dropped.
+- **Duplicate‑proof imports** — overlapping date ranges never double up, and neither does
+  the same month downloaded as both OFX and CSV. Matching uses the bank's own transaction
+  id where present, then exact matches counted by occurrence, then near matches (re‑dated
+  or re‑worded rows), then the same merchant for the same amount on the same day — which
+  is what catches a bank wording one purchase two ways in two formats. The last two ask
+  you to confirm rather than deciding alone, and genuine repeat purchases are kept, not
+  silently dropped.
 - Rule + **ML categorisation** (confidence‑thresholded), an assisted per‑row categorise
   popover with scopes and "make a rule", a **rules** manager, and per‑transaction locking.
 - Automatic **transfer detection** between your own accounts.
@@ -248,6 +251,14 @@ cd backend && ruff check . && mypy app && pytest --cov=app
 # Frontend: lint, type-check + build, unit tests
 cd frontend && npm run lint && npm run build && npm run test
 ```
+
+[`backend/tests/test_import_data_quality.py`](backend/tests/test_import_data_quality.py)
+is worth knowing about separately: it checks the ledger after a *sequence* of imports —
+overlapping months, mixed formats, files re-exported after the bank re-words things,
+edits and splits in between — because a duplicate never announces itself. It ends with a
+property test that slices a year of transactions into overlapping windows, shuffles them,
+renders each in a random format, and requires the result to reconstruct the original
+exactly.
 
 The gates themselves live in [`.github/workflows/checks.yml`](.github/workflows/checks.yml)
 as a reusable workflow, so every path that publishes an image — the `edge` build on
