@@ -75,6 +75,7 @@ class Candidate:
     raw_description: str
     dedup_hash: str
     provider_txn_id: str | None
+    merchant: str = ""
     consumed: bool = False
     _norm: str | None = None
 
@@ -111,6 +112,7 @@ def load_candidates(db: Session, account_id: str) -> list[Candidate]:
             models.Transaction.raw_description,
             models.Transaction.dedup_hash,
             models.Transaction.provider_txn_id,
+            models.Transaction.merchant,
         ).where(models.Transaction.account_id == account_id)
     ).all()
     return [
@@ -121,6 +123,7 @@ def load_candidates(db: Session, account_id: str) -> list[Candidate]:
             raw_description=r[3] or "",
             dedup_hash=r[4] or "",
             provider_txn_id=r[5],
+            merchant=r[6] or "",
         )
         for r in rows
     ]
@@ -188,11 +191,39 @@ class DuplicateMatcher:
 
         best: Candidate | None = None
         best_score = 0.0
+        same_merchant: Candidate | None = None
         norm = fuzzy_norm(p.raw_description)
         for c in self._window(p):
             score = similarity(norm, c.norm)
             if score > best_score:
                 best, best_score = c, score
+            if (
+                same_merchant is None
+                and p.merchant
+                and c.merchant
+                and c.merchant == p.merchant
+                and c.txn_date == p.txn_date
+            ):
+                same_merchant = c
+
+        weak_similarity = best is None or best_score < SIMILARITY_THRESHOLD
+        if weak_similarity and same_merchant is not None:
+            # A bank words the same transaction differently in different exports —
+            # "WOOLWORTHS METRO SYDNEY" in OFX, "EFTPOS WOOLWORTHS 4521 SYDNEY NSW"
+            # in CSV. Those score far below the similarity threshold, so importing
+            # both formats of one month produced two rows for every transaction.
+            # Normalised merchant is the signal that survives the rewording, and it
+            # still separates two different shops that happen to charge the same
+            # amount on the same day. Same date only, not the whole window: this is
+            # the high-confidence subset, and the verdict is `probable` either way,
+            # so a human confirms before anything is skipped.
+            same_merchant.consumed = True
+            return Verdict(
+                DUPLICATE_PROBABLE,
+                f"Same merchant and amount on {same_merchant.txn_date:%d %b %Y}, "
+                "worded differently",
+                same_merchant,
+            )
         if best is not None and best_score >= SIMILARITY_THRESHOLD:
             best.consumed = True
             days = abs((best.txn_date - p.txn_date).days)
