@@ -5,6 +5,61 @@ All notable changes to Saiva are documented here. The project follows
 
 ## [Unreleased]
 
+### Security
+
+A full review of the codebase against OWASP, and every confirmed finding fixed.
+Thirty in total; these are the ones that change what the app does for you.
+
+- **Signing out now ends the session.** It used to clear the browser's cookie while
+  the token stayed valid for its full fourteen days, so a household that suspected a
+  password was known had no move available — and there was no way to change a password
+  at all. There is now, along with "sign out everywhere", and both stop every token
+  issued earlier from working.
+- **Logging in costs the same whether the address exists or not.** The reply used to
+  come back instantly for an unknown email and slowly for a known one, which is enough
+  to work out who has an account.
+- **"Local only" means it.** The privacy mode promised nothing left your network and
+  sent your transactions to a cloud provider anyway.
+- **Transfer detection needs evidence.** It linked any two equal and opposite amounts a
+  few days apart — a rent payment and a salary, a bill and a refund — and removed both
+  from every total, silently, across your whole history after each import.
+- **Alert emails actually send.** They were sent only for notifications created during
+  the cron run, but opening the app creates them too. If any browser tab had loaded
+  first, the alert reached nobody. The scheduled run itself had never worked either: it
+  was refused before its token was read.
+- **Caddy binds where the documentation says.** A default install published on every
+  interface, and Docker's routing bypasses the host firewall, so "this machine only"
+  was reachable from the whole network.
+- **Household settings are owner-only.** The financial-year start and pay-cycle basis
+  decide where every period boundary falls, so anyone who could edit them could restate
+  every figure the household had ever been shown.
+- Three ways a read-only viewer could freeze the app for hours are closed, as are an
+  unvalidated AI provider URL that could be aimed at your own network, an import that
+  crashed on an absurd amount, and rate limiting that counted every visitor behind the
+  proxy as one person.
+
+Behind the scenes: the API image now installs exactly the dependencies recorded in a
+hash-pinned lockfile, every build action is pinned to a commit rather than a movable
+tag, a version tag can no longer publish an image that skipped the tests, and Semgrep,
+Trivy, hadolint and Dependabot run alongside the existing checks.
+
+### Fixed
+
+- **Importing the same month as both OFX and CSV no longer doubles it up.** Banks word
+  the same purchase differently in the two formats — `WOOLWORTHS METRO` in one,
+  `EFTPOS WOOLWORTHS 4521 SYDNEY NSW` in the other — and the wording is what near-match
+  detection compares. Every transaction in a month downloaded in both formats became
+  two rows. Matching now also recognises the same merchant for the same amount on the
+  same day, and asks you to confirm rather than deciding alone. Two different shops
+  charging the same amount on the same day are still two purchases.
+
+### Added
+
+- A data-quality test suite for imports that checks the ledger after a *sequence* of
+  real-world exports — overlapping months, mixed formats, files re-exported after the
+  bank re-words things, and edits and splits in between — rather than one file at a
+  time.
+
 
 ## [0.14.1] — 2026-08-26
 
