@@ -5,10 +5,20 @@ All notable changes to Saiva are documented here. The project follows
 
 ## [Unreleased]
 
+
+## [0.15.0] — 2026-09-05
+
+A security release. A full review of the codebase found thirty confirmed problems
+and this fixes all of them, several of which were quietly giving wrong answers
+rather than failing. Also stops one month downloaded in two formats importing twice.
+
+Existing sessions survive the upgrade, and the database migrates itself on start as
+usual. Nothing to do beyond pulling the images.
+
 ### Security
 
-A full review of the codebase against OWASP, and every confirmed finding fixed.
-Thirty in total; these are the ones that change what the app does for you.
+Measured against OWASP. These are the findings that change what the app does for
+you; the rest were hardening you will never see.
 
 - **Signing out now ends the session.** It used to clear the browser's cookie while
   the token stayed valid for its full fourteen days, so a household that suspected a
@@ -409,6 +419,7 @@ personal financial advice.
 - On the first GHCR publish, set the `saiva-api` / `saiva-web` packages to public
   (or `docker login ghcr.io` on the host) so image pulls are authorised.
 
+[0.15.0]: https://github.com/marioalfaro75/saiva/compare/v0.14.1...v0.15.0
 [0.14.1]: https://github.com/marioalfaro75/saiva/compare/v0.14.0...v0.14.1
 [0.14.0]: https://github.com/marioalfaro75/saiva/compare/v0.13.0...v0.14.0
 [0.13.0]: https://github.com/marioalfaro75/saiva/compare/v0.12.0...v0.13.0
