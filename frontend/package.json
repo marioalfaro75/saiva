@@ -12,7 +12,7 @@
   },
   "dependencies": {
     "@tanstack/react-query": "^5.59.0",
-    "react": "^18.3.1",
+    "react": "^19.2.8",
     "react-dom": "^18.3.1",
     "react-router-dom": "^7.18.3",
     "recharts": "^2.12.7"
@@ -21,7 +21,7 @@
     "@eslint/js": "^9.12.0",
     "@testing-library/jest-dom": "^6.5.0",
     "@testing-library/react": "^16.0.1",
-    "@types/react": "^18.3.11",
+    "@types/react": "^19.2.18",
     "@types/react-dom": "^18.3.0",
     "@vitejs/plugin-react": "^6.1.1",
     "eslint": "^9.12.0",
