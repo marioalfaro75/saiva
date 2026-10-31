@@ -1,29 +1,38 @@
 version: 2
 
-# Every ecosystem this repo actually installs from. Left off the list, an ecosystem
-# simply never gets a security update — which is how a dependency ends up three
-# years and one advisory behind without anyone deciding that.
+# Every place this repo pins a dependency. Left off the list, something simply never
+# gets a security update — which is how a pin ends up three years and one advisory
+# behind without anyone deciding that.
 #
-# The grouping below is not cosmetic. The first week this file existed it opened
-# eleven pull requests, several of which could not be merged on their own, and a
-# list nobody reads is the same as no list. Routine churn arrives as one pull
-# request per ecosystem; a major, which needs a human to think, arrives as its own.
+# The grouping is not cosmetic. The first week this file existed it opened eleven pull
+# requests, and a list nobody reads is the same as no list. Routine churn arrives as
+# one pull request per ecosystem; a major, which needs a human to think, arrives as
+# its own batch.
+#
+# Note on what grouping does NOT cover: `groups` defaults to `applies-to:
+# version-updates`, so a *security* update still arrives as its own pull request per
+# advisory. That is left alone on purpose — an advisory is exactly the thing that
+# should not be buried in a batch of seven routine bumps.
 updates:
   # ---------------------------------------------------------------- workflows
   # Keeps the SHA pins in .github/workflows fresh. Dependabot understands a
   # `uses: owner/action@<sha> # v4` pin and updates the SHA *and* the comment, so
   # pinning does not mean going stale.
+  #
+  # The limit is 10 rather than 5 because five were already open and saturated when
+  # this was written: at the limit Dependabot opens nothing new, so a regrouping
+  # cannot take effect until someone clears the backlog.
   - package-ecosystem: github-actions
     directory: "/"
     schedule:
       interval: weekly
-    open-pull-requests-limit: 5
+    open-pull-requests-limit: 10
     groups:
       actions-minor-and-patch:
         update-types: ["minor", "patch"]
-      # Majors separately but still batched: a new major of gitleaks or
-      # setup-python can change a workflow's behaviour, and they are easier to
-      # judge side by side than one at a time.
+      # Majors batched rather than one branch each: a new major of gitleaks or
+      # setup-python can change a workflow's behaviour, and they are easier to judge
+      # side by side.
       actions-major:
         update-types: ["major"]
 
@@ -32,22 +41,33 @@ updates:
     directory: "/frontend"
     schedule:
       interval: weekly
-    open-pull-requests-limit: 5
+    open-pull-requests-limit: 10
     groups:
       npm-minor-and-patch:
         update-types: ["minor", "patch"]
-      # react 18 to 19, recharts 2 to 3 and jest-dom 6 to 7 all landed as separate
+      # react 18 to 19, recharts 2 to 3 and jest-dom 6 to 7 all arrived as separate
       # pull requests in one week. Each needs reading; none needs its own branch.
       npm-major:
         update-types: ["major"]
 
   # ------------------------------------------------------------------ backend
-  # pyproject.toml declares ranges, so most releases need no pull request at all;
-  # this catches the ones that fall outside a range — including the deliberate
-  # upper caps, which Dependabot will offer to widen. Those are a judgement call
-  # (the starlette floor is tied to the fastapi cap), so they are worth seeing.
-  # The image installs from requirements.lock, which scripts/check_lockfile.py
-  # forces you to regenerate, so a merged bump here fails CI until you do.
+  # pyproject.toml declares ranges, so most releases need no pull request at all.
+  # What this does catch is a release outside a range — including the deliberate
+  # upper caps, which Dependabot offers to widen (it has proposed <2.1 to <2.2 for
+  # sqlalchemy and <0.142 to <0.163 for fastapi). Those are judgement calls and worth
+  # seeing.
+  #
+  # What it does NOT catch: requirements.lock. Dependabot's pip fetcher recognises
+  # requirements*.txt, *.in, setup.py/cfg, pyproject.toml, Pipfile and poetry.lock —
+  # a file named `.lock` that is none of those is invisible to it, so the ~30
+  # transitive pins in there get no pull requests. The control for those is
+  # `pip-audit --strict -r requirements.lock`, which is a blocking step in
+  # checks.yml, and which is what actually caught thirteen pyjwt advisories.
+  #
+  # Nor does merging a widened cap fail CI by itself: scripts/check_lockfile.py only
+  # asserts the lock still satisfies pyproject, and a wider range is still satisfied
+  # by the pinned version. Regenerating the lock is a deliberate follow-up, not
+  # something CI forces.
   - package-ecosystem: pip
     directory: "/backend"
     schedule:
@@ -57,27 +77,25 @@ updates:
       pip-all:
         patterns: ["*"]
 
-  # ------------------------------------------------------------- base images
-  # Patch only, deliberately.
+  # --------------------------------------------------- Dockerfile base images
+  # No automatic version bumps. Not "patch only" — that would describe a narrowing
+  # that cannot exist, because none of these tags carries a patch component:
+  # `python:3.11-slim-bookworm` is major.minor, `node:22-alpine` and `caddy:2-alpine`
+  # are major only, and Dependabot preserves a tag's precision. Ignoring major and
+  # minor therefore silences these entries completely, and the honest thing is to say
+  # so rather than imply a trickle still gets through.
   #
-  # The Python and Node versions in these Dockerfiles are coupled to the versions
-  # CI tests against (checks.yml pins python 3.11 and node 22). A bump here alone
-  # would ship an image running a runtime nothing tested, and Dependabot cannot
-  # see that coupling — so it offered python 3.15 and node 26 while CI stayed on
-  # 3.11 and 22. Changing a runtime is a deliberate, multi-file change.
+  # Why silence them: the runtimes here are coupled to the versions CI tests against
+  # (checks.yml pins python 3.11 and node 22). A bump to the image alone ships a
+  # runtime nothing tested — Dependabot offered python 3.15 and node 26 while CI
+  # stayed on 3.11 and 22 — and it cannot see that coupling. Changing a runtime is a
+  # deliberate, multi-file change.
   #
-  # Most of the security cost of ignoring these is already covered elsewhere:
-  # `python:3.11-slim-bookworm`, `node:22-alpine` and `caddy:2-alpine` are *mutable*
-  # tags that their publishers rebuild with OS patches, so those arrive on the next
-  # image build without a pull request at all.
-  #
-  # The rest is covered by the `images` job in security-scan.yml, which builds both
-  # images weekly and scans them with `scan-type: image`. That job exists because of
-  # these ignore rules: the other Trivy job runs `scan-type: fs`, which reads
-  # requirements.lock and package-lock.json and never looks inside an image, so
-  # without it the base images' OS packages were outside everything this repo
-  # scanned — and an ignored update is invisible, so the gap would have been too.
-  # A base image whose fixes have genuinely stopped coming now shows up there.
+  # What covers them instead. These are *mutable* tags that their publishers rebuild
+  # with OS patches, so those arrive on the next image build with no pull request at
+  # all; and the `images` job in security-scan.yml builds both images weekly and scans
+  # them with `scan-type: image`, which is the only thing in this repo that looks at
+  # base-image OS packages at all. That job exists because of these ignore rules.
   - package-ecosystem: docker
     directories:
       - "/backend"
@@ -86,10 +104,7 @@ updates:
       interval: weekly
     open-pull-requests-limit: 5
     groups:
-      # Everything the ignore rules below still allow, in one pull request. Not named
-      # for a filter it does not apply: the group itself restricts nothing, and a
-      # Caddy minor lands here too.
-      docker-images:
+      docker-base-images:
         patterns: ["*"]
     ignore:
       - dependency-name: "python"
@@ -98,3 +113,23 @@ updates:
         update-types: ["version-update:semver-major", "version-update:semver-minor"]
       - dependency-name: "caddy"
         update-types: ["version-update:semver-major"]
+
+  # ------------------------------------------------------- compose-file images
+  # The images the compose files pin, which the two entries above do not reach: they
+  # list /backend and /frontend, and the compose files live at the root.
+  #
+  # This matters most for `tecnativa/docker-socket-proxy:0.3.0`. It is the only fully
+  # immutable pin in the repo — major.minor.patch, so no publisher rebuild will ever
+  # move it — and it is the container holding a line to the Docker socket. It was
+  # getting no updates from anywhere.
+  #
+  # Not ignored the way the base images are: nothing couples these to the CI matrix,
+  # so there is no reason to silence them.
+  - package-ecosystem: docker
+    directory: "/"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    groups:
+      compose-images:
+        patterns: ["*"]

@@ -223,7 +223,7 @@ jobs:
           scanners: vuln
           format: sarif
           output: trivy-image.sarif
-          severity: CRITICAL,HIGH
+          severity: CRITICAL,HIGH,MEDIUM
           # A base image usually carries CVEs with no fix published yet. Reporting
           # those as findings trains people to ignore the whole category, so this
           # reports only what could actually be acted on.
@@ -235,7 +235,7 @@ jobs:
           image-ref: ${{ matrix.image }}:scan
           scanners: vuln
           format: table
-          severity: CRITICAL,HIGH
+          severity: CRITICAL,HIGH,MEDIUM
           ignore-unfixed: true
       - name: Upload ${{ matrix.image }} findings
         if: always()
