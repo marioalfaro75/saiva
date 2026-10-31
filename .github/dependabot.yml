@@ -91,11 +91,30 @@ updates:
   # stayed on 3.11 and 22 — and it cannot see that coupling. Changing a runtime is a
   # deliberate, multi-file change.
   #
-  # What covers them instead. These are *mutable* tags that their publishers rebuild
-  # with OS patches, so those arrive on the next image build with no pull request at
-  # all; and the `images` job in security-scan.yml builds both images weekly and scans
-  # them with `scan-type: image`, which is the only thing in this repo that looks at
-  # base-image OS packages at all. That job exists because of these ignore rules.
+  # What covers them instead, and the honest limits of it.
+  #
+  # These are *mutable* tags: their publishers rebuild them with OS patches, so a patched
+  # base layer needs no pull request at all. It arrives on the next image build. The catch
+  # is which build reaches the house. Watchtower pulls `:latest`, and `:latest` is written
+  # only by cut-release.yml, which is workflow_dispatch -- a human deciding to release.
+  # ci.yml publishes `edge`, which production does not follow, and the weekly `images` job
+  # in security-scan.yml builds with `push: false` and discards the image after scanning
+  # it. So an OS patch reaches the deployed container when someone cuts a release, not
+  # weekly: v0.15.0 and v0.16.0 are 57 days apart, and for those 57 days the box ran one
+  # unchanged OS layer. An earlier version of this comment said patches "arrive on the next
+  # image build" and stopped there, which read as though that happened on its own.
+  #
+  # The `images` job is still the only thing in this repo that looks inside a built image,
+  # and it is what these ignore rules lean on. Two blind spots in it are worth writing down
+  # rather than rediscovering:
+  #
+  #   - It runs with `ignore-unfixed: true`. That is right for routine noise and exactly
+  #     wrong for an end-of-life base image: once a distro stops publishing fixes, every
+  #     CVE it carries becomes unfixed, so the scan falls silent at the moment the image
+  #     stops being maintained. Quiet from that job is not the same as safe.
+  #   - Silencing python and node here removed the only thing that ever mentioned a newer
+  #     runtime. Nothing in the repo now says "3.11 is approaching end of life"; that has
+  #     to be tracked by a person, or by a check that does not exist yet.
   - package-ecosystem: docker
     directories:
       - "/backend"
@@ -125,6 +144,12 @@ updates:
   #
   # Not ignored the way the base images are: nothing couples these to the CI matrix,
   # so there is no reason to silence them.
+  #
+  # Merging one of these does not update the running container, though. Watchtower is in
+  # label-enable mode and only `api` and `web` carry the label, so caddy, postgres and the
+  # socket proxy change only when someone runs `docker compose up -d` on the host. For
+  # caddy that is the internet-facing TLS terminator, and for postgres it is the container
+  # holding the actual records -- neither is updated by anything automatic today.
   - package-ecosystem: docker
     directory: "/"
     schedule:
