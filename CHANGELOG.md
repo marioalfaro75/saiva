@@ -5,6 +5,16 @@ All notable changes to Saiva are documented here. The project follows
 
 ## [Unreleased]
 
+
+## [0.16.0] — 2026-10-31
+
+A possible duplicate now shows you the transaction it matched, and what else sits
+near it, so the decision can be made from the screen rather than from memory. Also
+carries two months of dependency updates, including the library that signs your
+session tokens.
+
+Nothing to do beyond pulling the images: no database change this time.
+
 ### Added
 - **A possible duplicate now shows you the transaction it matched.** Deciding whether
   a row is one you already have meant hovering a small pill to read a tooltip — which
@@ -454,6 +464,7 @@ personal financial advice.
 - On the first GHCR publish, set the `saiva-api` / `saiva-web` packages to public
   (or `docker login ghcr.io` on the host) so image pulls are authorised.
 
+[0.16.0]: https://github.com/marioalfaro75/saiva/compare/v0.15.0...v0.16.0
 [0.15.0]: https://github.com/marioalfaro75/saiva/compare/v0.14.1...v0.15.0
 [0.14.1]: https://github.com/marioalfaro75/saiva/compare/v0.14.0...v0.14.1
 [0.14.0]: https://github.com/marioalfaro75/saiva/compare/v0.13.0...v0.14.0
