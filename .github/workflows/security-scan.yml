@@ -145,6 +145,13 @@ jobs:
 
   # Whether this pull request changes what actually goes into an image. Same
   # paths-filter idiom ci.yml uses to decide which image to republish.
+  #
+  # Deliberately not `backend/app/**`: that would rebuild both images on nearly every
+  # backend pull request to re-scan an unchanged dependency set. The risk it would
+  # cover — app code starting to import something the API image no longer ships, now
+  # that backend/Dockerfile strips pip and setuptools — is covered at the source
+  # instead, by test_no_runtime_module_imports_the_packaging_toolchain in
+  # backend/tests/test_supply_chain.py, which runs in the blocking suite every time.
   image-inputs:
     name: Detect image changes
     if: github.event_name == 'pull_request'
@@ -164,6 +171,7 @@ jobs:
               - 'backend/Dockerfile'
               - 'frontend/Dockerfile'
               - 'backend/requirements.lock'
+              - 'backend/pyproject.toml'
               - 'frontend/package-lock.json'
               - '.github/workflows/security-scan.yml'
 

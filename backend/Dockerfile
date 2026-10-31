@@ -32,9 +32,36 @@ RUN . /etc/os-release \
 # recorded in requirements.lock or it fails outright, so a compromised release
 # published inside one of those ranges cannot walk into the image on a rebuild.
 # Copied on its own line so the layer caches until the lockfile itself changes.
+#
+# The packaging toolchain then goes, in this same RUN. Every fixable CVE the first
+# image scan reported lived in it and not one lived in requirements.lock: pip vendors
+# its own pinned msgpack, urllib3 and setuptools (pip/_vendor/vendor.txt), and that
+# setuptools in turn vendors wheel and jaraco.context. The `--upgrade pip` above
+# cannot clear any of them, because the pip doing the upgrading is the pip that pins
+# them. Nothing left in the image needs it: the uvicorn console script the CMD runs
+# is a plain `from uvicorn.main import main` stub rather than a pkg_resources entry
+# point, the HEALTHCHECK below uses stdlib urllib rather than urllib3, and no module
+# under app/ or migrations/ imports pkg_resources, setuptools or distutils.
+#
+# Three things about the spelling, each of which cost something to establish:
+#   * same RUN as the install. A later `RUN rm` only hides the files from the
+#     flattened filesystem a scanner reads — the layer underneath still carries them,
+#     and that layer is still pushed, still pulled, still there for `docker save`.
+#   * `pip uninstall`, never `rm -rf`, because setuptools also owns pkg_resources/,
+#     _distutils_hack/ and distutils-precedence.pth. Orphan that .pth and every
+#     interpreter start, the HEALTHCHECK's included, prints a traceback to stderr and
+#     still exits 0: a container that looks broken for years and is not.
+#   * pip last in the argv, so it is still there to remove the other two.
+# `wheel` carries no finding today — the image's copy is 0.46.3 and clean — and is
+# named because it is the same build-time toolchain, not because it is vulnerable. If
+# a future base image drops it, pip skips a name that is not installed with a warning
+# and still exits 0, so naming it stays correct either way. Removing all three leaves
+# the image with no package manager; to chase a dependency problem, run a throwaway
+# python:3.11-slim-bookworm container alongside this one rather than putting pip back.
 COPY requirements.lock ./
 RUN pip install --upgrade pip \
- && pip install --require-hashes --no-deps -r requirements.lock
+ && pip install --require-hashes --no-deps -r requirements.lock \
+ && pip uninstall -y setuptools wheel pip
 
 COPY pyproject.toml ./
 COPY app ./app
@@ -47,6 +74,17 @@ RUN useradd --create-home --uid 10001 appuser \
  && mkdir -p /backups \
  && chown -R appuser /app /backups
 USER appuser
+
+# The only point at which either architecture's image is executed before it reaches
+# somebody's box. The `images` job in security-scan.yml builds amd64 and only reads
+# its filesystem; the release build publishes arm64 under QEMU and nothing runs that
+# at all. So this RUN is the whole of the evidence that the uninstall above did not
+# take something the app imports, and the only such evidence that covers arm64. The
+# first command is the non-vacuous half: without it, a strip that quietly stopped
+# removing anything would still go green here. Run after USER, as the user that will
+# actually import these modules at boot.
+RUN python -c "import importlib.util as u; assert not [m for m in ('pip','setuptools','pkg_resources','wheel') if u.find_spec(m)], 'the packaging toolchain survived the uninstall above'" \
+ && python -c "import app.main, app.dbinit"
 
 EXPOSE 8000
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
