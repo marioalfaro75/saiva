@@ -142,3 +142,105 @@ jobs:
         with:
           dockerfile: ${{ matrix.dockerfile }}
           failure-threshold: error
+
+  # Whether this pull request changes what actually goes into an image. Same
+  # paths-filter idiom ci.yml uses to decide which image to republish.
+  image-inputs:
+    name: Detect image changes
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      changed: ${{ steps.filter.outputs.images }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: dorny/paths-filter@0e4a8c6effa4802afeda77dc8d303f8176d7dfad # v3
+        id: filter
+        with:
+          filters: |
+            images:
+              - 'backend/Dockerfile'
+              - 'frontend/Dockerfile'
+              - 'backend/requirements.lock'
+              - 'frontend/package-lock.json'
+              - '.github/workflows/security-scan.yml'
+
+  images:
+    name: Base image CVEs (${{ matrix.image }})
+    # The gap the other Trivy job leaves. `scan-type: fs` reads requirements.lock,
+    # package-lock.json and the Dockerfiles — it never looks inside a built image, so
+    # the OS packages in python:3.11-slim-bookworm and caddy:2-alpine were outside
+    # everything this repo scanned. That is also the hole the base-image ignore rules
+    # in .github/dependabot.yml rely on this job to cover.
+    #
+    # Built here rather than pulled from GHCR: no registry credentials to hold, and it
+    # scans the images this commit would produce rather than the last ones published.
+    #
+    # Always on main and on the weekly run — a base image's CVEs change when its
+    # publisher rebuilds it, not when a branch does. On a pull request only when the
+    # branch changes what goes into an image, which keeps ordinary reviews fast while
+    # still rebuilding when a Dockerfile, a lockfile or this workflow itself moves.
+    # That last path matters: it is what makes a change to this job self-testing
+    # rather than something whose first real run is on main.
+    needs: [image-inputs]
+    if: >-
+      always() && (
+        github.event_name != 'pull_request' ||
+        needs.image-inputs.outputs.changed == 'true'
+      )
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+    strategy:
+      # One image failing to build should not hide the other's findings.
+      fail-fast: false
+      matrix:
+        include:
+          - { image: saiva-api, context: ./backend }
+          - { image: saiva-web, context: ./frontend }
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+      - name: Build ${{ matrix.image }} locally
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: ${{ matrix.context }}
+          # Native arch only, loaded into the daemon rather than pushed. The OS
+          # packages are the same on both architectures, so emulating arm64 here
+          # would double the runtime to rescan the same CVEs.
+          load: true
+          push: false
+          tags: ${{ matrix.image }}:scan
+          cache-from: type=gha
+      - name: Scan ${{ matrix.image }}
+        uses: aquasecurity/trivy-action@57a97c7e7821a5776cebc9bb87c984fa69cba8f1 # 0.35.0
+        with:
+          scan-type: image
+          image-ref: ${{ matrix.image }}:scan
+          scanners: vuln
+          format: sarif
+          output: trivy-image.sarif
+          severity: CRITICAL,HIGH
+          # A base image usually carries CVEs with no fix published yet. Reporting
+          # those as findings trains people to ignore the whole category, so this
+          # reports only what could actually be acted on.
+          ignore-unfixed: true
+      - name: Findings, readable
+        uses: aquasecurity/trivy-action@57a97c7e7821a5776cebc9bb87c984fa69cba8f1 # 0.35.0
+        with:
+          scan-type: image
+          image-ref: ${{ matrix.image }}:scan
+          scanners: vuln
+          format: table
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
+      - name: Upload ${{ matrix.image }} findings
+        if: always()
+        uses: github/codeql-action/upload-sarif@a45bef097606dca6eac8285c279babedd70e6dfd # v3.37.9
+        with:
+          sarif_file: trivy-image.sarif
+          # Distinct per image, or the second upload replaces the first.
+          category: trivy-image-${{ matrix.image }}

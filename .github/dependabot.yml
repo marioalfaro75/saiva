@@ -3,7 +3,13 @@ version: 2
 # Every ecosystem this repo actually installs from. Left off the list, an ecosystem
 # simply never gets a security update — which is how a dependency ends up three
 # years and one advisory behind without anyone deciding that.
+#
+# The grouping below is not cosmetic. The first week this file existed it opened
+# eleven pull requests, several of which could not be merged on their own, and a
+# list nobody reads is the same as no list. Routine churn arrives as one pull
+# request per ecosystem; a major, which needs a human to think, arrives as its own.
 updates:
+  # ---------------------------------------------------------------- workflows
   # Keeps the SHA pins in .github/workflows fresh. Dependabot understands a
   # `uses: owner/action@<sha> # v4` pin and updates the SHA *and* the comment, so
   # pinning does not mean going stale.
@@ -12,27 +18,66 @@ updates:
     schedule:
       interval: weekly
     open-pull-requests-limit: 5
+    groups:
+      actions-minor-and-patch:
+        update-types: ["minor", "patch"]
+      # Majors separately but still batched: a new major of gitleaks or
+      # setup-python can change a workflow's behaviour, and they are easier to
+      # judge side by side than one at a time.
+      actions-major:
+        update-types: ["major"]
 
+  # ----------------------------------------------------------------- frontend
   - package-ecosystem: npm
     directory: "/frontend"
     schedule:
       interval: weekly
     open-pull-requests-limit: 5
     groups:
-      # One PR for the routine churn, separate PRs for anything major — the noise
-      # is what makes people stop reading these.
-      minor-and-patch:
+      npm-minor-and-patch:
         update-types: ["minor", "patch"]
+      # react 18 to 19, recharts 2 to 3 and jest-dom 6 to 7 all landed as separate
+      # pull requests in one week. Each needs reading; none needs its own branch.
+      npm-major:
+        update-types: ["major"]
 
-  # pyproject.toml declares ranges, so most releases need no PR at all; this
-  # catches the ones that fall outside a range. The image installs from
-  # requirements.lock, which scripts/check_lockfile.py forces you to regenerate.
+  # ------------------------------------------------------------------ backend
+  # pyproject.toml declares ranges, so most releases need no pull request at all;
+  # this catches the ones that fall outside a range — including the deliberate
+  # upper caps, which Dependabot will offer to widen. Those are a judgement call
+  # (the starlette floor is tied to the fastapi cap), so they are worth seeing.
+  # The image installs from requirements.lock, which scripts/check_lockfile.py
+  # forces you to regenerate, so a merged bump here fails CI until you do.
   - package-ecosystem: pip
     directory: "/backend"
     schedule:
       interval: weekly
     open-pull-requests-limit: 5
+    groups:
+      pip-all:
+        patterns: ["*"]
 
+  # ------------------------------------------------------------- base images
+  # Patch only, deliberately.
+  #
+  # The Python and Node versions in these Dockerfiles are coupled to the versions
+  # CI tests against (checks.yml pins python 3.11 and node 22). A bump here alone
+  # would ship an image running a runtime nothing tested, and Dependabot cannot
+  # see that coupling — so it offered python 3.15 and node 26 while CI stayed on
+  # 3.11 and 22. Changing a runtime is a deliberate, multi-file change.
+  #
+  # Most of the security cost of ignoring these is already covered elsewhere:
+  # `python:3.11-slim-bookworm`, `node:22-alpine` and `caddy:2-alpine` are *mutable*
+  # tags that their publishers rebuild with OS patches, so those arrive on the next
+  # image build without a pull request at all.
+  #
+  # The rest is covered by the `images` job in security-scan.yml, which builds both
+  # images weekly and scans them with `scan-type: image`. That job exists because of
+  # these ignore rules: the other Trivy job runs `scan-type: fs`, which reads
+  # requirements.lock and package-lock.json and never looks inside an image, so
+  # without it the base images' OS packages were outside everything this repo
+  # scanned — and an ignored update is invisible, so the gap would have been too.
+  # A base image whose fixes have genuinely stopped coming now shows up there.
   - package-ecosystem: docker
     directories:
       - "/backend"
@@ -40,3 +85,16 @@ updates:
     schedule:
       interval: weekly
     open-pull-requests-limit: 5
+    groups:
+      # Everything the ignore rules below still allow, in one pull request. Not named
+      # for a filter it does not apply: the group itself restricts nothing, and a
+      # Caddy minor lands here too.
+      docker-images:
+        patterns: ["*"]
+    ignore:
+      - dependency-name: "python"
+        update-types: ["version-update:semver-major", "version-update:semver-minor"]
+      - dependency-name: "node"
+        update-types: ["version-update:semver-major", "version-update:semver-minor"]
+      - dependency-name: "caddy"
+        update-types: ["version-update:semver-major"]
