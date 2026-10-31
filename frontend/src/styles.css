@@ -1141,3 +1141,44 @@ th.actions {
   margin-bottom: 4px;
   border-bottom: 1px solid var(--border);
 }
+
+/* ---------------------------------------------------------- duplicate evidence
+   The match for a possible duplicate, shown in the flow rather than on hover.
+
+   --surface, not --surface-2: .stack-card is already --surface-2, so the obvious
+   choice renders this invisible on the phone layout — the one layout where the
+   hover text it replaces never existed. */
+.match-evidence {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--warning, #d98b1f);
+  border-radius: var(--radius);
+  padding: 8px 10px;
+  font-size: 0.9rem;
+  display: grid;
+  gap: 3px;
+}
+.match-evidence p {
+  margin: 0;
+}
+.match-evidence-head {
+  font-weight: 600;
+}
+.match-nearby {
+  margin: 2px 0 0;
+  padding-left: 18px;
+  color: var(--muted);
+}
+.match-nearby li {
+  margin: 1px 0;
+}
+/* The evidence row belongs to the row above it. `th, td` carry a global
+   border-bottom, so without this the rule falls between a row and its own
+   evidence and visually groups it with the row below — which, on a screen whose
+   only question is "which row does this describe?", is a misstatement. */
+tr:has(+ .match-tr) > td {
+  border-bottom: none;
+}
+.match-tr > td {
+  padding-top: 0;
+}

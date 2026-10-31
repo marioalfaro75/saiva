@@ -462,6 +462,27 @@ export type DuplicateStatus =
   /** The row's account-column value was never mapped, so it will not be imported. */
   | "unassigned";
 
+/** Which of dedup.py's four tiers found the match. Each needs its own explanation. */
+export type MatchTier = "provider_id" | "exact_hash" | "near_match" | "same_merchant";
+
+/**
+ * How the two descriptions relate once reference numbers are stripped.
+ *
+ * "digits" is deliberately separate from "noise": both normalise equal, but when the
+ * stripped digit runs differ the two rows may be payments to different payees — which
+ * is what rent and a loan repayment look like — so it must not read as reassurance.
+ */
+export type WordingRelation = "same" | "noise" | "digits" | "differs";
+
+/** Another stored row near the match, for judging how many you already have. */
+export interface MatchNeighbour {
+  txn_date: string;
+  amount_cents: number;
+  description: string;
+  same_amount: boolean;
+  same_merchant: boolean;
+}
+
 export interface PreviewRow {
   row_index: number;
   txn_date: string;
@@ -477,6 +498,18 @@ export interface PreviewRow {
   matched_txn_id: string | null;
   matched_date: string | null;
   matched_description: string | null;
+  matched_amount_cents: number | null;
+  matched_merchant: string | null;
+  matched_category_name: string | null;
+  matched_source: "import" | "manual" | null;
+  matched_imported_at: string | null;
+  matched_imported_from: string | null;
+  /** Signed, stored minus incoming: negative means the stored row is earlier. */
+  matched_days_delta: number | null;
+  matched_wording: WordingRelation | null;
+  match_tier: MatchTier | null;
+  matched_neighbours: MatchNeighbour[];
+  matched_neighbours_total: number;
   will_import: boolean;
   account_id: string | null;
   account_name: string | null;

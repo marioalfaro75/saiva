@@ -286,16 +286,59 @@ def _decide(
     db: Session,
     parsed: list[importers.ParsedTxn],
     resolve: Callable[[importers.ParsedTxn], _Target],
-) -> list[tuple[int, importers.ParsedTxn, _Target, dedup.Verdict | None]]:
+) -> tuple[list[tuple[int, importers.ParsedTxn, _Target, dedup.Verdict | None]], dedup.Deduper]:
     """Resolve every parsed row to its account and duplicate verdict, in file order.
-    Skipped rows get no verdict — there is nothing to compare them against."""
+    Skipped rows get no verdict — there is nothing to compare them against.
+
+    The deduper comes back with the decisions because it holds each account's history
+    in memory. The preview asks it what else sits near a match, and doing that through
+    the same object is what keeps it free of extra queries.
+    """
     deduper = dedup.Deduper(db)
     out = []
     for i, p in enumerate(parsed):
         target = resolve(p)
         verdict = None if target.skip else deduper.match(target.dedup_key, p)
         out.append((i, p, target, verdict))
-    return out
+    return out, deduper
+
+
+# Resolved in chunks rather than one IN() of unbounded width, in case a long history
+# spreads matches across many files.
+_BATCH_CHUNK = 200
+
+
+def _batch_provenance(
+    db: Session, household_id: str, batch_ids: set[str]
+) -> dict[str, tuple[str, dt.datetime | None]]:
+    """Filename and date for each import batch, by id.
+
+    One query per chunk, outside the row loop: asking per row would be an N+1 in the
+    exact place `dedup.py` spends three comment blocks keeping linear.
+
+    Carries its own household_id predicate. `load_candidates` has none — it is safe
+    today only because the account was already checked — so a batch id arriving from
+    a candidate must be re-scoped here rather than trusted.
+    """
+    if not batch_ids:
+        return {}
+    found: dict[str, tuple[str, dt.datetime | None]] = {}
+    ids = sorted(batch_ids)
+    for start in range(0, len(ids), _BATCH_CHUNK):
+        chunk = ids[start : start + _BATCH_CHUNK]
+        rows = db.execute(
+            select(
+                models.ImportBatch.id,
+                models.ImportBatch.filename,
+                models.ImportBatch.created_at,
+            ).where(
+                models.ImportBatch.household_id == household_id,
+                models.ImportBatch.id.in_(chunk),
+            )
+        ).all()
+        for row in rows:
+            found[row[0]] = (row[1], row[2])
+    return found
 
 
 def _named_accounts(parsed: list[importers.ParsedTxn]) -> set[str]:
@@ -483,8 +526,34 @@ async def preview(
 
     rows: list[schemas.PreviewRow] = []
     resolve = _resolver(multi, targets, single)
-    for index, p, target, verdict in _decide(db, parsed, resolve):
+    decisions, deduper = _decide(db, parsed, resolve)
+    # Resolved up front, in one batched query, for every file a match came from.
+    provenance = _batch_provenance(
+        db,
+        user.household_id,
+        {
+            v.matched.import_batch_id
+            for _, _, _, v in decisions
+            if v and v.matched and v.matched.import_batch_id
+        },
+    )
+    for index, p, target, verdict in decisions:
         result = categoriser.categorise(p.raw_description, p.merchant)
+        matched = verdict.matched if verdict else None
+        # Only rows that ask for a decision carry the neighbourhood. It is evidence
+        # for a judgement, and sending it for the thousands of already-filed rows a
+        # re-import produces would inflate the response for no one's benefit.
+        neighbours: list[dedup.Neighbour] = []
+        neighbours_total = 0
+        if matched and verdict and verdict.status == dedup.DUPLICATE_PROBABLE:
+            neighbours, neighbours_total = deduper.neighbours(
+                target.dedup_key, p, exclude_id=matched.id
+            )
+        batch = (
+            provenance.get(matched.import_batch_id)
+            if matched and matched.import_batch_id
+            else None
+        )
         rows.append(
             schemas.PreviewRow(
                 row_index=index,
@@ -500,11 +569,39 @@ async def preview(
                 is_duplicate=verdict.is_duplicate if verdict else False,
                 status=verdict.status if verdict else "unassigned",
                 duplicate_reason=verdict.reason if verdict else None,
-                matched_txn_id=verdict.matched.id if verdict and verdict.matched else None,
-                matched_date=verdict.matched.txn_date if verdict and verdict.matched else None,
-                matched_description=(
-                    verdict.matched.raw_description if verdict and verdict.matched else None
+                matched_txn_id=matched.id if matched else None,
+                matched_date=matched.txn_date if matched else None,
+                matched_description=matched.raw_description if matched else None,
+                matched_amount_cents=matched.amount_cents if matched else None,
+                matched_merchant=(matched.merchant or None) if matched else None,
+                matched_category_name=(
+                    names.get(matched.category_id) if matched and matched.category_id else None
                 ),
+                matched_source=matched.source if matched else None,
+                matched_imported_at=batch[1] if batch else None,
+                matched_imported_from=batch[0] if batch else None,
+                # Signed, stored minus incoming: negative means the stored row is
+                # earlier, which is what a pending-to-posted re-date looks like.
+                matched_days_delta=(
+                    (matched.txn_date - p.txn_date).days if matched else None
+                ),
+                matched_wording=(
+                    dedup.wording_relation(p.raw_description, matched.raw_description)
+                    if matched
+                    else None
+                ),
+                match_tier=verdict.tier if verdict else None,
+                matched_neighbours=[
+                    schemas.MatchNeighbour(
+                        txn_date=n.txn_date,
+                        amount_cents=n.amount_cents,
+                        description=n.raw_description,
+                        same_amount=n.same_amount,
+                        same_merchant=n.same_merchant,
+                    )
+                    for n in neighbours
+                ],
+                matched_neighbours_total=neighbours_total,
                 will_import=_will_import(verdict, index, set(), set()),
                 account_id=target.account_id,
                 account_name=target.name if not target.skip else None,
@@ -593,7 +690,8 @@ async def commit(
     added = 0
     skipped = 0
     resolve = _resolver(multi, targets, single)
-    for index, p, target, verdict in _decide(db, parsed, resolve):
+    decisions, _ = _decide(db, parsed, resolve)
+    for index, p, target, verdict in decisions:
         if target.account_id is None or not _will_import(verdict, index, forced, skipped_rows):
             skipped += 1
             continue

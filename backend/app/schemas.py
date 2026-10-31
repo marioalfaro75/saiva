@@ -296,6 +296,16 @@ def _bounded_date(value: dt.date) -> dt.date:
 BoundedDate = Annotated[dt.date, AfterValidator(_bounded_date)]
 
 
+class MatchNeighbour(BaseModel):
+    """Another stored row near the match. See dedup.Neighbour for why."""
+
+    txn_date: dt.date
+    amount_cents: int
+    description: str
+    same_amount: bool
+    same_merchant: bool
+
+
 class PreviewRow(BaseModel):
     row_index: int  # position in the parsed file; how commit decisions refer to a row
     txn_date: dt.date
@@ -310,9 +320,36 @@ class PreviewRow(BaseModel):
     status: str
     duplicate_reason: str | None = None
     # The stored transaction this row matched, for the reviewer to compare against.
+    # These four are the originals and keep their names and meanings: tests assert on
+    # them, and the prose reason is still what explains the match in one line.
     matched_txn_id: str | None = None
     matched_date: dt.date | None = None
     matched_description: str | None = None
+    # The rest of the matched row, so a person can decide rather than take it on
+    # trust. All optional: a `new` or `unassigned` row matched nothing.
+    matched_amount_cents: int | None = None
+    matched_merchant: str | None = None
+    matched_category_name: str | None = None
+    # "import" | "manual". A hand-entered match is the strongest reason to look twice.
+    matched_source: str | None = None
+    matched_imported_at: dt.datetime | None = None
+    matched_imported_from: str | None = None
+    # Signed: negative means the stored row is earlier. The matcher takes abs() when
+    # writing its reason, which loses the direction — and the direction is evidence,
+    # since a stored row a day or two *earlier* is what a pending-to-posted re-date
+    # looks like, while one *later* is more likely a genuine repeat.
+    matched_days_delta: int | None = None
+    # "same" | "noise" | "differs" — how the two descriptions relate once reference
+    # numbers are stripped. Saves the reader diffing two strings by eye.
+    matched_wording: str | None = None
+    # Which of the four tiers found it; the four need different explanations.
+    match_tier: str | None = None
+    # What else this account already holds nearby, which is what distinguishes a
+    # re-dated duplicate from a weekly repeat. Populated for rows that need a
+    # decision only — it is evidence for a judgement, and sending it for thousands of
+    # already-filed rows would only inflate the response.
+    matched_neighbours: list[MatchNeighbour] = Field(default_factory=list)
+    matched_neighbours_total: int = 0
     # Whether the row will be imported unless the user says otherwise. Definite
     # duplicates are always off; probable ones default off but can be overridden.
     will_import: bool = True
