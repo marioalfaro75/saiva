@@ -15,6 +15,7 @@ import tomllib
 from pathlib import Path
 
 import pytest
+import yaml
 
 REPO = Path(__file__).resolve().parents[2]
 WORKFLOWS = sorted((REPO / ".github" / "workflows").glob("*.yml"))
@@ -103,6 +104,28 @@ def test_the_lockfile_still_satisfies_pyproject() -> None:
         )
 
 
+def _pushing_build_steps(workflow: Path) -> list[str]:
+    """Steps that build an image and actually publish it.
+
+    Keyed on whether the step pushes, not on whether it uses the build action: a job
+    may build an image locally in order to scan it, which publishes nothing. Anything
+    other than a literal `push: false` counts as pushing — an expression like
+    `push: ${{ ... }}` is not something this test will reason about, so it is treated
+    as a publish and has to be gated.
+    """
+    spec = yaml.safe_load(workflow.read_text())
+    pushing = []
+    for job_name, job in (spec.get("jobs") or {}).items():
+        for step in job.get("steps") or []:
+            uses = str(step.get("uses") or "")
+            if "docker/build-push-action" not in uses:
+                continue
+            push = (step.get("with") or {}).get("push")
+            if push is not False:
+                pushing.append(f"{job_name}:{step.get('name') or uses}")
+    return pushing
+
+
 @pytest.mark.parametrize("workflow", WORKFLOWS, ids=lambda p: p.name)
 def test_nothing_publishes_an_image_without_running_the_checks(workflow: Path) -> None:
     """A `v*` tag once reached `:latest` without running a single test.
@@ -110,15 +133,32 @@ def test_nothing_publishes_an_image_without_running_the_checks(workflow: Path) -
     The edge channel was gated and the release channel — the one users pull — was
     not, so the least-tested images were the ones most likely to be deployed.
     """
-    text = workflow.read_text()
-    if "docker/build-push-action" not in text:
+    pushing = _pushing_build_steps(workflow)
+    if not pushing:
         return
+    text = workflow.read_text()
     assert "./.github/workflows/checks.yml" in text, (
-        f"{workflow.name} publishes an image but never calls the shared checks workflow"
+        f"{workflow.name} publishes an image ({', '.join(pushing)}) but never calls "
+        "the shared checks workflow"
     )
     assert re.search(r"needs:.*\bchecks\b", text), (
         f"{workflow.name} calls the checks but does not gate publishing on them"
     )
+
+
+def test_a_local_build_for_scanning_is_not_treated_as_a_publish() -> None:
+    """The precision the test above depends on.
+
+    security-scan.yml builds both images to scan their OS packages and pushes
+    neither. Keying the gate on the action's presence rather than on `push` made that
+    job look like an ungated release — and the obvious way to make the suite green
+    again would have been to loosen the gate that protects the real one.
+    """
+    scan = REPO / ".github" / "workflows" / "security-scan.yml"
+    assert "docker/build-push-action" in scan.read_text(), (
+        "this test is pointless if security-scan.yml no longer builds anything"
+    )
+    assert _pushing_build_steps(scan) == []
 
 
 def test_the_dependency_audit_can_actually_fail_the_build() -> None:
