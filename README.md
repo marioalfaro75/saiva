@@ -32,7 +32,10 @@ Runs in a container, HTTPS‑only.
   or re‑worded rows), then the same merchant for the same amount on the same day — which
   is what catches a bank wording one purchase two ways in two formats. The last two ask
   you to confirm rather than deciding alone, and genuine repeat purchases are kept, not
-  silently dropped.
+  silently dropped. A row that wants an answer shows you the transaction it matched —
+  amount, wording, category, and whether it came from a file or your own typing — plus
+  what else that account already holds nearby, since the count is what tells a re-dated
+  duplicate from a weekly repeat.
 - Rule + **ML categorisation** (confidence‑thresholded), an assisted per‑row categorise
   popover with scopes and "make a rule", a **rules** manager, and per‑transaction locking.
 - Automatic **transfer detection** between your own accounts.

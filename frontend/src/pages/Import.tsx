@@ -1,5 +1,5 @@
 import { useQuery } from "@tanstack/react-query";
-import { useMemo, useRef, useState } from "react";
+import { Fragment, useMemo, useRef, useState } from "react";
 
 import { ApiError, api } from "../api/client";
 import type {
@@ -14,6 +14,8 @@ import type {
 import { PHONE, useMediaQuery } from "../hooks/useMediaQuery";
 import { ColumnMapper } from "../import/ColumnMapper";
 import { DropZone } from "../import/DropZone";
+import { MatchEvidence } from "../import/MatchEvidence";
+import { matchEvidenceOf } from "../import/matchEvidence";
 import { mappingFromRoles, rolesFromMapping, type Role, type Roles } from "../import/mapping";
 import {
   openingSegment,
@@ -79,6 +81,17 @@ function guessFormat(file: File): string {
   if (lower.endsWith(".ofx")) return "ofx";
   return "csv";
 }
+
+/**
+ * Cells in the preview table's header row without the account column: checkbox,
+ * date, description, suggested category, amount, status. The account column adds one.
+ *
+ * Named because the evidence row's colSpan must track it, and a literal that drifts
+ * from the header invents a phantom column that mis-renders in silence. Not derived
+ * from PREVIEW_COLUMNS above — that is the sortable data columns and excludes the
+ * checkbox, so the two counts differ by one and conflating them is the bug.
+ */
+const PREVIEW_HEADER_CELLS = 6;
 
 export function ImportPage() {
   const accounts = useQuery({ queryKey: ["accounts"], queryFn: api.accounts });
@@ -405,17 +418,32 @@ export function ImportPage() {
     );
   };
 
+  /**
+   * Why this row cannot be decided — which is not always "it is a duplicate".
+   *
+   * An unassigned row is not a duplicate at all: its account column value was never
+   * mapped, so it has nowhere to go. Telling the reader it is already imported is
+   * simply false, and the real explanation was stranded in a notice further down.
+   */
+  const lockedReason = (r: PreviewRow) =>
+    r.status === "unassigned"
+      ? "This row's account is not mapped yet, so it has nowhere to import to"
+      : "Already imported — importing it again would create a duplicate";
+
   const importBox = (r: PreviewRow) => (
     <input
       type="checkbox"
       checked={willImport(r)}
       disabled={!canDecide(r)}
-      aria-label={`Import ${r.merchant ?? r.raw_description}`}
-      title={
-        canDecide(r)
-          ? "Import this row"
-          : "Already imported — importing it again would create a duplicate"
-      }
+      /* Date, amount and the row's line in the file, not just the description.
+         The two identical same-day purchases that de-duplication exists to keep
+         apart are indistinguishable by content — that is what makes them hard —
+         so content alone gave a screen-reader user two identical checkboxes and no
+         way to tell which they had ticked. The file position is the only thing that
+         always separates them, and it is also how the rest of the import refers to
+         a row, so it is what a person would use to talk about one. */
+      aria-label={`Import ${r.merchant ?? r.raw_description}, ${formatDate(r.txn_date)}, ${formatCents(r.amount_cents)}, row ${r.row_index + 1}`}
+      title={canDecide(r) ? "Import this row" : lockedReason(r)}
       onChange={(e) => setDecisions((d) => ({ ...d, [r.row_index]: e.target.checked }))}
     />
   );
@@ -745,19 +773,26 @@ export function ImportPage() {
               />
               <ul className="stack-cards">
                 {previewTable.rows.map((r) => (
-                  <li
-                    className="stack-card"
-                    key={r.row_index}
-                    style={{ opacity: willImport(r) ? 1 : 0.55 }}
-                  >
-                    <div className="stack-card-head">
+                  // The dimming sits on the head and meta, not on the <li>: CSS
+                  // opacity composites the whole subtree, so an inline 0.55 here
+                  // would render the evidence below at 55% — on the one layout
+                  // where the old hover text was not available at all — and no
+                  // child declaration can escape it.
+                  <li className="stack-card" key={r.row_index}>
+                    <div
+                      className="stack-card-head"
+                      style={{ opacity: willImport(r) ? 1 : 0.55 }}
+                    >
                       {importBox(r)}
                       <span className="grow">{r.merchant ?? r.raw_description}</span>
                       <span className={`num ${r.amount_cents < 0 ? "negative" : "positive"}`}>
                         {formatCents(r.amount_cents)}
                       </span>
                     </div>
-                    <div className="stack-card-meta muted">
+                    <div
+                      className="stack-card-meta muted"
+                      style={{ opacity: willImport(r) ? 1 : 0.55 }}
+                    >
                       <span>{formatDate(r.txn_date)}</span>
                       {multiAccount && (
                         <>
@@ -772,7 +807,8 @@ export function ImportPage() {
                         </>
                       )}
                     </div>
-                    <div>{statusCell(r)}</div>
+                    <div style={{ opacity: willImport(r) ? 1 : 0.55 }}>{statusCell(r)}</div>
+                    <MatchEvidence row={r} />
                   </li>
                 ))}
               </ul>
@@ -809,17 +845,29 @@ export function ImportPage() {
                 </thead>
                 <tbody>
                   {previewTable.rows.map((r) => (
-                    <tr key={r.row_index} style={{ opacity: willImport(r) ? 1 : 0.55 }}>
-                      <td>{importBox(r)}</td>
-                      <td className="muted">{formatDate(r.txn_date)}</td>
-                      <td>{r.merchant ?? r.raw_description}</td>
-                      {multiAccount && <td className="muted">{r.account_name ?? "—"}</td>}
-                      <td className="muted">{r.suggested_category_name ?? "—"}</td>
-                      <td className={`num ${r.amount_cents < 0 ? "negative" : "positive"}`}>
-                        {formatCents(r.amount_cents)}
-                      </td>
-                      <td>{statusCell(r)}</td>
-                    </tr>
+                    <Fragment key={r.row_index}>
+                      <tr style={{ opacity: willImport(r) ? 1 : 0.55 }}>
+                        <td>{importBox(r)}</td>
+                        <td className="muted">{formatDate(r.txn_date)}</td>
+                        <td>{r.merchant ?? r.raw_description}</td>
+                        {multiAccount && <td className="muted">{r.account_name ?? "—"}</td>}
+                        <td className="muted">{r.suggested_category_name ?? "—"}</td>
+                        <td className={`num ${r.amount_cents < 0 ? "negative" : "positive"}`}>
+                          {formatCents(r.amount_cents)}
+                        </td>
+                        <td>{statusCell(r)}</td>
+                      </tr>
+                      {matchEvidenceOf(r) && (
+                        <tr className="match-tr">
+                          {/* Derived, never literal: the header is 6 cells, or 7 with
+                              the account column, and a wrong span invents a phantom
+                              column that mis-renders in silence. */}
+                          <td colSpan={PREVIEW_HEADER_CELLS + (multiAccount ? 1 : 0)}>
+                            <MatchEvidence row={r} />
+                          </td>
+                        </tr>
+                      )}
+                    </Fragment>
                   ))}
                 </tbody>
               </table>

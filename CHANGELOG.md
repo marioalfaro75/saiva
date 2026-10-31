@@ -5,6 +5,33 @@ All notable changes to Saiva are documented here. The project follows
 
 ## [Unreleased]
 
+### Added
+- **A possible duplicate now shows you the transaction it matched.** Deciding whether
+  a row is one you already have meant hovering a small pill to read a tooltip — which
+  does not exist on a phone, and which never said the amount. The rows that need an
+  answer now carry the stored transaction as plain text: its date, amount, wording and
+  category, where it came from (which file and when, or that you entered it by hand),
+  and which way the dates differ. Alongside it, what else that account already holds
+  nearby at the same amount or merchant, because "do I already have one of these" and
+  "how many of these do I have" are different questions and only the second separates
+  a re-dated duplicate from a weekly repeat.
+
+  Two sentences are deliberately cautious. Where the two descriptions differ only in a
+  long number, it says the numbers differ and asks you to check the payee rather than
+  calling it harmless — two transfers to different payees normalise identically, and
+  that is what rent and a loan repayment look like. And the count says "at this amount
+  or merchant", never "nothing else in this account", because that is all it looked at.
+
+### Fixed
+- **A row whose account is not mapped no longer claims to be a duplicate.** Its
+  checkbox said "Already imported — importing it again would create a duplicate",
+  which was simply untrue; the real reason it cannot be ticked is that its account
+  column value was never mapped, and that is now what it says.
+- **Two identical transactions on the same day are now distinguishable to a screen
+  reader.** Both checkboxes were named after the description alone, so the pair that
+  de-duplication exists to keep apart presented as two identical controls with no way
+  to tell which one you had ticked.
+
 
 ## [0.15.0] — 2026-09-05
 

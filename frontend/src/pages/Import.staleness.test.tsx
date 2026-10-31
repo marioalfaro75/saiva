@@ -237,8 +237,37 @@ describe("Import on a phone", () => {
     await waitFor(() => expect(container.querySelectorAll(".stack-card")).toHaveLength(3));
     expect(container.querySelector(".stack-card table")).toBeNull();
     const first = container.querySelectorAll(".stack-card")[0] as HTMLElement;
-    expect(within(first).getByLabelText("Import Coles")).toBeChecked();
+    // The accessible name now carries date and amount as well as the description.
+    expect(within(first).getByLabelText(/^Import Coles,/)).toBeChecked();
     expect(screen.getByRole("group", { name: "Sort by" })).toBeInTheDocument();
+  });
+
+  it("gives two same-description rows distinguishable checkboxes", async () => {
+    // The pair de-duplication exists to keep apart: same merchant, same amount,
+    // same day, two real purchases. Naming the checkbox after the description alone
+    // left a screen-reader user with two identical controls and no way to tell which
+    // they had ticked. This is the assertion that stops the label being reverted to
+    // make the test above simpler — loosening the matcher there is not enough.
+    const base = previewBody(2);
+    const twins = base.rows.map((row) => ({
+      ...row,
+      txn_date: "2024-08-01",
+      raw_description: "COFFEE",
+      merchant: "Coffee",
+      amount_cents: -450,
+    }));
+    stubApi({ ...STUBS, "/imports/preview": { ...base, rows: twins } });
+
+    const { container } = await startImport();
+    fireEvent.click(previewButton());
+    await screen.findByText("Preview", { selector: "h2" });
+    await waitFor(() => expect(container.querySelectorAll(".stack-card")).toHaveLength(2));
+
+    const names = Array.from(container.querySelectorAll<HTMLInputElement>('input[type="checkbox"]'))
+      .map((box) => box.getAttribute("aria-label"))
+      .filter((name): name is string => Boolean(name));
+    expect(names).toHaveLength(2);
+    expect(new Set(names).size).toBe(2);
   });
 });
 
