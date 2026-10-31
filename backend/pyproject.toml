@@ -20,7 +20,9 @@ dependencies = [
   "pydantic-settings>=2.6",
   "email-validator>=2.2",
   "argon2-cffi>=23.1",
-  "pyjwt>=2.9",
+  # Floor raised deliberately: 2.13 carried thirteen advisories in the library that
+  # signs every session token, one of which is only fixed in 2.15.
+  "pyjwt>=2.15",
   "python-multipart>=0.0.12",
   "python-dateutil>=2.9",
   # Backtracking-resistant regex engine with a timeout, for user-written rule patterns.

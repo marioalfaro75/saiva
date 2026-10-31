@@ -22,6 +22,14 @@ All notable changes to Saiva are documented here. The project follows
   that is what rent and a loan repayment look like. And the count says "at this amount
   or merchant", never "nothing else in this account", because that is all it looked at.
 
+### Security
+- **Dependency updates, including thirteen advisories against the library that signs
+  your session tokens.** `pyjwt` moves to 2.15.1; `starlette`, `pydantic`,
+  `cryptography`, `sqlalchemy` and the rest of the runtime lockfile move with it.
+  On the frontend, `vite` and two transitive packages clear four more. None of this
+  was reachable in a way we know of, but the signing library is not somewhere to run
+  two months behind.
+
 ### Fixed
 - **A row whose account is not mapped no longer claims to be a duplicate.** Its
   checkbox said "Already imported — importing it again would create a duplicate",
