@@ -108,13 +108,20 @@ updates:
   # and it is what these ignore rules lean on. Two blind spots in it are worth writing down
   # rather than rediscovering:
   #
-  #   - It runs with `ignore-unfixed: true`. That is right for routine noise and exactly
-  #     wrong for an end-of-life base image: once a distro stops publishing fixes, every
-  #     CVE it carries becomes unfixed, so the scan falls silent at the moment the image
-  #     stops being maintained. Quiet from that job is not the same as safe.
+  #   - The SARIF it files runs with `ignore-unfixed: true`. That is right for routine
+  #     noise and exactly wrong for an end-of-life base image: once a distro stops
+  #     publishing fixes, every CVE it carries becomes unfixed, so the filed findings fall
+  #     silent at the moment the image stops being maintained — a package Debian LTS has
+  #     dropped is `StatusEndOfLife` to Trivy, and `ignore-unfixed` discards every status
+  #     but Fixed. Quiet from that job is not the same as safe. The job's readable table
+  #     now prints the unfixed count too, so the two numbers sit side by side in the log;
+  #     neither step fails the job on what it finds.
   #   - Silencing python and node here removed the only thing that ever mentioned a newer
-  #     runtime. Nothing in the repo now says "3.11 is approaching end of life"; that has
-  #     to be tracked by a person, or by a check that does not exist yet.
+  #     runtime. What says it now is backend/tests/test_runtime_support_window.py, which
+  #     reads the versions out of the two Dockerfiles and docker-compose.prod.yml and
+  #     goes red a chosen number of months before each one's security fixes stop. It is the only
+  #     time-dependent test in the suite, and the only thing anywhere in the repo that
+  #     will ever volunteer "3.11 is approaching end of life".
   - package-ecosystem: docker
     directories:
       - "/backend"
