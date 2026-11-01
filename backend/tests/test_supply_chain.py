@@ -471,6 +471,78 @@ def test_the_shared_checks_can_still_be_pointed_at_the_tag_being_rebuilt() -> No
     )
 
 
+def test_the_refresh_gate_asks_whether_the_rebuild_made_things_worse() -> None:
+    """An absolute CVE threshold on a rebuild of unchanged source can only ever fail.
+
+    Run #1 proved it, which is the only reason this test exists in this shape. The gate
+    was `exit-code: "1"` on any fixable CRITICAL/HIGH, and both images tripped it on
+    findings their own `:latest` already carried — saiva-api on the seven pip/setuptools
+    vendored CVEs that v0.16.0 genuinely shipped, saiva-web on six in usr/bin/caddy that
+    upstream has not rebuilt against Go 1.26.10. Neither was a regression and neither
+    was curable by rebuilding, so every weekly refresh would have failed and the patches
+    this workflow exists to deliver would have stopped arriving, on a schedule, with a
+    red run as the only signal.
+
+    So the verdict has to come from comparing the candidate against the image it
+    replaces, not from a threshold. Three things have to hold for that to mean anything:
+    a baseline is really pulled and scanned, the two scans are filtered identically (a
+    diff between a CRITICAL-only scan and a CRITICAL+HIGH one is noise), and something
+    actually fails the job on a difference. The tempting regression is to collapse it
+    back into one step with exit-code set, which is why that is asserted against by name.
+    """
+    spec = yaml.safe_load(REFRESH.read_text())
+    for job in ("api", "web"):
+        image = f"saiva-{job}"
+        steps = spec["jobs"][job]["steps"]
+        scans = [
+            step.get("with") or {}
+            for step in steps
+            if "trivy-action" in str(step.get("uses") or "")
+        ]
+        assert scans, f"the {job} job no longer scans anything, so nothing is gated"
+        for options in scans:
+            assert "exit-code" not in options, (
+                f"a trivy step in the {job} job sets exit-code, which is an absolute "
+                "threshold: it fails on findings the image it replaces already carries, "
+                f"so no refresh of a release carrying them can ever publish: {options}"
+            )
+
+        compared = [options for options in scans if options.get("format") == "json"]
+        refs = {options.get("image-ref") for options in compared}
+        assert refs == {f"{image}:candidate", f"{image}:incumbent"}, (
+            "the gate needs a machine-readable scan of both the candidate and the image "
+            f"it replaces; the {job} job has {refs or 'none'}"
+        )
+        filters = {
+            (options.get("severity"), bool(options.get("ignore-unfixed")))
+            for options in compared
+        }
+        assert len(filters) == 1, (
+            "the two compared scans are filtered differently, so their difference is an "
+            f"artefact of the filters rather than of the images: {filters}"
+        )
+
+        runs = {step["name"]: step["run"] for step in steps if step.get("run")}
+        joined = "\n".join(runs.values())
+        assert f"{image}:latest" in joined and f"{image}:incumbent" in joined, (
+            f"the {job} job never pulls `:latest` as the baseline, so the scan of "
+            f"{image}:incumbent above has nothing to read"
+        )
+        gating = [
+            text
+            for text in runs.values()
+            if "candidate.keys" in text and "incumbent.keys" in text
+        ]
+        assert len(gating) == 1, (
+            f"expected exactly one step in the {job} job to compare the two key sets, "
+            f"found {len(gating)}"
+        )
+        assert "exit 1" in gating[0], (
+            "the comparison step never fails the job, so a base image that got worse "
+            "would be reported and then published anyway"
+        )
+
+
 # The gate above keys on docker/build-push-action, which was the only way this
 # repository published an image until refresh-images.yml introduced a second one:
 # `docker buildx imagetools create`, which moves `:latest` onto an already-pushed
