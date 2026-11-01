@@ -76,4 +76,26 @@ testpaths = ["tests"]
 
 [tool.coverage.run]
 source = ["app"]
-omit = ["app/dbinit.py", "app/main.py"]
+# app/dbinit.py was omitted here for as long as nothing exercised it. It is the first
+# thing every deploy runs — `python -m app.dbinit && uvicorn` — and its only coverage
+# was the Dockerfile's `python -c "import app.main, app.dbinit"`, which proves the
+# module imports and nothing about what main() does. tests/test_dbinit.py now drives
+# main() and _backup_database(), taking the file from 39% to 92% (37 of 61 statements
+# unreached, down to 5: the `if __name__ == "__main__"` wrapper, which is left alone
+# deliberately — covering it needs runpy re-entry for a five-line print-and-re-raise).
+#
+# Measuring it is close to free, but the delta is not the reason to do it. Re-reporting
+# one coverage dataset both ways — the only way to see this, because the number is
+# smaller than the suite's own run-to-run jitter from the unseeded hypothesis fuzzers in
+# tests/test_importer_fuzz.py — gives 92.9892% with the file hidden against 92.9740%
+# with it measured, i.e. 0.015 points. The argument that actually holds is the bound:
+# 61 statements out of 4768 cannot cost more than 1.28 points, so even if dbinit.py
+# regressed to 0% the total would be 91.8% against a --cov-fail-under of 85. Nothing
+# about this file's coverage can trip the gate, which is the honest reading: removing
+# the omit makes the cold-start path visible in the report, it does not put it under the
+# gate. Visibility is the point — leaving it off the report is what let a completely
+# untested deploy path sit there unnoticed.
+#
+# app/main.py stays on the list: nothing in this change touches what covers it, and
+# this is not the change in which to find out what removing it would cost.
+omit = ["app/main.py"]

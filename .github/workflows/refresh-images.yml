@@ -1,0 +1,673 @@
+name: Refresh release images
+
+# Rebuild the *current release* so OS security patches reach the box without anyone
+# cutting a version.
+#
+# The problem this solves: production follows `:latest` (SAIVA_VERSION defaults to
+# it in docker-compose.prod.yml) and `:latest` is only ever written by a human
+# running cut-release.yml. The last two releases were 57 days apart, so for most of
+# any given month a Debian or Alpine advisory against python:3.11-slim-bookworm,
+# caddy:2-alpine or libpq5 has no route to the box at all — the weekly image scan in
+# security-scan.yml finds it and then nothing happens. Dependabot's base-image
+# ignore rules deliberately leave that job as the only watcher, which makes "nothing
+# happens" the whole of the response.
+#
+# What it deliberately does NOT do: rebuild `main`. Rebuilding the default branch
+# and publishing it as `:latest` is continuous deployment of unreleased code, which
+# is a different (and much larger) decision than "let OS patches through". This
+# rebuilds the tree of the highest released version, so the only thing that can
+# change is a base-image layer, an apt/apk package, or the frontend's npm install —
+# never application code.
+#
+# Know what the ceiling is. Debian handed bookworm to the LTS team in mid-2026
+# (wiki.debian.org/LTS/Bookworm opens the LTS period on 2026-06-11; the handover was
+# announced on 2026-07-12 alongside the final point release 12.15 — the exact day is
+# not worth asserting here, only that it has passed). LTS coverage is narrower than
+# regular support, so for part of what the API image carries "no fix available" now
+# means "will not be fixed", and rebuilding cannot deliver a patch nobody published. This workflow
+# shortens the gap between a fix existing and it reaching the box; it does not
+# create fixes. When the unfixed count stops falling, the answer is a new base
+# image, which is a code change and therefore a release — see
+# backend/tests/test_runtime_support_window.py for the calendar that says when.
+#
+# What it also does not do: *deliver* the patch. Nothing on the box polls (there is
+# no WATCHTOWER_SCHEDULE and WATCHTOWER_HTTP_API_PERIODIC_POLLS defaults to false),
+# and the in-app update badge compares GitHub *release tags* — see
+# backend/app/services/updates.py, `is_newer` — so republishing v0.16.0 under the
+# same tag raises no badge. Be precise about what that means for the owner, because
+# it is easy to get wrong: `update_available` stays false, and
+# frontend/src/components/UpdatesPanel.tsx renders "Update now" only when
+# `update_available && apply_available` — so after a refresh there is no button to
+# press, and the panel affirmatively reads "You're on the latest version" while the
+# box runs the unpatched digest. The only delivery route is `make pull` (or
+# `docker compose -f docker-compose.prod.yml pull && … up -d`). Do not write "press
+# Update now" anywhere in this file; it is an instruction nobody can follow.
+#
+# That the last step is a human's is on purpose — this box has no health-gated
+# rollback, Watchtower counts a container that merely starts as a success — but the
+# cost is real: a refresh that nobody pulls has patched nothing.
+#
+# Run it once by hand from the Actions tab before trusting the schedule. Everything
+# below the build is shell that cannot be exercised anywhere but a real runner.
+on:
+  schedule:
+    # Tuesdays, the morning after security-scan.yml's weekly run (Mondays 06:27
+    # UTC): the owner has already seen what the scan found when the refresh that
+    # would fix it goes out.
+    - cron: "41 4 * * 2"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to rebuild, e.g. v0.16.0 (blank = the highest released version)"
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+
+# `:latest` has three writers, and all three now share this group. cut-release.yml
+# is the obvious one. The third is release.yml, which fires on any `v*` tag push and
+# publishes `:latest` without ever naming it — docker/metadata-action generates it by
+# default in `auto` mode for `type=semver` — and which had no concurrency group at
+# all until this workflow existed. Serialising all three is what stops a refresh of
+# v0.16.0 landing on top of a release of v0.17.0 and walking `:latest` backwards.
+# Never cancel: a half-finished promote leaves api and web on different digests.
+concurrency:
+  group: ghcr-release-channel
+  cancel-in-progress: false
+
+jobs:
+  discover:
+    name: Find the release to rebuild
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.pick.outputs.tag }}
+      version: ${{ steps.pick.outputs.version }}
+      major_minor: ${{ steps.pick.outputs.major_minor }}
+      sha: ${{ steps.pick.outputs.sha }}
+      rebuild_tag: ${{ steps.pick.outputs.rebuild_tag }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          # Tags are the input to this whole workflow, and a shallow clone has none.
+          fetch-depth: 0
+      - name: Pick the highest released version
+        id: pick
+        env:
+          REQUESTED: ${{ github.event.inputs.tag }}
+          # For `gh release view` below. GITHUB_TOKEN with `contents: read` is enough
+          # to read a Release; nothing here writes one.
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          # A tag is released if it has a published, non-draft, non-prerelease GitHub
+          # Release. That record is the thing a human made deliberately —
+          # cut-release.yml creates it with `make_latest: 'true'` — and it is what
+          # separates a version somebody cut from a tag somebody pushed. Reachability
+          # is the wrong test: cut-release.yml says in its own comment that dispatch
+          # can be pointed at any ref, so a legitimate release need not be an ancestor
+          # of main. Needs no permission beyond `contents: read`.
+          released_tag() {
+            local json
+            json="$(gh release view "$1" --json isDraft,isPrerelease 2>/dev/null)" || return 1
+            [ "$(printf '%s' "$json" | jq -r '.isDraft')" = false ] \
+              && [ "$(printf '%s' "$json" | jq -r '.isPrerelease')" = false ]
+          }
+          if [ -n "$REQUESTED" ]; then
+            tag="$REQUESTED"
+          else
+            # Sorted by version, NOT `git describe`. describe answers "the nearest tag
+            # reachable from HEAD", and cut-release.yml says in its own comment that
+            # dispatch can be pointed at any ref — so a release cut from a side branch
+            # produces a tag that main cannot reach, describe silently falls back to the
+            # *previous* release, and this workflow would republish older application
+            # code as `:latest`. That is a downgrade of a family's finance box, applied
+            # unattended, and it would look like a successful run.
+            #
+            # The strict `vX.Y.Z` filter earns its place, but not by keeping a release
+            # candidate out of production: `--sort=-v:refname` does rank `v0.16.0-rc1`
+            # above `v0.16.0` (verified), and a glob like 'v[0-9]*.[0-9]*.[0-9]*' would
+            # pick the rc — but the validation below is unconditional and would then
+            # fail the run. What the filter buys is that the refresh keeps *working*
+            # while a prerelease tag is the highest ref, instead of going red every
+            # Tuesday until someone cuts the real version. The shape is exactly the one
+            # cut-release.yml validates on input.
+            #
+            # The first line is taken with parameter expansion rather than `| head -1`
+            # on purpose. `head` closes the pipe after one line and `grep` takes
+            # SIGPIPE, which `pipefail` turns into a failed step. It survives today
+            # only because few tags match; at ~1200 matching tags it exits 141
+            # (measured). That is a bug that arrives with age, so it is avoided rather
+            # than tolerated.
+            released="$(git tag --list 'v*' --sort=-v:refname | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$')"
+            # Highest tag that is actually released, skipping ones that are not. A
+            # hard failure on the first unreleased tag was the original shape here and
+            # it is wrong: a single stray `v9.9.9` on a side branch sorts to the top
+            # and would wedge the refresh every Tuesday until somebody noticed, so the
+            # patches this workflow exists to deliver would quietly stop while the only
+            # signal was a red scheduled run. Skipping is both safe and live — an
+            # unreleased tag is never published either way.
+            tag=""
+            while IFS= read -r candidate; do
+              [ -n "$candidate" ] || continue
+              if released_tag "$candidate"; then tag="$candidate"; break; fi
+              echo "note: skipping $candidate — no published Release for it"
+            done <<< "$released"
+            if [ -z "$tag" ]; then
+              echo "::error::no tag has a published Release, so there is nothing to"
+              echo "::error::refresh. Cut a release first."
+              exit 1
+            fi
+          fi
+          if ! printf '%s' "$tag" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "::error::'$tag' is not a vX.Y.Z release tag"
+            exit 1
+          fi
+          if ! git rev-parse -q --verify "refs/tags/$tag" >/dev/null; then
+            echo "::error::tag $tag does not exist"
+            exit 1
+          fi
+          # Re-checked unconditionally, which for the discovered tag is redundant and
+          # for a dispatched one is the whole point: a hand-typed tag gets refused
+          # rather than quietly replaced with a different release, because somebody
+          # asking to rebuild v0.14.1 and silently getting v0.16.0 published as
+          # `:latest` is the worst outcome available here.
+          if ! released_tag "$tag"; then
+            echo "::error::$tag has no published Release (or it is a draft or a"
+            echo "::error::prerelease), so it is a tag somebody pushed rather than a"
+            echo "::error::version somebody cut. Refusing to publish it as :latest."
+            exit 1
+          fi
+          version="${tag#v}"
+          {
+            echo "tag=$tag"
+            echo "version=$version"
+            echo "major_minor=${version%.*}"
+            echo "sha=$(git rev-parse "refs/tags/$tag^{commit}")"
+            # Traceability: which day's base layers this is. A second run on the same
+            # day overwrites it, which is the right outcome — it is a correction of
+            # that day's refresh, not a new one.
+            echo "rebuild_tag=$tag-patch.$(date -u +%Y%m%d)"
+          } >> "$GITHUB_OUTPUT"
+      - name: Say what will be rebuilt
+        run: echo "Rebuilding ${{ steps.pick.outputs.tag }} (${{ steps.pick.outputs.sha }})"
+
+  # The same bar cut-release.yml clears, run against the *released* tree rather than
+  # whatever main holds today — that is what the `ref` input added to checks.yml is
+  # for. A local `uses: ./...` is always resolved from the caller's commit and takes
+  # no `@ref`, and actions/checkout inside a called workflow defaults to the caller's
+  # event ref, so without that input a scheduled run would test main and ship a tag.
+  #
+  # Be honest about what this proves for an unchanged tree: almost nothing about the
+  # new base layer. checks.yml runs pytest on a runner via setup-python and never
+  # executes the built image. Its value here is the two time-varying gates —
+  # `pip-audit --strict` over requirements.lock and `npm audit --audit-level=high` —
+  # which will eventually go red on a frozen release, and that red is the correct
+  # signal: the released tree no longer clears today's bar, so cut a release instead
+  # of shipping a patched base under a stale lockfile. The evidence that the new base
+  # layer is sound is in the jobs below, not here.
+  checks:
+    name: Checks
+    needs: [discover]
+    uses: ./.github/workflows/checks.yml
+    with:
+      ref: ${{ needs.discover.outputs.tag }}
+
+  api:
+    name: Rebuild + smoke saiva-api
+    needs: [discover, checks]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      digest: ${{ steps.build.outputs.digest }}
+    services:
+      # Same image and options as the `migrations` job in checks.yml. The point of
+      # this job is that the *container* boots, and this image cannot boot without a
+      # Postgres to migrate.
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: saiva
+          POSTGRES_PASSWORD: saiva
+          POSTGRES_DB: saiva
+        ports:
+          - "5432:5432"
+        options: >-
+          --health-cmd "pg_isready -U saiva"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      IMAGE: saiva-api:candidate
+      DB_URL: postgresql+psycopg://saiva:saiva@127.0.0.1:5432/saiva
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ needs.discover.outputs.tag }}
+      - uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+      - name: Log in to GHCR
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Both architectures, pushed once under a tag nothing deploys, and then tested
+      # and promoted by digest. The alternative — build amd64 with `load: true`, test
+      # it, then build again with `push: true` — publishes an amd64 image that is only
+      # the one that was tested if the layer cache hit. Two builds mean two
+      # resolutions of `FROM python:3.11-slim-bookworm`, and the whole premise of this
+      # workflow is that that tag moves. Here the bytes that get promoted are the
+      # bytes that were pulled and run.
+      #
+      # There is no cache-from/cache-to here, and the reason is narrower than it first
+      # looks — state it accurately or the next reader will delete the guard. When the
+      # base image HAS moved, a cache cannot make this a no-op: BuildKit pins the
+      # resolved base digest into the FROM source op, so a new digest misses on the apt
+      # layer and on everything after it. The case the cache would actually hide is the
+      # complementary one: `python:3.11-slim-bookworm` unchanged, but PGDG or Debian
+      # shipping a newer postgresql-client-16 or libpq5. This Dockerfile runs
+      # `apt-get install` and never `apt-get upgrade`, so those few packages are
+      # exactly what a replayed apt layer would freeze — and the run would be green,
+      # the digest new, and the patch absent. `pull: true` covers the level above:
+      # re-resolve the base tag rather than trust a local copy.
+      # test_the_refresh_cannot_be_served_out_of_the_layer_cache keeps both honest.
+      #
+      # What this build does and does not prove, by architecture, because the asymmetry
+      # is easy to forget once the job is green:
+      #   linux/amd64  is built, pulled back, CVE-scanned, booted against a real
+      #                Postgres, health-checked through the image's own HEALTHCHECK,
+      #                migrated, and has pg_dump exercised. That is the tested image.
+      #   linux/arm64  is built under QEMU and gets only the in-image
+      #                `RUN python -c "import app.main, app.dbinit"` from
+      #                backend/Dockerfile. Nothing scans it and nothing runs it.
+      # The promote step tags the whole index, so the arm64 half reaches `:latest` on
+      # the evidence of an import alone. That is no worse than cut-release.yml, which
+      # is the only reason it is acceptable here — it is not something this workflow
+      # fixes, and a box on arm64 is relying on a build-time import.
+      - name: Build both architectures and push the candidate
+        id: build
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: ./backend
+          build-args: |
+            SAIVA_VERSION=${{ needs.discover.outputs.version }}
+          push: true
+          pull: true
+          platforms: linux/amd64,linux/arm64
+          # Keeps the pushed index a plain two-platform manifest list, which is what
+          # the promote job copies with `imagetools create`.
+          provenance: false
+          # A tag nothing deploys; it exists so the manifest has a name, and is
+          # overwritten by every run. The promote job never reads it.
+          tags: ghcr.io/${{ github.repository_owner }}/saiva-api:refresh-candidate
+          # Written out rather than taken from docker/metadata-action: on a scheduled
+          # run that action reads github.ref, which is the default branch, and would
+          # label this image with main instead of the release it is a rebuild of.
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.version=${{ needs.discover.outputs.tag }}
+            org.opencontainers.image.revision=${{ needs.discover.outputs.sha }}
+            org.saiva.image.rebuild=${{ needs.discover.outputs.rebuild_tag }}
+
+      - name: Pull back the candidate this runner can actually execute
+        run: |
+          set -euo pipefail
+          ref="ghcr.io/${{ github.repository_owner }}/saiva-api@${{ steps.build.outputs.digest }}"
+          # By digest, not by the candidate tag: nothing can have moved under us
+          # between the push and here. The pull resolves the amd64 entry of the index.
+          docker pull "$ref"
+          docker tag "$ref" "$IMAGE"
+
+      # Blocking, unlike the same scan in security-scan.yml, because here it is not a
+      # report — it is the question the run exists to ask. The API image scans with 0
+      # findings across 48 targets today, so a fixable CRITICAL or HIGH appearing in a
+      # rebuild means the new base layer is worse than the one the box is running, and
+      # the right answer is to not publish it and let a human look. ignore-unfixed for
+      # the reason the other job gives: unfixable CVEs are noise that trains people to
+      # ignore the category.
+      - name: The rebuilt image must not be worse than the one it replaces
+        uses: aquasecurity/trivy-action@57a97c7e7821a5776cebc9bb87c984fa69cba8f1 # 0.35.0
+        with:
+          scan-type: image
+          image-ref: saiva-api:candidate
+          scanners: vuln
+          format: table
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
+          exit-code: "1"
+
+      # Everything from here down is the part no other job in this repository does:
+      # it runs the image. The build-time `RUN python -c "import app.main, app.dbinit"`
+      # in backend/Dockerfile proves the modules import; it does not prove the thing
+      # boots, binds, migrates or answers.
+      - name: Cold start — boot the image and wait for its own HEALTHCHECK
+        run: |
+          set -euo pipefail
+          # Generated, not a literal: ENVIRONMENT=production makes
+          # check_production_secrets refuse any key under 32 characters, and a 48-byte
+          # base64 literal sitting in a workflow file is also exactly what the gitleaks
+          # job in checks.yml is there to shout about.
+          secret="$(head -c 48 /dev/urandom | base64 | tr -d '\n')"
+          # --network host so the container reaches the service container's published
+          # 5432 on 127.0.0.1 and the runner can reach uvicorn's 8000 the same way.
+          docker run -d --name saiva-smoke --network host \
+            -e DATABASE_URL="$DB_URL" \
+            -e SECRET_KEY="$secret" \
+            -e ENVIRONMENT=production \
+            "$IMAGE"
+          # Waiting on docker's health status rather than curling ourselves, because
+          # that executes the HEALTHCHECK baked into the image — stdlib urllib, which
+          # is one of the things the pip/setuptools strip could have broken, and the
+          # only signal Watchtower and compose have. start-period is 20s and the
+          # interval 30s, so the first verdict can be a minute out.
+          healthy=""
+          status="none"
+          for _ in $(seq 1 90); do
+            inspect() { docker inspect -f "$1" saiva-smoke 2>/dev/null || echo "$2"; }
+            status="$(inspect '{{.State.Health.Status}}' gone)"
+            if [ "$status" = "healthy" ]; then healthy=1; break; fi
+            # Stop as soon as it dies rather than polling out the full three minutes:
+            # a crash-looping container is the failure this step exists to report.
+            if [ "$(inspect '{{.State.Running}}' false)" != "true" ]; then break; fi
+            sleep 2
+          done
+          if [ -z "$healthy" ]; then
+            echo "::error::saiva-api never became healthy (last status: $status)"
+            exit 1
+          fi
+          test "$(curl -fsS http://127.0.0.1:8000/api/health)" = '{"status":"ok"}'
+
+      - name: The migration actually ran
+        run: |
+          set -euo pipefail
+          # psql from a throwaway container so this does not depend on the runner
+          # image shipping a Postgres client.
+          q() {
+            docker run --rm --network host -e PGPASSWORD=saiva postgres:16-alpine \
+              psql -h 127.0.0.1 -U saiva -d "${2:-saiva}" -tAqc "$1"
+          }
+          revision="$(q 'select version_num from alembic_version')"
+          if [ -z "$revision" ]; then
+            echo "::error::the container reported healthy but no migration was ever stamped"
+            exit 1
+          fi
+          echo "alembic_version = $revision"
+          test "$(q "select to_regclass('public.households') is not null")" = "t"
+
+      - name: Restart path — dbinit on a database already at head
+        run: |
+          set -euo pipefail
+          # The path that runs on every single deploy, including every Watchtower
+          # recreate. backend/tests/test_dbinit.py now covers it as a unit
+          # (test_the_restart_path_is_a_no_op_and_stamps_nothing), on SQLite; this is
+          # the same assertion against real Postgres in the real image, which is where
+          # a dialect-specific regression would actually show. It must be a no-op and
+          # it must not try to take a backup.
+          secret="$(head -c 48 /dev/urandom | base64 | tr -d '\n')"
+          docker run --rm --network host \
+            -e DATABASE_URL="$DB_URL" -e SECRET_KEY="$secret" -e ENVIRONMENT=production \
+            "$IMAGE" python -m app.dbinit | tee restart.log
+          grep -q "database schema up to date" restart.log
+          if grep -q "backing up database" restart.log; then
+            echo "::error::dbinit took a pre-migration backup with nothing to migrate"
+            exit 1
+          fi
+
+      - name: Upgrade path — pg_dump inside the image still works
+        run: |
+          set -euo pipefail
+          # The base-image regression nothing else here would catch. pg_dump comes from
+          # the PGDG apt repo whose codename is derived from the base OS, so a base
+          # image that moves to a new Debian release pulls a different libpq5 — and
+          # dbinit raises RuntimeError and refuses to migrate if pg_dump fails, which
+          # with `python -m app.dbinit && uvicorn` means nothing ever binds :8000 and
+          # `restart: unless-stopped` crash-loops forever.
+          #
+          # A second database at the previous revision, so there is genuinely something
+          # pending. The previous revision is read out of the image's own alembic
+          # history rather than hardcoded, so this keeps working as migrations are added.
+          secret="$(head -c 48 /dev/urandom | base64 | tr -d '\n')"
+          prev="$(docker run --rm "$IMAGE" python -c "
+          from alembic.config import Config
+          from alembic.script import ScriptDirectory
+          s = ScriptDirectory.from_config(Config('alembic.ini'))
+          print(s.get_revision(s.get_current_head()).down_revision)")"
+          # Two statements, not `test -n "$prev" && test … != None`. In an AND-OR list
+          # `set -e` exempts every command but the last, so an empty $prev makes the
+          # list short-circuit with status 0 and the step sails on to upgrade to the
+          # empty revision. Measured: A="" B=anything exits 0 and keeps going.
+          test -n "$prev"
+          test "$prev" != "None"
+          docker run --rm --network host -e PGPASSWORD=saiva postgres:16-alpine \
+            psql -h 127.0.0.1 -U saiva -d postgres -c 'create database saiva_pending'
+          pending="postgresql+psycopg://saiva:saiva@127.0.0.1:5432/saiva_pending"
+          docker run --rm --network host \
+            -e DATABASE_URL="$pending" -e SECRET_KEY="$secret" -e ENVIRONMENT=production \
+            "$IMAGE" python -c "
+          from alembic import command
+          from alembic.config import Config
+          command.upgrade(Config('alembic.ini'), '$prev')"
+          # /backups is bind-mounted so the dump can be inspected from here; 1777
+          # because the image runs as uid 10001.
+          mkdir -p "$RUNNER_TEMP/backups" && chmod 1777 "$RUNNER_TEMP/backups"
+          docker run --rm --network host -v "$RUNNER_TEMP/backups:/backups" \
+            -e DATABASE_URL="$pending" -e SECRET_KEY="$secret" -e ENVIRONMENT=production \
+            "$IMAGE" python -m app.dbinit | tee upgrade.log
+          grep -q "backing up database" upgrade.log
+          grep -q "backup complete" upgrade.log
+          grep -q "database schema up to date" upgrade.log
+          dump="$(find "$RUNNER_TEMP/backups" -name '*-premigrate.sql.gz' -print -quit)"
+          test -n "$dump"
+          gzip -t "$dump"
+          # Decompressed to a file and grepped there, NOT `zcat … | grep -q`. `grep -q`
+          # exits on the first match, zcat takes SIGPIPE, and `pipefail` turns that
+          # into a failed step for any dump larger than the 64KiB pipe buffer.
+          # Measured: 28-byte dump exits 0, 3MB dump exits 141. This gate is the only
+          # thing in the repository covering the pg_dump/libpq base-image regression,
+          # so it must not start reporting failure the week the schema outgrows a pipe.
+          gzip -cd "$dump" > "$RUNNER_TEMP/premigrate.sql"
+          grep -q "PostgreSQL database dump" "$RUNNER_TEMP/premigrate.sql"
+
+      - name: What the container said
+        if: failure()
+        run: docker logs saiva-smoke 2>&1 | tail -n 200 || true
+
+  web:
+    name: Rebuild + smoke saiva-web
+    needs: [discover, checks]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      digest: ${{ steps.build.outputs.digest }}
+    env:
+      IMAGE: saiva-web:candidate
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ needs.discover.outputs.tag }}
+      - uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+      - name: Log in to GHCR
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      # Uncached and pulling fresh, for the reasons spelled out in the api job. This
+      # image's two bases are node:22-alpine (build stage) and caddy:2-alpine, and
+      # `npm install` resolving fresh is the point rather than a hazard: there is no
+      # `npm ci` here, so a patched transitive dependency arrives the same way an
+      # apk update does.
+      - name: Build both architectures and push the candidate
+        id: build
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: ./frontend
+          build-args: |
+            SAIVA_VERSION=${{ needs.discover.outputs.version }}
+          push: true
+          pull: true
+          platforms: linux/amd64,linux/arm64
+          provenance: false
+          tags: ghcr.io/${{ github.repository_owner }}/saiva-web:refresh-candidate
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.version=${{ needs.discover.outputs.tag }}
+            org.opencontainers.image.revision=${{ needs.discover.outputs.sha }}
+            org.saiva.image.rebuild=${{ needs.discover.outputs.rebuild_tag }}
+      - name: Pull back the candidate this runner can actually execute
+        run: |
+          set -euo pipefail
+          ref="ghcr.io/${{ github.repository_owner }}/saiva-web@${{ steps.build.outputs.digest }}"
+          docker pull "$ref"
+          docker tag "$ref" "$IMAGE"
+      - name: The rebuilt image must not be worse than the one it replaces
+        uses: aquasecurity/trivy-action@57a97c7e7821a5776cebc9bb87c984fa69cba8f1 # 0.35.0
+        with:
+          scan-type: image
+          image-ref: saiva-web:candidate
+          scanners: vuln
+          format: table
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
+          exit-code: "1"
+      - name: Cold start — Caddy parses its config and serves the SPA
+        run: |
+          set -euo pipefail
+          # This image has no HEALTHCHECK, so the wait is ours. There is more here than
+          # "did it 200": the header assertion is what proves Caddy actually loaded
+          # frontend/Caddyfile.web. A caddy:2-alpine that rejected one directive would
+          # otherwise still serve /srv from its default config and look fine.
+          docker run -d --name saiva-web-smoke -p 8080:8080 "$IMAGE"
+          up=""
+          for _ in $(seq 1 60); do
+            if curl -fsS -o /dev/null http://127.0.0.1:8080/; then up=1; break; fi
+            sleep 2
+          done
+          if [ -z "$up" ]; then
+            echo "::error::saiva-web never served a request"
+            docker logs saiva-web-smoke 2>&1 | tail -n 100 || true
+            exit 1
+          fi
+          curl -fsS http://127.0.0.1:8080/ | grep -q '<div id="root">'
+          curl -fsSI http://127.0.0.1:8080/ | grep -qi '^content-security-policy:'
+          # Client-side routing: a deep link must fall through to index.html, not 404.
+          curl -fsS http://127.0.0.1:8080/accounts | grep -q '<div id="root">'
+      - name: What the container said
+        if: failure()
+        run: docker logs saiva-web-smoke 2>&1 | tail -n 200 || true
+
+  promote:
+    name: Point the release channel at the rebuilt images
+    # Both images or neither. Promoting per-image would leave api on refreshed layers
+    # and web on the release's whenever one of the two smoke jobs failed, and `make
+    # pull` would then hand the box a mismatched pair.
+    needs: [discover, api, web]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Log in to GHCR
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      # Which tags move, and why these and not the others:
+      #
+      #   latest         moves. It is a rolling pointer by definition and it is what
+      #                  production follows, so not moving it means this workflow does
+      #                  nothing.
+      #   <major.minor>  moves. "0.16" means the newest 0.16.x build; a pin to it that
+      #                  silently missed the patch while `latest` got it would be worse
+      #                  than not offering the pin.
+      #   v<ver>         does NOT move. A version tag that changes digest means
+      #                  "pinned" does not mean pinned, and there is then no answer to
+      #                  "which image is v0.16.0".
+      #   sha-<sha>      does NOT move, and this is the sharp one. It is the same commit
+      #                  SHA as the release, so republishing `type=sha` would move the
+      #                  exact tag the documented rollback uses
+      #                  (`SAIVA_VERSION=sha-<previous>` + `make pull`), overwriting the
+      #                  known-good image with the new one. That is the rollback
+      #                  deleting itself.
+      #   <tag>-patch.<date>  is new, and is how a refreshed build is named.
+      #
+      # So `:latest` and `:v<ver>` are no longer the same digest. cut-release.yml used
+      # to claim they could not drift; its comment has been corrected rather than left
+      # to describe a pipeline that no longer exists.
+      #
+      # `imagetools create` re-tags by digest — no rebuild, no QEMU, and the per-
+      # architecture manifests under the new tags are byte-identical to the ones the
+      # jobs above pulled and ran.
+      - name: Promote the tested digests
+        env:
+          OWNER: ${{ github.repository_owner }}
+          TAG: ${{ needs.discover.outputs.tag }}
+          MAJOR_MINOR: ${{ needs.discover.outputs.major_minor }}
+          REBUILD_TAG: ${{ needs.discover.outputs.rebuild_tag }}
+          API_DIGEST: ${{ needs.api.outputs.digest }}
+          WEB_DIGEST: ${{ needs.web.outputs.digest }}
+        run: |
+          set -euo pipefail
+          # Two statements, not `test -n "$A" && test -n "$B"`. `set -e` exempts every
+          # command of an AND-OR list but the last, so an empty API_DIGEST would
+          # short-circuit the list with status 0 and go on to call `imagetools create`
+          # with a malformed `ghcr.io/owner/saiva-api@` source. Measured: only an empty
+          # *second* operand aborts. An empty digest here means a build output went
+          # missing, which is precisely when not publishing matters.
+          test -n "$API_DIGEST"
+          test -n "$WEB_DIGEST"
+          promote() {
+            docker buildx imagetools create \
+              --tag "ghcr.io/$OWNER/$1:latest" \
+              --tag "ghcr.io/$OWNER/$1:$MAJOR_MINOR" \
+              --tag "ghcr.io/$OWNER/$1:$REBUILD_TAG" \
+              "ghcr.io/$OWNER/$1@$2"
+          }
+          # Not atomic, and it cannot be: two repositories, two registry writes. If the
+          # second fails, api has moved and web has not, which is the mismatched pair
+          # the `needs: [discover, api, web]` gate above exists to avoid. So the
+          # summary is written per image as each one lands, rather than once at the
+          # end — on a half-done promote the log then says which half, instead of
+          # saying nothing at all because the final block never ran.
+          {
+            echo "### Refreshed $TAG"
+            echo
+            echo "Same source tree, rebuilt base layers."
+            echo
+            echo "| image | digest | tags moved |"
+            echo "| --- | --- | --- |"
+          } >> "$GITHUB_STEP_SUMMARY"
+          for pair in "saiva-api $API_DIGEST" "saiva-web $WEB_DIGEST"; do
+            # shellcheck disable=SC2086
+            set -- $pair
+            promote "$1" "$2"
+            # Read it back rather than assume the write landed. `imagetools create` is
+            # a re-push of the source index bytes, so the tag must resolve to exactly
+            # the digest the smoke jobs ran; if it does not, something else wrote this
+            # tag between the gate and here and the run must not report success.
+            live="$(docker buildx imagetools inspect \
+              --format '{{.Manifest.Digest}}' "ghcr.io/$OWNER/$1:latest")"
+            if [ "$live" != "$2" ]; then
+              echo "::error::$1:latest resolves to $live, not the tested $2"
+              exit 1
+            fi
+            echo "| $1 | \`$2\` | latest, $MAJOR_MINOR, $REBUILD_TAG |" \
+              >> "$GITHUB_STEP_SUMMARY"
+          done
+          {
+            echo
+            echo "\`:$TAG\` and \`:sha-*\` still point at the original release build."
+            echo
+            echo "**Nothing on the box has pulled this.** There is no in-app button to"
+            echo "press: the update badge compares release tags, this is the same tag,"
+            echo "so the app reports \"You're on the latest version\" while running the"
+            echo "old digest. Run \`make pull\` on the host to apply it."
+          } >> "$GITHUB_STEP_SUMMARY"

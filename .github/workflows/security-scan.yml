@@ -145,6 +145,13 @@ jobs:
 
   # Whether this pull request changes what actually goes into an image. Same
   # paths-filter idiom ci.yml uses to decide which image to republish.
+  #
+  # Deliberately not `backend/app/**`: that would rebuild both images on nearly every
+  # backend pull request to re-scan an unchanged dependency set. The risk it would
+  # cover — app code starting to import something the API image no longer ships, now
+  # that backend/Dockerfile strips pip and setuptools — is covered at the source
+  # instead, by test_no_runtime_module_imports_the_packaging_toolchain in
+  # backend/tests/test_supply_chain.py, which runs in the blocking suite every time.
   image-inputs:
     name: Detect image changes
     if: github.event_name == 'pull_request'
@@ -164,6 +171,7 @@ jobs:
               - 'backend/Dockerfile'
               - 'frontend/Dockerfile'
               - 'backend/requirements.lock'
+              - 'backend/pyproject.toml'
               - 'frontend/package-lock.json'
               - '.github/workflows/security-scan.yml'
 
@@ -223,20 +231,58 @@ jobs:
           scanners: vuln
           format: sarif
           output: trivy-image.sarif
+          # Kept for the day `limit-severities-for-sarif` is wanted, but inert as
+          # written: trivy-action's entrypoint unsets TRIVY_SEVERITY for sarif
+          # output unless that input is "true", so this SARIF already carries every
+          # severity. Narrowing it is a separate decision about what the Security
+          # tab should hold, not a side effect of the step below.
           severity: CRITICAL,HIGH,MEDIUM
           # A base image usually carries CVEs with no fix published yet. Reporting
-          # those as findings trains people to ignore the whole category, so this
-          # reports only what could actually be acted on.
+          # those into the Security tab trains people to ignore the whole category,
+          # so what gets filed as a finding is what could actually be acted on. The
+          # cost is that a package Debian LTS has dropped is also filtered out —
+          # Trivy calls that StatusEndOfLife and `ignore-unfixed` discards every
+          # status but Fixed — so the step below prints the other half.
           ignore-unfixed: true
-      - name: Findings, readable
+      - name: Findings, readable — including the ones with no fix
+        # The same image with `ignore-unfixed` off, as a table and not as SARIF:
+        # this number belongs in the log beside the one above, not in the Security
+        # tab where it would bury the actionable findings. Two numbers side by side
+        # are the point — "0 fixable, 37 unfixed" says something about the base
+        # image that neither says alone, and the ratio is what moves at end of
+        # life. It was `true` here as well until Debian handed bookworm to the LTS
+        # team in mid-2026 (the announcement, debian.org/News/2026/20260712, is
+        # dated 2026-07-12; debian.org's release table carries 2026-07-11 with the
+        # final point release 12.15; the schedule published in 2024 said
+        # 2026-06-10 — four months ago whichever you take), at which point "no fix
+        # available" stopped meaning "not triaged yet" for the part of the image
+        # LTS excludes.
+        #
+        # UNKNOWN is on the severity list deliberately. Debian's tracker records
+        # state and urgency in separate fields and trivy-db reads them separately
+        # (`newStatus(adv.State)`, `severityFromUrgency(adv.Severity)`), so an
+        # entry whose urgency is itself "end-of-life" lands as severity UNKNOWN —
+        # exactly the rows this step exists to show, and CRITICAL,HIGH,MEDIUM
+        # alone would drop them.
+        #
+        # Two things not to read into this. `ignore-unfixed: false` is also
+        # trivy-action's own default, so the input is never exported and this line
+        # records intent rather than enforcing it; a trivy.yaml or a
+        # TRIVY_IGNORE_UNFIXED would silently win and no test here would notice.
+        # And "non-blocking" means findings: `exit-code` is unset on both steps so
+        # Trivy exits 0 however much it finds, but a scan *error* does fail the job
+        # (entrypoint.sh runs under `set -euo pipefail`), which is correct. The
+        # deliberate part is the absence of a threshold — gating on a CVE count
+        # would make an unchanged commit start failing the day a database updates,
+        # which is why this whole workflow sits outside checks.yml.
         uses: aquasecurity/trivy-action@57a97c7e7821a5776cebc9bb87c984fa69cba8f1 # 0.35.0
         with:
           scan-type: image
           image-ref: ${{ matrix.image }}:scan
           scanners: vuln
           format: table
-          severity: CRITICAL,HIGH,MEDIUM
-          ignore-unfixed: true
+          severity: CRITICAL,HIGH,MEDIUM,UNKNOWN
+          ignore-unfixed: false
       - name: Upload ${{ matrix.image }} findings
         if: always()
         uses: github/codeql-action/upload-sarif@a45bef097606dca6eac8285c279babedd70e6dfd # v3.37.9

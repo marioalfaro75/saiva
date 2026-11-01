@@ -172,9 +172,38 @@ build to pin or roll back to. Pick a channel with `SAIVA_VERSION` in `.env`, the
 **Pre-migration backups.** On start the API writes a compressed `pg_dump` to the
 `db_backups` volume *before* applying any schema migration, so an upgrade is always
 reversible (disable with `SAIVA_BACKUP_BEFORE_MIGRATE=0`; the dump lands in
-`SAIVA_BACKUP_DIR`). If the backup fails, the container refuses to migrate. To roll back a
-bad upgrade: `SAIVA_VERSION=sha-<previous>` then `make pull`, and restore the dump if a
-migration had already run.
+`SAIVA_BACKUP_DIR`). If the backup fails, the container refuses to migrate.
+
+**Rolling back.** The updater keeps the image it replaced, on purpose, so the first
+thing to try needs no network and no registry — which matters, because the moment you
+need a rollback is also the moment the box is down. Find the generation you were on and
+give it a name, then start it:
+
+```bash
+# The untagged images are the generations you have left behind; the newest pair is the
+# one the update replaced. Rows may read `…/saiva-api  <none>` or just `<none>  <none>`.
+docker image ls -a --filter dangling=true --format '{{.ID}}  {{.Repository}}  {{.CreatedSince}}'
+
+# Tag BOTH, even if only one of them is broken: SAIVA_VERSION applies to api and web
+# together, and compose will try to pull whichever tag is missing. A release moves both
+# tags, so both have a predecessor; on the `edge` channel only the changed image is
+# republished, so tag the current `:edge` image for the one that did not move.
+docker image tag <old-api-id> ghcr.io/marioalfaro75/saiva-api:rollback
+docker image tag <old-web-id> ghcr.io/marioalfaro75/saiva-web:rollback
+
+sed -i 's/^SAIVA_VERSION=.*/SAIVA_VERSION=rollback/' .env
+docker compose -f docker-compose.prod.yml up -d           # NOT `make pull`
+```
+
+Use `docker compose … up -d` and not `make pull` here: `make pull` runs `docker compose
+pull` first, `rollback` is a local tag that exists in no registry, and the failed pull
+takes the whole command down with it. (Substitute your own `SAIVA_REGISTRY` for
+`ghcr.io/marioalfaro75` if you repointed the images.) If the local image is gone after
+all — you pruned, or the host was rebuilt — fall back to the registry with
+`SAIVA_VERSION=sha-<previous>` (or the previous `v*` tag) and `make pull`, which needs
+working network and GHCR access. Either way, restore the pre-migration dump from the
+`db_backups` volume if a migration had already run: an older image will refuse to start
+against a newer schema.
 
 **In‑app updates.** On a pull‑based deploy, the app checks GitHub for newer releases and
 shows the owner an **Update available** badge; **Settings → Software updates → Update now**
@@ -347,6 +376,28 @@ The proxy narrows the blast radius of a bug in Watchtower; it does not contain a
 attacker who reaches it. If you would rather not make that trade, delete the
 `watchtower` and `docker-socket-proxy` services and update by hand — `docker compose
 pull && docker compose up -d`. Everything works the same, minus the button.
+
+Watchtower's image cleanup is switched off here, so the image it replaced stays on the
+host and a bad release can be rolled back offline (see **Rolling back** above). Nothing
+reclaims images automatically as a result, and it is not a trickle: every update applied
+holds onto a whole generation, roughly 140 MB across the two images, because the version
+stamp sits near the top of the API's Dockerfile and nothing below it is shared between
+releases. Run `docker system df` to see what is being held and `docker image prune`
+once a release has proved itself. Deliberately *not* configured: Watchtower's own
+image-usage thresholds, which need the Docker `/system` endpoints the socket proxy
+refuses — the check is fail-closed, so setting one would abort every update session
+before it started, and the app would still report that the update began.
+
+**Nothing on this box updates itself on a timer, and it is worth knowing why.** It is
+not that no schedule is configured: with no schedule and no interval set Watchtower
+synthesises a 24-hour one from its own default. What suppresses it is that the update
+endpoint is enabled and periodic polls are not, which puts Watchtower in an API-only
+mode where it serves the HTTP API and never reaches its scheduler. So a bad release
+never arrives here unsupervised — it arrives when you press **Update now** or run `make
+pull`. The risk this deployment actually carries is a one-click update you cannot undo,
+which is what cleanup being off and the offline **Rolling back** path above are for.
+Enabling `WATCHTOWER_HTTP_API_PERIODIC_POLLS`, or removing the two
+`WATCHTOWER_HTTP_API_*` endpoint variables, turns the 24-hour poll on instead.
 
 ### Repository settings to set by hand
 

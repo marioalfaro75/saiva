@@ -2,7 +2,21 @@ name: Cut release
 
 # Manually cut a versioned release from the current default branch. It builds and
 # publishes the images first, then creates the tag + GitHub Release — so a release
-# never exists without its images, and the `v` prefix / `:latest` can't drift.
+# never exists without its images.
+#
+# This used to claim that `:latest` could not drift from `:v<ver>`, and since
+# refresh-images.yml it is no longer true, so here is what is: `v<ver>` and
+# `sha-<sha>` are written here and never again, while `latest` and `<major.minor>`
+# are rolling pointers that a refresh moves to a rebuilt digest of this same tree.
+# `:latest` is therefore "the newest build of the newest release", not "the same
+# image as `:v<ver>`". If you want one exact image — which is what the documented
+# rollback wants — pin SAIVA_VERSION to `v<ver>` or `sha-<sha>`.
+#
+# "Written here and never again" holds for this path. The one way those immutable
+# tags move is somebody pushing a `v*` tag by hand, which fires release.yml and
+# rebuilds the same names from whatever that tag points at. All three writers of the
+# release channel now share the concurrency group below, so they cannot interleave,
+# but nothing stops that rebuild — don't hand-push version tags, use this workflow.
 # Trigger: Actions → "Cut release" → Run workflow (enter a version like 0.8.2), or
 # via the API. Tags created here use GITHUB_TOKEN, so they do not re-trigger the
 # tag-push build in release.yml (no double build).
@@ -19,6 +33,14 @@ on:
 
 permissions:
   contents: read
+
+# Shared with refresh-images.yml, which writes the same `:latest`. Without it, a
+# refresh of v0.16.0 finishing after a release of v0.17.0 walks `:latest` backwards.
+# Never cancel a release in flight: its images are already published by the time the
+# tag is created, and a cancelled run leaves the two out of step.
+concurrency:
+  group: ghcr-release-channel
+  cancel-in-progress: false
 
 jobs:
   prep:

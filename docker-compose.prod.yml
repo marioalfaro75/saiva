@@ -84,21 +84,116 @@ services:
       - caddy_data:/data
       - caddy_config:/config
 
-  # In-app updater. Only watches containers labelled watchtower.enable (api + web),
-  # updates on demand via its token-protected HTTP API (no public port, no schedule).
+  # In-app updater. Only watches containers labelled watchtower.enable (api + web)
+  # and only acts when something posts to its token-protected HTTP API: no public
+  # port, and no timer *as this file configures it* — read the comment above
+  # WATCHTOWER_HTTP_API_UPDATE before relying on that, because the reason is the
+  # opposite of the obvious one.
+  #
   # nickfedor/watchtower is the actively-maintained, drop-in fork of the archived
   # containrrr/watchtower — the original shipped an old Docker client (API 1.25) that
   # modern daemons reject ("client version is too old"). This fork auto-negotiates.
   watchtower:
-    image: nickfedor/watchtower
+    # Pinned to the 1.x line rather than tracking :latest. Watchtower carries no
+    # watchtower.enable label of its own and WATCHTOWER_LABEL_ENABLE means "only
+    # labelled containers are monitored", so it never updates itself: this image moves
+    # only when a human runs `docker compose pull`, and on a floating tag that one
+    # command can cross several minors at once. The boundary that matters is the major.
+    # The fork's own source marks the legacy HTTP-API flags as "will be removed in the
+    # v2 release", and it validates no WATCHTOWER_* names at all, so a v2 image would
+    # ignore WATCHTOWER_HTTP_API_UPDATE in silence, enable no endpoint, never bind the
+    # API — and fall through to the 24-hour poll described below. That is genuinely
+    # unattended updates on a box holding a family's financial records, with cleanup
+    # off and no health gate, arrived at because a tag floated. `:1` cannot cross into
+    # v2 and still carries the fork's 1.x fixes. A tag also gives Dependabot something
+    # to compare — an untagged reference gave it nothing — so the day a v2 exists it
+    # arrives as a pull request somebody reads, which is the whole point. Pin the exact
+    # 1.23.2 instead if you would rather nothing moved without you, and accept that
+    # Watchtower then stops receiving its own security fixes until somebody bumps this
+    # line.
+    image: nickfedor/watchtower:1
     restart: unless-stopped
     depends_on:
       - docker-socket-proxy
     environment:
+      # Nothing on this box polls — but NOT because no schedule is configured, which is
+      # how it used to be explained here and is backwards. With neither
+      # WATCHTOWER_SCHEDULE nor WATCHTOWER_POLL_INTERVAL set, the fork *synthesizes*
+      # `@every 86400s` from its 24-hour default interval (internal/settings/flags.go,
+      # `if intervalChanged || !scheduleChanged`, against DefaultPollIntervalSeconds =
+      # 86400 in internal/settings/flags/schedule/register.go). The absence of those variables is
+      # what arms the poll; the only thing suppressing it is the update endpoint being
+      # enabled while WATCHTOWER_HTTP_API_PERIODIC_POLLS stays at its default of false.
+      # That combination is API-only mode, where `block := EnableUpdateAPI &&
+      # !UnblockHTTPAPI` keeps Watchtower serving the API and never lets it reach the
+      # scheduler at all.
+      #
+      # So say the consequence plainly, because the opposite was written down here and
+      # acted on: a bad release does not arrive on this box unattended at 3am. It
+      # arrives when the owner presses "Update now" or runs `make pull`, with somebody
+      # at the keyboard. The hazard is a one-click update that cannot be undone, not an
+      # unsupervised rollout — which is why the fix below is WATCHTOWER_CLEANUP plus a
+      # rollback path in the README that needs no network, and not a schedule.
+      #
+      # Both spellings of the same switch, deliberately. http-api-update is deprecated
+      # in favour of http-api-endpoints and documented as working only until v2;
+      # http-api-endpoints is the supported spelling but does not exist on older
+      # images, and an unrecognised WATCHTOWER_* name is ignored without a word. Each
+      # one alone therefore has a version on which it enables nothing and the 24-hour
+      # poller takes over. ResolveEndpoints unions the two, so together they enable
+      # exactly the one `update` endpoint on any version that understands either name.
+      # A WATCHTOWER_SCHEDULE override looks like a third belt and is not one: the
+      # branch above reads the schedule out of the flag set while env vars arrive
+      # through viper, and a value that reaches one path but not the other is worse
+      # than no value at all.
       WATCHTOWER_HTTP_API_UPDATE: "true"
+      WATCHTOWER_HTTP_API_ENDPOINTS: "update"
       WATCHTOWER_HTTP_API_TOKEN: ${WATCHTOWER_TOKEN:?set WATCHTOWER_TOKEN in .env}
       WATCHTOWER_LABEL_ENABLE: "true"
-      WATCHTOWER_CLEANUP: "true"
+      # Cleanup is off deliberately, and it is the one thing standing between a bad
+      # release and a box nobody can bring back. Watchtower treats a container that
+      # merely *starts* as a successful update: it never consults the HEALTHCHECK on
+      # this path at all (the fork's only WaitForContainerHealthy call is inside the
+      # rolling-restart loop, which is off by default, and even there a timeout is
+      # logged as a warning and the update carries on), and its cleanup then deletes
+      # the old image with Docker's Force flag, so a second local tag would not have
+      # saved it either. The image you would roll back to is therefore gone seconds
+      # after the replacement is created — while the replacement crash-loops, because
+      # the API's CMD is `python -m app.dbinit && uvicorn`: a migration that fails
+      # means nothing ever binds :8000, the HEALTHCHECK has no port to probe, and
+      # `restart: unless-stopped` retries forever. Recovery then needed the network and
+      # GHCR at the exact moment a family's financial records were offline.
+      #
+      # Be precise about what is kept, because it changes the runbook: the old
+      # *container* is stopped and removed before the replacement is created, so there
+      # is nothing to `docker start`. What survives is the image, now untagged. The
+      # README's recovery path re-tags it and brings the stack up on that tag.
+      #
+      # The cost is disk, and it is a whole generation per update applied — about
+      # 140 MB compressed across api and web, not the trickle that layer sharing would
+      # suggest. Measured against the live registry: consecutive releases share 0 of
+      # saiva-api's 13 layers and 1 of saiva-web's 7, because `ENV SAIVA_VERSION` sits
+      # above the apt and pip steps in backend/Dockerfile and invalidates everything
+      # below it. Reclaim it with `docker image prune` once a release has proved
+      # itself — never from a script, because the image it would reap is the rollback.
+      WATCHTOWER_CLEANUP: "false"
+      # There is deliberately no WATCHTOWER_DISK_SPACE_WARN or _MAX here. They look
+      # like the obvious companion to cleanup being off, and on this deployment either
+      # one *disables the update button outright*. Any non-zero threshold arms a check
+      # that is skipped only when both are zero; the check calls GET /system/df, the
+      # socket proxy below answers 403 because SYSTEM is 0, and the check is
+      # fail-closed — the query failure returns from the first statement of the update
+      # session, before Watchtower has listed a single container. Choosing warn over
+      # max does not help, because the abort comes from the query and not from a
+      # budget being reached. And it fails invisibly: Watchtower's sync handler still
+      # answers 200, `trigger_watchtower` in app/services/updates.py inspects neither
+      # status nor body, and /api/admin/update returns "update_started" regardless, so
+      # the owner is told the update began while nothing happened at all. Granting
+      # SYSTEM: 1 would buy an intermittent version of the same abort and widen a proxy
+      # whose entire value is that everything else is off. Watch image usage from
+      # somewhere that can see it instead — `docker system df` on the host, which is
+      # what the README now says.
+
       # Talks to the filtering proxy instead of the socket. See its comment below.
       DOCKER_HOST: tcp://docker-socket-proxy:2375
       # Optional Docker API version override; blank = auto-negotiate (the default,
