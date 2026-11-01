@@ -6,6 +6,23 @@ name: Checks
 # and the edge channel now clear the same bar.
 on:
   workflow_call:
+    inputs:
+      ref:
+        # Blank means "the ref that triggered the caller", which is what every caller
+        # but refresh-images.yml wants and is exactly what actions/checkout does with
+        # an unset `ref` — its own default is the empty string and the fallback to
+        # github.context.ref happens on any falsy value, so passing "" through is
+        # bit-for-bit the same as omitting it.
+        #
+        # refresh-images.yml needs the other behaviour: it rebuilds a release *tag*
+        # on a schedule, and a local `uses: ./...` is always resolved from the
+        # caller's commit and accepts no `@ref`. Without this input the checks here
+        # would run against the default branch while the images were built from the
+        # tag — a gate describing a different tree from the artifact it admits.
+        description: "Commit, branch or tag to check (blank = the caller's own ref)"
+        required: false
+        type: string
+        default: ""
 
 permissions:
   contents: read
@@ -19,6 +36,8 @@ jobs:
         working-directory: backend
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ inputs.ref }}
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: "3.11"
@@ -66,6 +85,8 @@ jobs:
       SECRET_KEY: ci-not-secret
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ inputs.ref }}
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: "3.11"
@@ -83,6 +104,8 @@ jobs:
         working-directory: frontend
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ inputs.ref }}
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: "22"
@@ -104,6 +127,7 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
+          ref: ${{ inputs.ref }}
           fetch-depth: 0
       - name: gitleaks
         uses: gitleaks/gitleaks-action@ff98106e4c7b2bc287b24eaf42907196329070c7 # v2

@@ -16,6 +16,18 @@ permissions:
   contents: read
   packages: write
 
+# This workflow writes `:latest` without ever naming it: docker/metadata-action
+# generates it by default in `auto` mode for `type=semver`, which the `meta` step
+# below uses. That makes this the third writer of the release channel, alongside
+# cut-release.yml and refresh-images.yml, and it was the only one not serialised —
+# so a `v*` tag pushed by hand while a refresh was promoting could interleave two
+# writers on the same tag. Same group as the other two, and never cancel: the images
+# are published before anything else happens, so a cancelled run leaves the channel
+# half-written.
+concurrency:
+  group: ghcr-release-channel
+  cancel-in-progress: false
+
 jobs:
   # A version tag used to publish straight to `:latest`. Anyone who could push a
   # tag could ship an image that had never run a test — the edge channel was gated
