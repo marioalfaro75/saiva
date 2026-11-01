@@ -73,7 +73,7 @@ jobs:
       # Reads requirements.lock and package-lock.json — the resolved versions that
       # actually ship, not the ranges in the manifests.
       - name: Dependency CVEs
-        uses: aquasecurity/trivy-action@57a97c7e7821a5776cebc9bb87c984fa69cba8f1 # 0.35.0
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # 0.36.0
         with:
           scan-type: fs
           scanners: vuln,secret
@@ -89,7 +89,7 @@ jobs:
           category: trivy-dependencies
 
       - name: Findings, readable
-        uses: aquasecurity/trivy-action@57a97c7e7821a5776cebc9bb87c984fa69cba8f1 # 0.35.0
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # 0.36.0
         with:
           scan-type: fs
           scanners: vuln,secret
@@ -100,7 +100,7 @@ jobs:
       # Dockerfile and compose misconfiguration: root containers, missing user,
       # published ports, writable filesystems.
       - name: Infrastructure misconfiguration
-        uses: aquasecurity/trivy-action@57a97c7e7821a5776cebc9bb87c984fa69cba8f1 # 0.35.0
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # 0.36.0
         with:
           scan-type: config
           format: sarif
@@ -116,7 +116,7 @@ jobs:
       # An inventory of what actually shipped, so the next advisory can be answered
       # with "yes, version X, in these images" rather than by reading Dockerfiles.
       - name: Software bill of materials
-        uses: aquasecurity/trivy-action@57a97c7e7821a5776cebc9bb87c984fa69cba8f1 # 0.35.0
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # 0.36.0
         with:
           scan-type: fs
           format: cyclonedx
@@ -138,7 +138,7 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - name: hadolint ${{ matrix.dockerfile }}
-        uses: hadolint/hadolint-action@54c9adbab1582c2ef04b2016b760714a4bfde3cf # v3.1.0
+        uses: hadolint/hadolint-action@06be81baf89a55ffd0e24b8f04a4185738dd3387 # v3.5.0
         with:
           dockerfile: ${{ matrix.dockerfile }}
           failure-threshold: error
@@ -224,7 +224,7 @@ jobs:
           tags: ${{ matrix.image }}:scan
           cache-from: type=gha
       - name: Scan ${{ matrix.image }}
-        uses: aquasecurity/trivy-action@57a97c7e7821a5776cebc9bb87c984fa69cba8f1 # 0.35.0
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # 0.36.0
         with:
           scan-type: image
           image-ref: ${{ matrix.image }}:scan
@@ -275,7 +275,7 @@ jobs:
         # deliberate part is the absence of a threshold — gating on a CVE count
         # would make an unchanged commit start failing the day a database updates,
         # which is why this whole workflow sits outside checks.yml.
-        uses: aquasecurity/trivy-action@57a97c7e7821a5776cebc9bb87c984fa69cba8f1 # 0.35.0
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # 0.36.0
         with:
           scan-type: image
           image-ref: ${{ matrix.image }}:scan
