@@ -322,14 +322,37 @@ jobs:
           docker pull "$ref"
           docker tag "$ref" "$IMAGE"
 
-      # Blocking, unlike the same scan in security-scan.yml, because here it is not a
-      # report — it is the question the run exists to ask. The API image scans with 0
-      # findings across 48 targets today, so a fixable CRITICAL or HIGH appearing in a
-      # rebuild means the new base layer is worse than the one the box is running, and
-      # the right answer is to not publish it and let a human look. ignore-unfixed for
-      # the reason the other job gives: unfixable CVEs are noise that trains people to
-      # ignore the category.
-      - name: The rebuilt image must not be worse than the one it replaces
+      # Four steps where there used to be one, because run #1 proved the single step
+      # wrong. It was named "must not be worse than the one it replaces" and implemented
+      # as an ABSOLUTE threshold — exit-code 1 on any fixable CRITICAL/HIGH — on the
+      # strength of saiva-api scanning 0 findings across 48 targets at the time. That
+      # reasoning does not survive contact with either image:
+      #
+      #   * saiva-api rebuilt from v0.16.0 reported 7 HIGH, every one a pip/setuptools
+      #     vendored CVE that the release genuinely shipped (jaraco.context 5.3.0,
+      #     msgpack 1.1.2 x2, setuptools 70.3.0, urllib3 2.7.0 x2, wheel 0.45.1).
+      #     `:latest` IS that release build, so it carries the same 7 — the rebuild is
+      #     identical, not worse. The cure is a release containing the toolchain strip,
+      #     which is what v0.16.1 is; it was never something a gate could deliver.
+      #   * saiva-web reported 6 HIGH in usr/bin/caddy, four of them Go stdlib
+      #     (CVE-2026-111943 crypto/x509, -78667, -78669, -97031). caddy:2-alpine has
+      #     not been rebuilt against Go 1.26.10 upstream — projects needing that fix are
+      #     compiling Caddy themselves on golang:1.26.10-alpine — so no rebuild here can
+      #     cure them. This image never had a zero baseline to reason from at all.
+      #
+      # A gate that can only fail publishes nothing, which is worse than having no gate:
+      # the patches this workflow exists to deliver simply stop arriving, silently, on a
+      # schedule. So the question is now asked differentially, which is what the step
+      # name always claimed — does the candidate carry a (package, vulnerability) pair
+      # that the image it replaces does not? For a rebuild of unchanged source that is
+      # the only question with a meaningful answer, and it is precisely the one that
+      # catches a base image moving the wrong way.
+      #
+      # Why this is inline shell and not scripts/: every step above checked out the
+      # RELEASE TAG, so a helper committed to main would not exist in an older tag's
+      # tree. The workflow body comes from the dispatch ref instead, so logic that must
+      # apply to every tag being rebuilt has to live here.
+      - name: Findings in the rebuilt image, readable
         uses: aquasecurity/trivy-action@57a97c7e7821a5776cebc9bb87c984fa69cba8f1 # 0.35.0
         with:
           scan-type: image
@@ -338,7 +361,79 @@ jobs:
           format: table
           severity: CRITICAL,HIGH
           ignore-unfixed: true
-          exit-code: "1"
+
+      - name: Pull the image this one would replace
+        run: |
+          set -euo pipefail
+          incumbent="ghcr.io/${{ github.repository_owner }}/saiva-api:latest"
+          # The baseline is whatever `:latest` resolves to right now, because that is
+          # literally the image this run would replace. A missing baseline is not a
+          # reason to wave the candidate through: `:latest` exists after any release, so
+          # its absence means something a human should look at.
+          if ! docker pull -q "$incumbent"; then
+            echo "::error::cannot pull $incumbent, so there is no baseline to compare"
+            echo "::error::against. Refusing to publish rather than guessing."
+            exit 1
+          fi
+          docker tag "$incumbent" saiva-api:incumbent
+
+      # Both scans below run in this job, minutes apart, against the same Trivy DB. That
+      # is what makes the comparison meaningful: scanning the two images at different
+      # times would invent a "new" finding every time the database learned about an old
+      # CVE, and the gate would fail for reasons that have nothing to do with the build.
+      - name: Scan the candidate
+        uses: aquasecurity/trivy-action@57a97c7e7821a5776cebc9bb87c984fa69cba8f1 # 0.35.0
+        with:
+          scan-type: image
+          image-ref: saiva-api:candidate
+          scanners: vuln
+          format: json
+          output: candidate.json
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
+      - name: Scan the image it would replace
+        uses: aquasecurity/trivy-action@57a97c7e7821a5776cebc9bb87c984fa69cba8f1 # 0.35.0
+        with:
+          scan-type: image
+          image-ref: saiva-api:incumbent
+          scanners: vuln
+          format: json
+          output: incumbent.json
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
+
+      - name: Refuse to publish anything the incumbent does not already carry
+        run: |
+          set -euo pipefail
+          # Keyed on (package, vulnerability) and deliberately NOT on Trivy's Target
+          # path. Target embeds the version — setuptools-79.0.1.dist-info/METADATA — so
+          # keying on it would read every routine dependency bump as a brand-new finding
+          # and fail the run for an upgrade.
+          keys() {
+            jq -r '[.Results[]? | .Vulnerabilities[]? | "\(.PkgName)\t\(.VulnerabilityID)"]
+                   | unique | .[]' "$1" | sort -u
+          }
+          keys candidate.json > candidate.keys
+          keys incumbent.json > incumbent.keys
+          echo "candidate: $(wc -l < candidate.keys) fixable CRITICAL/HIGH"
+          echo "incumbent: $(wc -l < incumbent.keys) fixable CRITICAL/HIGH"
+          # comm needs both sides sorted, which `sort -u` above guarantees.
+          introduced="$(comm -13 incumbent.keys candidate.keys)"
+          cleared="$(comm -23 incumbent.keys candidate.keys)"
+          if [ -n "$cleared" ]; then
+            {
+              echo "### saiva-api: cleared by this rebuild"
+              printf '%s\n' "$cleared" | sed 's/^/ - /'
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
+          if [ -n "$introduced" ]; then
+            echo "::error::the rebuilt saiva-api carries findings the image it replaces"
+            echo "::error::does not. The new base layer is worse than what the box runs;"
+            echo "::error::not publishing it."
+            printf '%s\n' "$introduced"
+            exit 1
+          fi
+          echo "No finding in the candidate is absent from the image it replaces."
 
       # Everything from here down is the part no other job in this repository does:
       # it runs the image. The build-time `RUN python -c "import app.main, app.dbinit"`
@@ -527,7 +622,37 @@ jobs:
           ref="ghcr.io/${{ github.repository_owner }}/saiva-web@${{ steps.build.outputs.digest }}"
           docker pull "$ref"
           docker tag "$ref" "$IMAGE"
-      - name: The rebuilt image must not be worse than the one it replaces
+      # Four steps where there used to be one, because run #1 proved the single step
+      # wrong. It was named "must not be worse than the one it replaces" and implemented
+      # as an ABSOLUTE threshold — exit-code 1 on any fixable CRITICAL/HIGH — on the
+      # strength of saiva-api scanning 0 findings across 48 targets at the time. That
+      # reasoning does not survive contact with either image:
+      #
+      #   * saiva-api rebuilt from v0.16.0 reported 7 HIGH, every one a pip/setuptools
+      #     vendored CVE that the release genuinely shipped (jaraco.context 5.3.0,
+      #     msgpack 1.1.2 x2, setuptools 70.3.0, urllib3 2.7.0 x2, wheel 0.45.1).
+      #     `:latest` IS that release build, so it carries the same 7 — the rebuild is
+      #     identical, not worse. The cure is a release containing the toolchain strip,
+      #     which is what v0.16.1 is; it was never something a gate could deliver.
+      #   * saiva-web reported 6 HIGH in usr/bin/caddy, four of them Go stdlib
+      #     (CVE-2026-111943 crypto/x509, -78667, -78669, -97031). caddy:2-alpine has
+      #     not been rebuilt against Go 1.26.10 upstream — projects needing that fix are
+      #     compiling Caddy themselves on golang:1.26.10-alpine — so no rebuild here can
+      #     cure them. This image never had a zero baseline to reason from at all.
+      #
+      # A gate that can only fail publishes nothing, which is worse than having no gate:
+      # the patches this workflow exists to deliver simply stop arriving, silently, on a
+      # schedule. So the question is now asked differentially, which is what the step
+      # name always claimed — does the candidate carry a (package, vulnerability) pair
+      # that the image it replaces does not? For a rebuild of unchanged source that is
+      # the only question with a meaningful answer, and it is precisely the one that
+      # catches a base image moving the wrong way.
+      #
+      # Why this is inline shell and not scripts/: every step above checked out the
+      # RELEASE TAG, so a helper committed to main would not exist in an older tag's
+      # tree. The workflow body comes from the dispatch ref instead, so logic that must
+      # apply to every tag being rebuilt has to live here.
+      - name: Findings in the rebuilt image, readable
         uses: aquasecurity/trivy-action@57a97c7e7821a5776cebc9bb87c984fa69cba8f1 # 0.35.0
         with:
           scan-type: image
@@ -536,7 +661,79 @@ jobs:
           format: table
           severity: CRITICAL,HIGH
           ignore-unfixed: true
-          exit-code: "1"
+
+      - name: Pull the image this one would replace
+        run: |
+          set -euo pipefail
+          incumbent="ghcr.io/${{ github.repository_owner }}/saiva-web:latest"
+          # The baseline is whatever `:latest` resolves to right now, because that is
+          # literally the image this run would replace. A missing baseline is not a
+          # reason to wave the candidate through: `:latest` exists after any release, so
+          # its absence means something a human should look at.
+          if ! docker pull -q "$incumbent"; then
+            echo "::error::cannot pull $incumbent, so there is no baseline to compare"
+            echo "::error::against. Refusing to publish rather than guessing."
+            exit 1
+          fi
+          docker tag "$incumbent" saiva-web:incumbent
+
+      # Both scans below run in this job, minutes apart, against the same Trivy DB. That
+      # is what makes the comparison meaningful: scanning the two images at different
+      # times would invent a "new" finding every time the database learned about an old
+      # CVE, and the gate would fail for reasons that have nothing to do with the build.
+      - name: Scan the candidate
+        uses: aquasecurity/trivy-action@57a97c7e7821a5776cebc9bb87c984fa69cba8f1 # 0.35.0
+        with:
+          scan-type: image
+          image-ref: saiva-web:candidate
+          scanners: vuln
+          format: json
+          output: candidate.json
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
+      - name: Scan the image it would replace
+        uses: aquasecurity/trivy-action@57a97c7e7821a5776cebc9bb87c984fa69cba8f1 # 0.35.0
+        with:
+          scan-type: image
+          image-ref: saiva-web:incumbent
+          scanners: vuln
+          format: json
+          output: incumbent.json
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
+
+      - name: Refuse to publish anything the incumbent does not already carry
+        run: |
+          set -euo pipefail
+          # Keyed on (package, vulnerability) and deliberately NOT on Trivy's Target
+          # path. Target embeds the version — setuptools-79.0.1.dist-info/METADATA — so
+          # keying on it would read every routine dependency bump as a brand-new finding
+          # and fail the run for an upgrade.
+          keys() {
+            jq -r '[.Results[]? | .Vulnerabilities[]? | "\(.PkgName)\t\(.VulnerabilityID)"]
+                   | unique | .[]' "$1" | sort -u
+          }
+          keys candidate.json > candidate.keys
+          keys incumbent.json > incumbent.keys
+          echo "candidate: $(wc -l < candidate.keys) fixable CRITICAL/HIGH"
+          echo "incumbent: $(wc -l < incumbent.keys) fixable CRITICAL/HIGH"
+          # comm needs both sides sorted, which `sort -u` above guarantees.
+          introduced="$(comm -13 incumbent.keys candidate.keys)"
+          cleared="$(comm -23 incumbent.keys candidate.keys)"
+          if [ -n "$cleared" ]; then
+            {
+              echo "### saiva-web: cleared by this rebuild"
+              printf '%s\n' "$cleared" | sed 's/^/ - /'
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
+          if [ -n "$introduced" ]; then
+            echo "::error::the rebuilt saiva-web carries findings the image it replaces"
+            echo "::error::does not. The new base layer is worse than what the box runs;"
+            echo "::error::not publishing it."
+            printf '%s\n' "$introduced"
+            exit 1
+          fi
+          echo "No finding in the candidate is absent from the image it replaces."
       - name: Cold start — Caddy parses its config and serves the SPA
         run: |
           set -euo pipefail
