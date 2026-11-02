@@ -8,7 +8,18 @@ from fastapi.testclient import TestClient
 
 from app.services import advisor
 
-TODAY = dt.date.today().isoformat()
+
+def _today() -> str:
+    """Today, evaluated per call rather than captured when this module is imported.
+
+    The module-level constant this replaces was read during pytest collection, minutes
+    before the assertions that depended on it, so a suite run crossing UTC midnight
+    compared one day's expectations against the next day's behaviour. Every use here is
+    an independent write of a txn_date, so fresh evaluation is the whole fix; where a
+    test needs one date to stay fixed across seeding AND asserting, it takes the `today`
+    fixture from conftest instead.
+    """
+    return dt.date.today().isoformat()
 
 
 def test_settings_default_and_key_is_write_only(auth_client: TestClient) -> None:
@@ -53,7 +64,7 @@ def test_chat_replies_and_audits(auth_client: TestClient, monkeypatch: pytest.Mo
         "/api/transactions",
         json={
             "account_id": account["id"],
-            "txn_date": TODAY,
+            "txn_date": _today(),
             "amount_cents": -4200,
             "description": "POWER BILL",
         },
@@ -91,7 +102,7 @@ def test_privacy_mode_controls_raw_transactions(
         "/api/transactions",
         json={
             "account_id": account["id"],
-            "txn_date": TODAY,
+            "txn_date": _today(),
             "amount_cents": -3300,
             "description": "SECRETMERCHANT XYZ",
         },
@@ -467,7 +478,7 @@ def test_aggregates_mode_withholds_merchant_names(
 ) -> None:
     """A merchant name is the description tidied up, so it is raw transaction data."""
     account = create_account(auth_client)
-    _add(auth_client, account, TODAY, -4200, "SECRETMERCHANT XYZ")
+    _add(auth_client, account, _today(), -4200, "SECRETMERCHANT XYZ")
     auth_client.patch(
         "/api/ai/settings",
         json={"provider": "anthropic", "api_key": "k", "privacy_mode": "aggregates"},
@@ -485,7 +496,7 @@ def test_uncategorised_is_summarised_and_detailed_only_when_permitted(
 ) -> None:
     """The question that prompted this: what are my uncategorised transactions for?"""
     account = create_account(auth_client)
-    _add(auth_client, account, TODAY, -120000, "TRANSFER TO HELEN SMITH")
+    _add(auth_client, account, _today(), -120000, "TRANSFER TO HELEN SMITH")
     auth_client.patch(
         "/api/ai/settings",
         json={"provider": "anthropic", "api_key": "k", "privacy_mode": "aggregates"},
