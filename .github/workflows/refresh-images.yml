@@ -353,7 +353,7 @@ jobs:
       # tree. The workflow body comes from the dispatch ref instead, so logic that must
       # apply to every tag being rebuilt has to live here.
       - name: Findings in the rebuilt image, readable
-        uses: aquasecurity/trivy-action@57a97c7e7821a5776cebc9bb87c984fa69cba8f1 # 0.35.0
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # 0.36.0
         with:
           scan-type: image
           image-ref: saiva-api:candidate
@@ -382,7 +382,7 @@ jobs:
       # times would invent a "new" finding every time the database learned about an old
       # CVE, and the gate would fail for reasons that have nothing to do with the build.
       - name: Scan the candidate
-        uses: aquasecurity/trivy-action@57a97c7e7821a5776cebc9bb87c984fa69cba8f1 # 0.35.0
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # 0.36.0
         with:
           scan-type: image
           image-ref: saiva-api:candidate
@@ -392,7 +392,7 @@ jobs:
           severity: CRITICAL,HIGH
           ignore-unfixed: true
       - name: Scan the image it would replace
-        uses: aquasecurity/trivy-action@57a97c7e7821a5776cebc9bb87c984fa69cba8f1 # 0.35.0
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # 0.36.0
         with:
           scan-type: image
           image-ref: saiva-api:incumbent
@@ -653,7 +653,7 @@ jobs:
       # tree. The workflow body comes from the dispatch ref instead, so logic that must
       # apply to every tag being rebuilt has to live here.
       - name: Findings in the rebuilt image, readable
-        uses: aquasecurity/trivy-action@57a97c7e7821a5776cebc9bb87c984fa69cba8f1 # 0.35.0
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # 0.36.0
         with:
           scan-type: image
           image-ref: saiva-web:candidate
@@ -682,7 +682,7 @@ jobs:
       # times would invent a "new" finding every time the database learned about an old
       # CVE, and the gate would fail for reasons that have nothing to do with the build.
       - name: Scan the candidate
-        uses: aquasecurity/trivy-action@57a97c7e7821a5776cebc9bb87c984fa69cba8f1 # 0.35.0
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # 0.36.0
         with:
           scan-type: image
           image-ref: saiva-web:candidate
@@ -692,7 +692,7 @@ jobs:
           severity: CRITICAL,HIGH
           ignore-unfixed: true
       - name: Scan the image it would replace
-        uses: aquasecurity/trivy-action@57a97c7e7821a5776cebc9bb87c984fa69cba8f1 # 0.35.0
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # 0.36.0
         with:
           scan-type: image
           image-ref: saiva-web:incumbent
