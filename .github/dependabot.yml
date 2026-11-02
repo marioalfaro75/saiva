@@ -49,6 +49,39 @@ updates:
       # pull requests in one week. Each needs reading; none needs its own branch.
       npm-major:
         update-types: ["major"]
+    ignore:
+      # TypeScript majors only, and for a reason that is not "majors are risky".
+      #
+      # typescript-eslint 8.72.1 declares `peerDependencies.typescript: ">=4.8.4
+      # <6.1.0"`. TypeScript 7.0.2 is outside it, so a tree containing both cannot be
+      # installed at all: PR #82 died at its first step in six seconds with ERESOLVE
+      # under `npm ci`, and the looser `npm install` in frontend/Dockerfile refused the
+      # same tree, so the web image never built and the Trivy step then failed looking
+      # for a SARIF file nothing had produced. Dropping the plugin instead is not an
+      # option — frontend/eslint.config.js is written entirely around
+      # `tseslint.config()`.
+      #
+      # Note the ceiling can never be satisfied by waiting. TypeScript went 5.9
+      # straight to 7.0; there was no 6.x, so `<6.1.0` is not a range a future
+      # TypeScript release grows into. Lifting this needs a typescript-eslint major
+      # that widens the peer range, and until then every npm-major pull request
+      # containing TypeScript is dead on arrival.
+      #
+      # What the ignore buys is the rest of the group. The same batch also carried
+      # react 19, recharts 3, eslint 10 and vitest 5, none of which was ever evaluated,
+      # because the install died before lint, build or test ran — so #82 proved the
+      # batch uninstallable and said nothing whatever about React 19. typescript-eslint
+      # already peers `eslint ^8.57.0 || ^9.0.0 || ^10.0.0`, so with TypeScript held
+      # back the remainder should install and can be judged on its merits.
+      #
+      # Honest limit: this silences TypeScript majors completely, so nothing here will
+      # ever mention TypeScript 7 again and a person has to notice. Unlike the
+      # base-image rules below there is no dated test standing behind it. What there is
+      # instead is test_typescript_stays_inside_the_eslint_plugins_peer_range in
+      # backend/tests/test_supply_chain.py, which fails if the locked pair ever stops
+      # being installable — including the day somebody lifts this ignore too early.
+      - dependency-name: "typescript"
+        update-types: ["version-update:semver-major"]
 
   # ------------------------------------------------------------------ backend
   # pyproject.toml declares ranges, so most releases need no pull request at all.
