@@ -10,6 +10,7 @@ this morning.
 
 from __future__ import annotations
 
+import ast
 import json
 import re
 import tomllib
@@ -473,6 +474,96 @@ def test_the_shared_checks_can_still_be_pointed_at_the_tag_being_rebuilt() -> No
 
 
 LOCKFILE_JS = REPO / "frontend" / "package-lock.json"
+
+TESTS_DIR = Path(__file__).resolve().parent
+
+# Reading the clock at module scope is the specific defect; these are the names that do it.
+CLOCK_CALLS = frozenset({"today", "now", "utcnow", "time", "monotonic", "perf_counter"})
+
+
+def _module_level_clock_calls(source: str) -> list[str]:
+    """Names bound at module scope whose value comes from reading the clock.
+
+    Parsed rather than grepped, because the distinction that matters is scope: the same
+    `dt.date.today()` is the bug at module level and completely fine inside a function,
+    and no regex over lines can tell those apart. Only `tree.body` is walked, so nested
+    defs and classes are out of reach by construction.
+    """
+    found: list[str] = []
+    for node in ast.parse(source).body:
+        targets: list[str] = []
+        if isinstance(node, ast.Assign):
+            targets = [t.id for t in node.targets if isinstance(t, ast.Name)]
+        elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
+            targets = [node.target.id]
+        if not targets or node.value is None:
+            continue
+        for inner in ast.walk(node.value):
+            if not isinstance(inner, ast.Call):
+                continue
+            func = inner.func
+            name = func.attr if isinstance(func, ast.Attribute) else getattr(func, "id", "")
+            if name in CLOCK_CALLS:
+                found.extend(f"{target} = ...{name}()" for target in targets)
+                break
+    return found
+
+
+def test_no_test_module_captures_the_date_at_import_time() -> None:
+    """The flake this repo actually hit, and the reason five modules were rewritten.
+
+    `TODAY = dt.date.today()` at module scope is evaluated once, when pytest imports the
+    module during collection — minutes before the assertions that use it. The services
+    compute their own date per request (a dozen of them do `today = today or
+    dt.date.today()`), so a suite run that crossed UTC midnight checked one day's
+    expectations against the next day's behaviour.
+
+    It cost real time: CI run 41364727610 started 23:59:41Z and failed
+    test_forecast_shape_and_income with `'2026-11-02' == '2026-11-01'` while 620 other
+    tests passed. The same commit was green on re-run. Worse than the failure was the
+    misattribution — it was a Dependabot action bump, and the red made a perfectly good
+    PR look broken.
+
+    What replaced it: the `today` fixture in conftest where a test needs one date to hold
+    across seeding and asserting, and a per-call `_today()` where each use is an
+    independent write. Both are evaluated inside the test, which narrows the window from
+    the whole suite run to a single test rather than closing it outright — the honest
+    limit, recorded in the fixture's own docstring.
+
+    This test is the part that stops the wide version coming back, in any module, under
+    any name.
+    """
+    modules = sorted(TESTS_DIR.glob("*.py"))
+    assert len(modules) > 20, (
+        f"found only {len(modules)} test modules under {TESTS_DIR}, so this check is "
+        "scanning almost nothing"
+    )
+
+    # The detector is shown to work before its verdict is trusted. Without this, "no
+    # offenders" is indistinguishable from a matcher that recognises nothing — which is
+    # exactly how the vacuous first draft of another guard in this file passed.
+    assert _module_level_clock_calls("TODAY = dt.date.today()"), "detector misses the bug"
+    assert _module_level_clock_calls("NOW = datetime.datetime.utcnow()"), "misses utcnow"
+    assert _module_level_clock_calls("T = dt.date.today().isoformat()"), "misses a chained call"
+    assert _module_level_clock_calls("T: str = dt.date.today().isoformat()"), "misses annotated"
+    assert not _module_level_clock_calls(
+        "def f():\n    return dt.date.today()"
+    ), "detector fires inside a function, where reading the clock is correct"
+    assert not _module_level_clock_calls("TODAY = '2026-01-01'"), "fires on a literal"
+
+    offenders = {
+        path.name: captures
+        for path in modules
+        if (captures := _module_level_clock_calls(path.read_text()))
+    }
+    assert not offenders, (
+        "these test modules read the clock at module scope, which pytest evaluates during "
+        f"collection rather than when the test runs: {offenders}. A suite run crossing UTC "
+        "midnight will then compare one day's expectations against the next day's "
+        "behaviour, and fail somewhere that looks unrelated to the date. Take the `today` "
+        "fixture from conftest if the value must hold across seeding and asserting, or "
+        "call a local helper per use if each use is independent"
+    )
 
 
 def _npm_version(raw: str) -> tuple[int, int, int]:

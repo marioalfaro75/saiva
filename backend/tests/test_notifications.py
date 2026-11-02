@@ -5,7 +5,18 @@ import datetime as dt
 from conftest import create_account
 from fastapi.testclient import TestClient
 
-TODAY = dt.date.today().isoformat()
+
+def _today() -> str:
+    """Today, evaluated per call rather than captured when this module is imported.
+
+    The module-level constant this replaces was read during pytest collection, minutes
+    before the assertions that depended on it, so a suite run crossing UTC midnight
+    compared one day's expectations against the next day's behaviour. Every use here is
+    an independent write of a txn_date, so fresh evaluation is the whole fix; where a
+    test needs one date to stay fixed across seeding AND asserting, it takes the `today`
+    fixture from conftest instead.
+    """
+    return dt.date.today().isoformat()
 
 
 def _cat(client: TestClient, name: str) -> str:
@@ -17,7 +28,7 @@ def _add(client: TestClient, account_id: str, cents: int, desc: str) -> dict:
         "/api/transactions",
         json={
             "account_id": account_id,
-            "txn_date": TODAY,
+            "txn_date": _today(),
             "amount_cents": cents,
             "description": desc,
         },
