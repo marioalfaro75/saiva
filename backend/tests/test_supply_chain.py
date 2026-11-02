@@ -10,6 +10,7 @@ this morning.
 
 from __future__ import annotations
 
+import json
 import re
 import tomllib
 from pathlib import Path
@@ -469,6 +470,127 @@ def test_the_shared_checks_can_still_be_pointed_at_the_tag_being_rebuilt() -> No
     assert "${{ needs.discover.outputs.tag }}" in str(called["with"]["ref"]), (
         f"the refresh calls the checks without passing the tag it rebuilds: {called}"
     )
+
+
+LOCKFILE_JS = REPO / "frontend" / "package-lock.json"
+
+
+def _npm_version(raw: str) -> tuple[int, int, int]:
+    """`1.2.3`, `1.2.3-rc1` or `1.2` as a comparable triple.
+
+    Prerelease and build metadata are dropped rather than ordered properly. That is a
+    real simplification, and it is safe here only because this compares *locked*
+    versions against peer ranges, and npm does not resolve a prerelease into a tree
+    unless it is asked for by name. If that ever changes this will read `7.0.0-beta`
+    as `7.0.0`, which is the wrong direction only for a range whose bound is itself a
+    prerelease.
+    """
+    core = re.split(r"[-+]", raw.strip().lstrip("v"), maxsplit=1)[0]
+    parts = [int(piece) for piece in core.split(".") if piece.isdigit()]
+    while len(parts) < 3:
+        parts.append(0)
+    return (parts[0], parts[1], parts[2])
+
+
+def _satisfies(version: str, spec: str) -> bool:
+    """Whether `version` satisfies an npm range, for the subset npm actually uses here.
+
+    `||` separates alternatives, whitespace within an alternative means AND, and the
+    comparators are the five plain ones plus `^` and `~`. An operator this does not
+    recognise raises rather than returning False or True: a range it cannot parse must
+    reach a human, not quietly decide the question either way. That is the whole
+    difference between this and a check that passes because it understood nothing.
+    """
+    got = _npm_version(version)
+    for alternative in spec.split("||"):
+        tokens = alternative.split()
+        if not tokens:
+            continue
+        ok = True
+        for token in tokens:
+            match = re.fullmatch(r"(>=|<=|>|<|=|\^|~)?\s*v?([0-9][0-9A-Za-z.\-+]*)", token)
+            if not match:
+                raise AssertionError(
+                    f"cannot parse the npm comparator {token!r} out of {spec!r}; "
+                    "teach this function that operator rather than letting the check "
+                    "pass on a range it does not understand"
+                )
+            op, bound_raw = match.group(1) or "=", match.group(2)
+            bound = _npm_version(bound_raw)
+            if op == ">=":
+                ok = got >= bound
+            elif op == ">":
+                ok = got > bound
+            elif op == "<=":
+                ok = got <= bound
+            elif op == "<":
+                ok = got < bound
+            elif op == "=":
+                ok = got == bound
+            elif op == "^":
+                upper = (bound[0] + 1, 0, 0) if bound[0] else (0, bound[1] + 1, 0)
+                ok = bound <= got < upper
+            elif op == "~":
+                ok = bound <= got < (bound[0], bound[1] + 1, 0)
+            if not ok:
+                break
+        if ok:
+            return True
+    return False
+
+
+def test_typescript_stays_inside_the_eslint_plugins_peer_range() -> None:
+    """The invariant PR #82 broke, and the reason TypeScript majors are ignored.
+
+    typescript-eslint declares `peerDependencies.typescript: ">=4.8.4 <6.1.0"`. PR #82
+    raised TypeScript to 7.0.2 and left the plugin where it was, which is not a
+    "risky major" — it is a tree npm refuses to install. It died at the first step in
+    six seconds with ERESOLVE under `npm ci`, and the looser `npm install` in
+    frontend/Dockerfile refused it too, so the web image never built and the Trivy
+    step then failed hunting a SARIF file nothing had produced. Dropping the plugin is
+    not available: frontend/eslint.config.js is built entirely on `tseslint.config()`.
+
+    .github/dependabot.yml now ignores TypeScript majors because of exactly this, and
+    that ignore can never expire on its own: TypeScript went 5.9 straight to 7.0, so
+    `<6.1.0` is not a ceiling a future release grows into — it takes a typescript-eslint
+    major. This test is what stands behind that comment. It fails if the locked pair
+    stops being installable, whether because someone bumped TypeScript by hand, or
+    because they lifted the ignore before the plugin was ready.
+
+    Checked for every peer the plugin declares, not just TypeScript, because eslint is
+    the same class of breakage and picking a favourite is how the other one gets through.
+    """
+    lock = json.loads(LOCKFILE_JS.read_text())
+    packages = lock.get("packages") or {}
+    assert packages, f"read no packages out of {LOCKFILE_JS}, so this test checks nothing"
+
+    plugin = packages.get("node_modules/typescript-eslint") or {}
+    peers = plugin.get("peerDependencies") or {}
+    assert peers, (
+        "typescript-eslint declares no peerDependencies in the lockfile — either it is "
+        "gone from the project, in which case delete this test and the TypeScript "
+        "ignore in .github/dependabot.yml together, or the lockfile shape changed and "
+        "this test is now reading nothing"
+    )
+    assert "typescript" in peers, (
+        f"typescript-eslint no longer peers typescript ({sorted(peers)}); re-read the "
+        "TypeScript ignore in .github/dependabot.yml before trusting it"
+    )
+
+    for name, spec in sorted(peers.items()):
+        locked = (packages.get(f"node_modules/{name}") or {}).get("version")
+        assert locked, (
+            f"typescript-eslint peers {name} {spec!r} but nothing is locked for it, so "
+            "npm would resolve it at install time and this check cannot see what lands"
+        )
+        assert _satisfies(locked, spec), (
+            f"the lockfile pairs typescript-eslint {plugin.get('version')} with "
+            f"{name} {locked}, which is outside its declared peer range {spec!r}. npm "
+            "refuses to install that tree — `npm ci` fails with ERESOLVE and so does "
+            "the `npm install` in frontend/Dockerfile, which takes the web image and "
+            "its CVE scan down with it. Either hold that dependency back, or move "
+            "typescript-eslint to a release that accepts it"
+        )
 
 
 def test_the_refresh_gate_asks_whether_the_rebuild_made_things_worse() -> None:
