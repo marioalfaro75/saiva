@@ -15,7 +15,7 @@ const FOCUSABLE =
 export function useDismissable<T extends HTMLElement>(
   open: boolean,
   onClose: () => void,
-): RefObject<T> {
+): RefObject<T | null> {
   const ref = useRef<T>(null);
   const returnTo = useRef<Element | null>(null);
 
