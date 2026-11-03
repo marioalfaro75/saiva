@@ -124,6 +124,14 @@ export function ImportPage() {
   // Live preview request, so it can be called off. Only the preview: the server
   // finishes a commit regardless, so offering to cancel one would be a lie.
   const previewRun = useRef<AbortController | null>(null);
+  // Whether that controller is live, held as state rather than read off the ref while
+  // rendering. `busy` on its own is not enough: it is also true while a commit runs,
+  // and a commit is not cancellable, so the Cancel button has to know specifically
+  // that a *preview* is in flight. `busy && previewRun.current` in the JSX looked like
+  // it said exactly that, but a ref mutation does not re-render, so the button could
+  // show state that had already moved on. That is what react-hooks/refs flags, and it
+  // is why this is state: it is an input to render, not bookkeeping.
+  const [previewCancellable, setPreviewCancellable] = useState(false);
   const narrow = !useMediaQuery(PHONE);
 
   const reset = () => {
@@ -149,6 +157,8 @@ export function ImportPage() {
   /** Abandon this file and everything derived from it, back to an empty page. */
   const startAgain = () => {
     previewRun.current?.abort();
+    previewRun.current = null;
+    setPreviewCancellable(false);
     setFile(null);
     setFileInputKey((n) => n + 1);
     setAccountId("");
@@ -160,6 +170,7 @@ export function ImportPage() {
   const cancelPreview = () => {
     previewRun.current?.abort();
     previewRun.current = null;
+    setPreviewCancellable(false);
     setBusy(false);
   };
 
@@ -506,6 +517,7 @@ export function ImportPage() {
       } else {
         const run = new AbortController();
         previewRun.current = run;
+        setPreviewCancellable(true);
         const fresh = await api.preview(
           file,
           multiAccount ? "" : accountId,
@@ -526,6 +538,7 @@ export function ImportPage() {
       }
     } finally {
       previewRun.current = null;
+      setPreviewCancellable(false);
       setBusy(false);
     }
   };
@@ -680,7 +693,7 @@ export function ImportPage() {
           >
             {stale ? "Preview again" : "Preview"}
           </button>
-          {busy && previewRun.current && (
+          {busy && previewCancellable && (
             <button type="button" className="btn btn-ghost" onClick={cancelPreview}>
               Cancel
             </button>

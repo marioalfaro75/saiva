@@ -34,7 +34,7 @@ export function Sidebar({
       className={drawer ? "sidebar sidebar-drawer" : "sidebar"}
       aria-label="Main"
       ref={drawer ? panel : undefined}
-      {...(drawer ? { "aria-hidden": !open, inert: open ? undefined : "" } : {})}
+      {...(drawer ? { "aria-hidden": !open, inert: !open } : {})}
     >
       <div className="sidebar-brand">
         <span className="brand-mark">≈</span> Saiva
