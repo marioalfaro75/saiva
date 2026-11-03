@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useEffect, useId, useState } from "react";
+import { useId, useState } from "react";
 import { Link } from "react-router-dom";
 
 import { api } from "../api/client";
@@ -18,6 +18,11 @@ function when(iso: string): string {
     hour: "2-digit",
     minute: "2-digit",
   });
+}
+
+/** Thresholds are stored in cents and edited in dollars. */
+function dollars(cents: number): string {
+  return (cents / 100).toString();
 }
 
 function Row({ note, onRead }: { note: Notification; onRead: (id: string) => void }) {
@@ -60,16 +65,17 @@ export function Alerts() {
     queryFn: api.notificationSettings,
   });
 
-  const [largeTxn, setLargeTxn] = useState("");
-  const [lowBal, setLowBal] = useState("");
+  // Seeded from the server but not copied into state: `null` means nobody has typed
+  // in the box yet, so the stored threshold shows through, and once they have, their
+  // text wins. Mirroring it into state by effect cost a render and, worse, let the
+  // refetch that follows saving overwrite whatever was half-typed at the time.
+  const [largeTxnEdit, setLargeTxn] = useState<string | null>(null);
+  const [lowBalEdit, setLowBal] = useState<string | null>(null);
   const [flash, setFlash] = useState<string | null>(null);
 
-  useEffect(() => {
-    if (settings.data) {
-      setLargeTxn((settings.data.large_txn_threshold_cents / 100).toString());
-      setLowBal((settings.data.low_balance_threshold_cents / 100).toString());
-    }
-  }, [settings.data]);
+  const s = settings.data;
+  const largeTxn = largeTxnEdit ?? (s ? dollars(s.large_txn_threshold_cents) : "");
+  const lowBal = lowBalEdit ?? (s ? dollars(s.low_balance_threshold_cents) : "");
 
   const invalidate = () => {
     void qc.invalidateQueries({ queryKey: ["notifications"] });
@@ -93,7 +99,6 @@ export function Alerts() {
     onError: (e) => setFlash(e instanceof Error ? e.message : "Could not send test email"),
   });
 
-  const s = settings.data;
   const items = notes.data?.items ?? [];
 
   return (

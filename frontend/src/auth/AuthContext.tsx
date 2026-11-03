@@ -1,4 +1,4 @@
-import { createContext, useCallback, useContext, useEffect, useState, type ReactNode } from "react";
+import { createContext, useContext, useEffect, useState, type ReactNode } from "react";
 
 import { api } from "../api/client";
 import type { Me, SetupBody } from "../api/types";
@@ -14,42 +14,63 @@ interface AuthValue {
 
 const AuthContext = createContext<AuthValue | null>(null);
 
-export function AuthProvider({ children }: { children: ReactNode }) {
-  const [me, setMe] = useState<Me | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [initialised, setInitialised] = useState(true);
+/** What the three bootstrap requests between them establish. */
+interface Session {
+  me: Me | null;
+  loading: boolean;
+  /** Whether a household exists yet; assumed until the server says otherwise, so a
+   *  failed check offers the sign-in form rather than the create-household one. */
+  initialised: boolean;
+}
 
-  const bootstrap = useCallback(async () => {
-    setLoading(true);
-    try {
-      await api.csrf();
-    } catch {
-      // CSRF token will be re-fetched on demand.
-    }
-    try {
-      const status = await api.status();
-      setInitialised(status.initialised);
-    } catch {
-      setInitialised(true);
-    }
-    try {
-      setMe(await api.me());
-    } catch {
-      setMe(null);
-    }
-    setLoading(false);
+export function AuthProvider({ children }: { children: ReactNode }) {
+  const [session, setSession] = useState<Session>({
+    me: null,
+    loading: true,
+    initialised: true,
+  });
+
+  // Bootstrap: a CSRF token, whether the instance has been set up, and who is signed
+  // in. Published as one state in one commit when all three have settled, rather than
+  // as each lands: nothing renders anything but "Loading…" until `loading` clears, so
+  // the intermediate states were never worth a render — and setting state per request
+  // meant the first of them ran synchronously inside the effect, cascading renders
+  // (react-hooks/set-state-in-effect).
+  useEffect(() => {
+    let live = true;
+    void (async () => {
+      try {
+        await api.csrf();
+      } catch {
+        // CSRF token will be re-fetched on demand.
+      }
+      let initialised: boolean;
+      try {
+        initialised = (await api.status()).initialised;
+      } catch {
+        initialised = true;
+      }
+      let me: Me | null;
+      try {
+        me = await api.me();
+      } catch {
+        me = null;
+      }
+      if (live) setSession({ me, loading: false, initialised });
+    })();
+    return () => {
+      live = false;
+    };
   }, []);
 
-  useEffect(() => {
-    void bootstrap();
-  }, [bootstrap]);
+  const setMe = (me: Me | null) => setSession((s) => ({ ...s, me }));
 
   const login = async (email: string, password: string) => {
     setMe(await api.login(email, password));
   };
   const setup = async (body: SetupBody) => {
-    setMe(await api.setup(body));
-    setInitialised(true);
+    const me = await api.setup(body);
+    setSession((s) => ({ ...s, me, initialised: true }));
   };
   const logout = async () => {
     await api.logout();
@@ -58,7 +79,16 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   };
 
   return (
-    <AuthContext.Provider value={{ me, loading, initialised, login, setup, logout }}>
+    <AuthContext.Provider
+      value={{
+        me: session.me,
+        loading: session.loading,
+        initialised: session.initialised,
+        login,
+        setup,
+        logout,
+      }}
+    >
       {children}
     </AuthContext.Provider>
   );

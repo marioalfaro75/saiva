@@ -1,7 +1,8 @@
 import { useEffect, useId, useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
-import { TABLE_MIN, TableWrap } from "../table/TableWrap";
+import { TABLE_MIN } from "../table/minWidths";
+import { TableWrap } from "../table/TableWrap";
 import { api } from "../api/client";
 import { FilterRow, FilterToggle } from "../table/FilterRow";
 import { SortHeader } from "../table/SortHeader";

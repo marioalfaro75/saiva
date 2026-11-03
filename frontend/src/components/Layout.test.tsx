@@ -273,6 +273,27 @@ describe("drawer, below 1080px", () => {
     await waitFor(() => expect(container.querySelector(".scrim")).toBeNull());
   });
 
+  it("stays closed when the window comes back below the breakpoint", async () => {
+    // Crossing the breakpoint closes the drawer; crossing back must not reopen it. A
+    // tablet rotated twice crosses 1080px in both directions, and the drawer springing
+    // open over the page on the way down is not something anyone asked for. This is
+    // the trap in "just derive it": `open && !wide` hides the drawer at width but
+    // leaves `open` true underneath, so it reappears the moment the window narrows.
+    const { container } = await openDrawer();
+    act(() => setViewport(1280));
+    await waitFor(() => expect(container.querySelector(".scrim")).toBeNull());
+
+    act(() => setViewport(800));
+    const toggle = await screen.findByRole("button", { name: "Menu" });
+    expect(toggle).toHaveAttribute("aria-expanded", "false");
+    expect(container.querySelector("nav")).toHaveAttribute("aria-hidden", "true");
+    expect(container.querySelector(".scrim")).toBeNull();
+
+    // Still openable afterwards: closed, not disabled.
+    fireEvent.click(toggle);
+    expect(container.querySelector("nav")).toHaveAttribute("aria-hidden", "false");
+  });
+
   it("has no menu button on a wide screen, where the column is always there", async () => {
     setViewport(1280);
     stubShell();

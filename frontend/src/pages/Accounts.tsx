@@ -9,7 +9,8 @@ import { FilterRow, FilterToggle } from "../table/FilterRow";
 import { SortHeader } from "../table/SortHeader";
 import type { ColumnSpec } from "../table/sorting";
 import { useTable } from "../table/useTable";
-import { TABLE_MIN, TableWrap } from "../table/TableWrap";
+import { TABLE_MIN } from "../table/minWidths";
+import { TableWrap } from "../table/TableWrap";
 import { formatCents } from "../format";
 import { PageHead } from "../components/PageHead";
 

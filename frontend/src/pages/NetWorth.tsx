@@ -2,7 +2,8 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { type FormEvent, useId, useState } from "react";
 import { Line, LineChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
 
-import { TABLE_MIN, TableWrap } from "../table/TableWrap";
+import { TABLE_MIN } from "../table/minWidths";
+import { TableWrap } from "../table/TableWrap";
 import { api } from "../api/client";
 import type { NetWorth as NetWorthData, NetWorthItem } from "../api/types";
 import { dollarsToCents, formatCents } from "../format";

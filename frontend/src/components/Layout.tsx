@@ -1,5 +1,5 @@
 import { useQuery } from "@tanstack/react-query";
-import { type ReactNode, useCallback, useEffect, useState } from "react";
+import { type ReactNode, useCallback, useState } from "react";
 
 import { api } from "../api/client";
 import { useAuth } from "../auth/AuthContext";
@@ -44,10 +44,16 @@ export function Layout({ children }: { children: ReactNode }) {
   const [open, setOpen] = useState(false);
   const close = useCallback(() => setOpen(false), []);
   // A drawer left open while the window grows would otherwise leak into the wide
-  // layout as a stuck overlay.
-  useEffect(() => {
+  // layout as a stuck overlay. Closing it on the breakpoint crossing itself — rather
+  // than from an effect — means React re-runs this component before it commits, so
+  // the stuck overlay is never painted. Latching the previous width is what makes it
+  // a crossing rather than a standing condition: `open && !wide` would also hide the
+  // drawer, but would spring it back open on the way down from a rotation or resize.
+  const [wasWide, setWasWide] = useState(wide);
+  if (wide !== wasWide) {
+    setWasWide(wide);
     if (wide) setOpen(false);
-  }, [wide]);
+  }
 
   // is_current is a containment test, so "not current" is exactly past or future.
   // They need different words: one says the figures are stale, the other that

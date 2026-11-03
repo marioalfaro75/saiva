@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { type FormEvent, useEffect, useId, useState } from "react";
+import { type FormEvent, useId, useState } from "react";
 
 import { api } from "../api/client";
 import type { AiSettings } from "../api/types";
@@ -13,27 +13,33 @@ interface Form {
   pay_cycle_anchor: string;
 }
 
+interface AiForm {
+  provider: AiSettings["provider"];
+  base_url: string;
+  model: string;
+  privacy_mode: AiSettings["privacy_mode"];
+  /** Write-only: the server never sends a key back, so this is blank unless typed. */
+  api_key: string;
+}
+
 export function Settings() {
   const fid = useId();
   const qc = useQueryClient();
   const household = useQuery({ queryKey: ["household"], queryFn: api.household });
-  const [form, setForm] = useState<Form>({
-    state: "",
-    period_basis: "calendar",
-    fy_start_month: 7,
-    pay_cycle_anchor: "",
-  });
-
-  useEffect(() => {
-    if (household.data) {
-      setForm({
-        state: household.data.state ?? "",
-        period_basis: household.data.period_basis,
-        fy_start_month: household.data.fy_start_month,
-        pay_cycle_anchor: household.data.pay_cycle_anchor ?? "",
-      });
-    }
-  }, [household.data]);
+  // Each of the three forms below is seeded from a query without being copied into
+  // state: `null` means untouched, so the fetched values show through until someone
+  // edits, and from then on the edit wins. Mirroring fetched data into state from an
+  // effect cost a render each and, worse, let a refetch landing mid-edit overwrite
+  // what was being typed — on this page a part-entered API key or pay-cycle date.
+  // The latch is per form, not per field: a form is sent as one patch, so what gets
+  // saved should be what was on screen when the edit started.
+  const [editedForm, setForm] = useState<Form | null>(null);
+  const form: Form = editedForm ?? {
+    state: household.data?.state ?? "",
+    period_basis: household.data?.period_basis ?? "calendar",
+    fy_start_month: household.data?.fy_start_month ?? 7,
+    pay_cycle_anchor: household.data?.pay_cycle_anchor ?? "",
+  };
 
   const save = useMutation({
     mutationFn: () =>
@@ -52,32 +58,20 @@ export function Settings() {
   });
 
   const reportYears = useQuery({ queryKey: ["report-years"], queryFn: api.reportYears });
-  const [fy, setFy] = useState<number | "">("");
-  useEffect(() => {
-    if (reportYears.data && reportYears.data.length > 0 && fy === "") {
-      setFy(reportYears.data[0].year);
-    }
-  }, [reportYears.data, fy]);
+  // "" already means "nothing chosen", so the newest year is simply what that reads
+  // as until one is picked — there is no second copy of it to keep.
+  const [chosenFy, setFy] = useState<number | "">("");
+  const fy = chosenFy === "" ? (reportYears.data?.[0]?.year ?? "") : chosenFy;
 
   const aiQuery = useQuery({ queryKey: ["ai-settings"], queryFn: api.aiSettings });
-  const [ai, setAi] = useState<{
-    provider: AiSettings["provider"];
-    base_url: string;
-    model: string;
-    privacy_mode: AiSettings["privacy_mode"];
-    api_key: string;
-  }>({ provider: "none", base_url: "", model: "", privacy_mode: "aggregates", api_key: "" });
-  useEffect(() => {
-    if (aiQuery.data) {
-      setAi({
-        provider: aiQuery.data.provider,
-        base_url: aiQuery.data.base_url ?? "",
-        model: aiQuery.data.model ?? "",
-        privacy_mode: aiQuery.data.privacy_mode,
-        api_key: "",
-      });
-    }
-  }, [aiQuery.data]);
+  const [editedAi, setAi] = useState<AiForm | null>(null);
+  const ai: AiForm = editedAi ?? {
+    provider: aiQuery.data?.provider ?? "none",
+    base_url: aiQuery.data?.base_url ?? "",
+    model: aiQuery.data?.model ?? "",
+    privacy_mode: aiQuery.data?.privacy_mode ?? "aggregates",
+    api_key: "",
+  };
   const saveAi = useMutation({
     mutationFn: () =>
       api.updateAiSettings({
@@ -90,7 +84,8 @@ export function Settings() {
     onSuccess: () => {
       void qc.invalidateQueries({ queryKey: ["ai-settings"] });
       void qc.invalidateQueries({ queryKey: ["ai-models"] });
-      setAi((a) => ({ ...a, api_key: "" }));
+      // Untouched means the key box is already blank, by derivation.
+      setAi((a) => (a ? { ...a, api_key: "" } : null));
     },
   });
 

@@ -24,7 +24,8 @@ import {
   type SegmentId,
 } from "../import/segments";
 import { SortChips } from "../table/MobileControls";
-import { TABLE_MIN, TableWrap } from "../table/TableWrap";
+import { TABLE_MIN } from "../table/minWidths";
+import { TableWrap } from "../table/TableWrap";
 import { formatCents, formatDate } from "../format";
 import { SortHeader } from "../table/SortHeader";
 import type { ColumnSpec } from "../table/sorting";

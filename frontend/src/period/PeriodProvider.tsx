@@ -13,21 +13,25 @@ export function PeriodProvider({ children }: { children: ReactNode }) {
   const [searchParams, setSearchParams] = useSearchParams();
   // The URL wins on load so a shared or bookmarked link opens on its period;
   // otherwise pick up where this browser left off.
-  const [period, setPeriodState] = useState<string>(
+  const [selected, setPeriodState] = useState<string>(
     () => searchParams.get("period") || localStorage.getItem(STORAGE_KEY) || FALLBACK,
   );
 
   const options = useQuery({ queryKey: ["period-options"], queryFn: api.periodOptions });
+
+  // Once the catalogue arrives, the placeholder becomes the concrete current year so
+  // the picker has something selected and links carry an explicit period. Resolved
+  // while rendering rather than written back into state: the placeholder has never
+  // meant anything but "whatever the server calls default", so storing the answer
+  // would be a second copy of a fact the catalogue already holds — and would cost a
+  // render to publish it.
+  const period =
+    selected === FALLBACK && options.data ? options.data.default : selected;
+
   const resolved = useQuery({
     queryKey: ["period-resolve", period],
     queryFn: () => api.resolvePeriod(period),
   });
-
-  // Once the catalogue arrives, turn the placeholder into the concrete current year
-  // so the picker has something selected and links carry an explicit period.
-  useEffect(() => {
-    if (period === FALLBACK && options.data) setPeriodState(options.data.default);
-  }, [period, options.data]);
 
   useEffect(() => {
     localStorage.setItem(STORAGE_KEY, period);

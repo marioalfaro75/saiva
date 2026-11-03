@@ -1,4 +1,4 @@
-import { fireEvent, screen } from "@testing-library/react";
+import { fireEvent, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { renderApp, stubApi } from "../testing/harness";
@@ -63,7 +63,10 @@ const picker = () =>
     </PeriodProvider>,
   );
 
-afterEach(() => vi.unstubAllGlobals());
+afterEach(() => {
+  vi.unstubAllGlobals();
+  localStorage.clear();
+});
 
 describe("PeriodPicker", () => {
   it("is labelled, so it can be found however the shell is arranged", async () => {
@@ -94,6 +97,31 @@ describe("PeriodPicker", () => {
     const select = await screen.findByLabelText("Period");
     fireEvent.change(select, { target: { value: "fy:2023" } });
     expect(screen.getByTestId("url")).toHaveTextContent("period=fy%3A2023");
+  });
+
+  it("turns the placeholder period into the server's default once it knows one", async () => {
+    // Before the catalogue arrives there is nothing concrete to select, so the
+    // provider starts on a placeholder. It must not stay there: a link copied out of
+    // the address bar has to name a real period, and the picker needs a selection.
+    localStorage.clear();
+    stub();
+    picker();
+    const select = await screen.findByLabelText("Period");
+    expect(select).toHaveValue("fy:2024");
+    await waitFor(() => expect(screen.getByTestId("url")).toHaveTextContent("period=fy%3A2024"));
+    expect(localStorage.getItem("saiva.period")).toBe("fy:2024");
+  });
+
+  it("opens on the period in the URL rather than the server's default", async () => {
+    stub();
+    renderApp(
+      <PeriodProvider>
+        <PeriodPicker />
+        <UrlProbe />
+      </PeriodProvider>,
+      { route: "/?period=fy:2023" },
+    );
+    expect(await screen.findByLabelText("Period")).toHaveValue("fy:2023");
   });
 
   it("renders nothing until the catalogue arrives, rather than an empty control", () => {

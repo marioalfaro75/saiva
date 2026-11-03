@@ -2,7 +2,8 @@ import { useQuery } from "@tanstack/react-query";
 
 import { api } from "../api/client";
 import type { RecurringSeries, UpcomingBill } from "../api/types";
-import { TABLE_MIN, TableWrap } from "../table/TableWrap";
+import { TABLE_MIN } from "../table/minWidths";
+import { TableWrap } from "../table/TableWrap";
 import { formatCents, formatDate } from "../format";
 import { usePeriod } from "../period/context";
 import { FilterRow, FilterToggle } from "../table/FilterRow";

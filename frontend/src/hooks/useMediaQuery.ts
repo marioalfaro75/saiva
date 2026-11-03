@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useCallback, useSyncExternalStore } from "react";
 
 /**
  * Tracks a media query in JS.
@@ -6,22 +6,28 @@ import { useEffect, useState } from "react";
  * Used where the two layouts differ structurally rather than cosmetically: the
  * alternative is rendering both shells and hiding one with CSS, which would put
  * every navigation link in the document twice and announce them twice.
+ *
+ * `matchMedia` is an external store, so it is read with the hook built for one
+ * rather than copied into state by an effect: the value is sampled during render
+ * instead of one render late, and a width that changes between the first render
+ * and the subscription cannot be missed.
  */
 export function useMediaQuery(query: string): boolean {
-  const [matches, setMatches] = useState(
-    () => typeof window !== "undefined" && window.matchMedia?.(query).matches === true,
+  const subscribe = useCallback(
+    (onChange: () => void) => {
+      const mql = window.matchMedia?.(query);
+      if (!mql) return () => {};
+      mql.addEventListener("change", onChange);
+      return () => mql.removeEventListener("change", onChange);
+    },
+    [query],
   );
 
-  useEffect(() => {
-    const mql = window.matchMedia?.(query);
-    if (!mql) return;
-    setMatches(mql.matches);
-    const onChange = (e: MediaQueryListEvent) => setMatches(e.matches);
-    mql.addEventListener("change", onChange);
-    return () => mql.removeEventListener("change", onChange);
-  }, [query]);
+  const read = useCallback(() => matchesAtMount(query), [query]);
 
-  return matches;
+  // No server render, but useSyncExternalStore insists on the third argument; the
+  // narrow layout is the right thing to assume where no viewport can be measured.
+  return useSyncExternalStore(subscribe, read, () => false);
 }
 
 /** Width at which the navigation becomes a persistent sidebar. */

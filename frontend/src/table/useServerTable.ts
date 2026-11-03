@@ -40,6 +40,21 @@ export function useServerTable(filterKeys: string[]): ServerTable {
     return out;
   }, [searchParams, filterKeys]);
 
+  // Grouped with the other values read out of the URL, deliberately above the
+  // callbacks that write back to it: React Compiler cannot preserve a useMemo placed
+  // below `update`, which both reads the search params and sets them, and silently
+  // drops the memoisation instead (react-hooks/preserve-manual-memoization). This
+  // memo is here for the reason the one above is — a fresh object every render would
+  // refetch the list — so the order is load-bearing, not cosmetic.
+  const params = useMemo(() => {
+    const out: Record<string, string | undefined> = {
+      sort: sort?.key,
+      dir: sort ? sort.dir : undefined,
+    };
+    for (const [key, value] of Object.entries(filters)) out[`f_${key}`] = value;
+    return out;
+  }, [sort, filters]);
+
   const update = useCallback(
     (mutate: (params: URLSearchParams) => void) => {
       const next = new URLSearchParams(searchParams);
@@ -85,15 +100,6 @@ export function useServerTable(filterKeys: string[]): ServerTable {
     () => update((p) => (filtersOpen ? p.delete("filters") : p.set("filters", "1"))),
     [update, filtersOpen],
   );
-
-  const params = useMemo(() => {
-    const out: Record<string, string | undefined> = {
-      sort: sort?.key,
-      dir: sort ? sort.dir : undefined,
-    };
-    for (const [key, value] of Object.entries(filters)) out[`f_${key}`] = value;
-    return out;
-  }, [sort, filters]);
 
   return {
     sort,
