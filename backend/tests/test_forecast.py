@@ -40,10 +40,27 @@ def _seed(client: TestClient, today: dt.date) -> str:
 
 def test_forecast_shape_and_income(auth_client: TestClient, today: dt.date) -> None:
     _seed(auth_client, today)
+    # The service calls dt.date.today() while it handles the request, so the only honest
+    # expectation is the day — or days — the clock could have read during the call.
+    # Pinning it to a date captured earlier is exactly what made CI run 41364727610
+    # fail: the forecast had rolled over to 2026-11-02 while the constant still said
+    # 2026-11-01. Taking the fixture per test narrowed that window to the length of one
+    # test; bracketing the request closes it, because both members of `could_be` mean
+    # "the forecast started today" and nothing else does.
+    #
+    # Note this is still an equality check, not a tolerance. When midnight does not fall
+    # during the request — which is almost always — `could_be` holds one date and the
+    # assertion is exactly as strict as comparing against it directly. A forecast
+    # starting on any other day fails either way.
+    before = dt.date.today()
     data = auth_client.post("/api/forecast", json={"days": 90}).json()
+    could_be = {before, dt.date.today()}
+
     assert data["horizon_days"] == 90
-    assert data["points"][0]["date"] == today.isoformat()
-    assert data["points"][-1]["date"] == (today + dt.timedelta(days=90)).isoformat()
+    assert data["points"][0]["date"] in {d.isoformat() for d in could_be}
+    assert data["points"][-1]["date"] in {
+        (d + dt.timedelta(days=90)).isoformat() for d in could_be
+    }
     assert len(data["points"]) >= 2
     assert data["monthly_income_cents"] > 0  # fortnightly salary detected
     assert data["monthly_expense_cents"] > 0

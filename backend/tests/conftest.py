@@ -77,6 +77,17 @@ def today() -> dt.date:
     starting at a uniformly random time that is roughly 1 failure in 250,000 runs, against
     about 1 in 350 before.
 
+    Keep this function-scoped. A session-scoped version looks like a harmless saving and
+    reopens the whole window: the value would be built once, at first use, and every
+    later test would compare against a date that is again minutes or hours old. The same
+    goes for hoisting it back into a module-level constant, which is what
+    test_no_test_module_reads_the_clock_at_import_time exists to refuse.
+
+    Where an assertion compares a date the *app* computed against this one, bracket the
+    request and accept either day the clock could have read, rather than trusting this
+    value to still be current — test_forecast_shape_and_income does that, and it closes
+    the residual window rather than merely narrowing it.
+
     It is a 700x reduction, not a proof: a test that seeds and asserts across midnight
     inside the same third of a second still fails. Closing it completely means either
     freezegun, rejected above, or routing twenty production call sites through an
