@@ -366,6 +366,38 @@ def test_the_state_directory_has_one_spelling() -> None:
     )
 
 
+def test_every_outcome_the_updater_can_report_is_one_the_panel_handles() -> None:
+    """A cross-language invariant, so it needs a test that reads both sides.
+
+    The shell writes a phase string; the API passes it through verbatim; the panel turns
+    it into words. Nothing but this connects them. A new terminal state added to the
+    updater without a branch in the panel renders as a bare phase name on the one screen
+    the owner looks at when an update has gone wrong -- which is a quiet version of
+    exactly the failure this whole design exists to remove.
+    """
+    release_sh = (REPO / "scripts" / "lib" / "release.sh").read_text()
+    phases = set(re.findall(r"status_finish\s+([a-z_]+)", release_sh))
+    assert phases, "no phases found in release.sh, so this test is checking nothing"
+    assert "applied" in phases and "rolled_back" in phases, (
+        f"release.sh no longer reports the outcomes this test knows about: {sorted(phases)}"
+    )
+
+    panel = (REPO / "frontend" / "src" / "components" / "UpdatesPanel.tsx").read_text()
+    unhandled = sorted(p for p in phases if f'case "{p}":' not in panel)
+    assert not unhandled, (
+        "the updater can end in states the panel has no words for, so they would render "
+        f"as a raw phase name: {unhandled}"
+    )
+
+    from app.services import updates
+
+    missing = sorted(phases - updates.TERMINAL_PHASES - updates.ACTIVE_PHASES)
+    assert not missing, (
+        f"app/services/updates.py does not know these phases, so update_in_progress() "
+        f"cannot reason about them: {missing}"
+    )
+
+
 def test_an_update_cannot_run_twice_at_once() -> None:
     """Two concurrent `compose up` runs against one project is a way to lose a database.
 

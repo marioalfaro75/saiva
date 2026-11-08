@@ -123,7 +123,14 @@ STATUS_FILENAME = "status.json"
 # vocabulary, and so an unrecognised one is visible rather than silently rendered as
 # something reassuring.
 TERMINAL_PHASES = frozenset(
-    {"applied", "failed", "rolled_back", "rolled_back_code_only", "rollback_failed"}
+    {
+        "applied",
+        "failed",
+        "rolled_back",
+        "rolled_back_code_only",
+        "rollback_incomplete",
+        "rollback_failed",
+    }
 )
 ACTIVE_PHASES = frozenset({"requested", "running"})
 

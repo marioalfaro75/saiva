@@ -573,6 +573,7 @@ export interface UpdateRun {
     | "failed"
     | "rolled_back"
     | "rolled_back_code_only"
+    | "rollback_incomplete"
     | "rollback_failed"
     | "unreadable"
     | string

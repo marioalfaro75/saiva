@@ -136,6 +136,22 @@ updates are not set up here, and `make update` is unaffected.
 
 ---
 
+## The other case it refuses to call a rollback
+
+If the stack was already down when the update started, nothing recorded which image
+digests were running — there were no containers to read them from. Restoring `.env` then
+is *not* a rollback on the `latest` channel, because `compose pull` has already moved the
+local `latest` tag to the release that failed, and `up -d` would bring it straight back.
+
+So that outcome is reported as `rollback_incomplete`, not as a rollback: the configuration
+went back, the images did not, and the box may still be on the broken release. The way out
+is to pin `SAIVA_VERSION` in `.env` to a known-good tag and update again.
+
+On a version-pinned box this cannot happen — `v0.16.1` still means `v0.16.1`, so restoring
+`.env` restores the images by definition.
+
+---
+
 ## Where to look when something goes wrong
 
 ```bash

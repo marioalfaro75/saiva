@@ -68,6 +68,20 @@ function phaseSummary(run: UpdateRun): { tone: Tone; title: string; detail: stri
             `restore the pre-migration dump on the host with ./scripts/restore-backup.sh ` +
             `(which destroys everything written since the update).`,
       };
+    case "rollback_incomplete":
+      // The site answers, but on images the updater did not choose: nothing recorded
+      // which digest was running, and a rolling channel now points at the release that
+      // failed. Calling this "rolled back" would be the same class of claim this panel
+      // was rewritten to remove.
+      return {
+        tone: "bad",
+        title: "Put the configuration back, but not the app images",
+        detail:
+          run.message ??
+          `Nothing recorded which images were running, so this box may still be on the ` +
+            `release that failed. Pin SAIVA_VERSION in .env to a known-good tag and ` +
+            `update again.`,
+      };
     case "rollback_failed":
       return {
         tone: "bad",

@@ -387,22 +387,40 @@ _rollback() { # MESSAGE -- put the box back, then say exactly what state it is i
 
   # Pin the exact images that were running, by digest. Restoring .env alone is not a
   # rollback on the `latest` channel, because `latest` now points at the release being
-  # rolled back from.
-  local svc digest repo
+  # rolled back from -- `compose pull` already moved the local tag, so `up -d` would
+  # bring the FAILED release straight back up while this function reported success.
+  #
+  # That is why `unpinned` is tracked rather than assumed. Nothing guarantees a digest
+  # was recorded: record_capture reads the running containers, and on a box whose stack
+  # was already down when the update started there is nothing to read. The rollback must
+  # then say that it restored the configuration but NOT the images, because the
+  # difference is the whole point of it.
+  local svc digest repo unpinned=""
   for svc in "${SAIVA_SERVICES[@]}"; do
     digest="$(cat "$record/digest-$svc" 2>/dev/null || true)"
-    [ -n "$digest" ] || continue
     case "$digest" in
-      *@sha256:*) env_set "SAIVA_$(upper "$svc")_IMAGE" "$digest" ;;
+      *@sha256:*) env_set "SAIVA_$(upper "$svc")_IMAGE" "$digest"; continue ;;
       sha256:*)
         # A locally built image has no repo digest. Give it a name compose can resolve.
         repo="$(compose_image_repo "$svc" 2>/dev/null || true)"
         if [ -n "$repo" ] && docker tag "$digest" "$repo:saiva-rollback" >/dev/null 2>&1; then
           env_set "SAIVA_$(upper "$svc")_IMAGE" "$repo:saiva-rollback"
+          continue
         fi
         ;;
     esac
+    # Only api and web move with a release; db and caddy are on tags bounded to a major,
+    # so failing to pin those is not the same kind of hole.
+    case "$svc" in api|web) unpinned="${unpinned:+$unpinned, }$svc" ;; esac
   done
+
+  # A version-pinned .env resolves to the same images it did before, so an unpinned
+  # service only matters on a rolling channel.
+  local channel; channel="$(env_get SAIVA_VERSION)"
+  case "$channel" in
+    latest|edge|"") : ;;
+    *) unpinned="" ;;
+  esac
 
   if have_git && [ -s "$record/revision" ]; then
     git -C "$ROOT" checkout --detach --quiet "$(cat "$record/revision")" \
@@ -417,6 +435,21 @@ _rollback() { # MESSAGE -- put the box back, then say exactly what state it is i
   [ "$schema_now" = "ahead" ] && migrated=1
 
   if wait_for_site; then
+    if [ -n "$unpinned" ]; then
+      # The site answers, but on images this function did not choose. Saying "rolled
+      # back" here would be the same class of claim the old panel made.
+      status_finish rollback_incomplete \
+        "$why. The configuration was restored but the $unpinned image(s) were not: nothing \
+recorded which digest was running, and SAIVA_VERSION is the rolling '$channel' channel, \
+which now points at the release that failed. Pin SAIVA_VERSION to a known-good tag and \
+run the update again." 1
+      log ""
+      log "⚠  Put the configuration back, but NOT the $unpinned image(s)."
+      log "   Nothing recorded which digest was running, and '$channel' now points at the"
+      log "   release that just failed, so this box may still be on it."
+      log "   Pin SAIVA_VERSION in .env to a known-good tag, then: make update"
+      exit 1
+    fi
     if [ "$migrated" = "1" ]; then
       # The dangerous case, and the one no design can automate away: the release's
       # migration succeeded, so the database is at the NEW head while the code is the

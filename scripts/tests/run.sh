@@ -505,10 +505,52 @@ test_a_failed_pull_changes_nothing() {
   seed_env "$work" SAIVA_SITE_ADDRESS=https://192.168.0.11
   site_up
   printf '1\n' > "$FAKE/rc.pull"
+  # Both images, as a running box would have. An earlier version of this fixture
+  # recorded only api, which is a different scenario -- see the test below.
   printf 'sha256:old-api\n' > "$FAKE/image.api"
+  printf 'sha256:old-web\n' > "$FAKE/image.web"
+  printf 'ghcr.io/example/saiva-api@sha256:oldapi\n' > "$FAKE/digest.sha256:old-api"
+  printf 'ghcr.io/example/saiva-web@sha256:oldweb\n' > "$FAKE/digest.sha256:old-web"
   run_deploy "$work" --apply-release
   [ "$RC" -ne 0 ] || fail_test "a failed pull reported success"
-  assert_contains "$(status_field phase)" "rolled_back" "a failed pull must roll back, not stop half-applied"
+  assert_eq "rolled_back" "$(status_field phase)" "a failed pull must roll back, not stop half-applied"
+}
+
+test_a_rollback_that_could_not_restore_the_images_says_so() {
+  # The case that matters and is easy to miss: the stack was already down when the
+  # update started, so record_capture had no running containers to read a digest from.
+  # Restoring .env is then NOT a rollback on a rolling channel, because `compose pull`
+  # has already moved the local `latest` tag to the release that just failed -- `up -d`
+  # would bring it straight back and the box would sit on the broken release while the
+  # panel said "rolled back".
+  new_sandbox rollback-unpinned; local work="$WORK"
+  add_release "$work"
+  seed_env "$work" SAIVA_SITE_ADDRESS=https://192.168.0.11 SAIVA_VERSION=latest
+  site_up
+  # No image.* files: nothing was running, so nothing recorded a digest.
+  printf '1\n' > "$FAKE/rc.up"
+  run_deploy "$work" --apply-release
+
+  [ "$RC" -ne 0 ] || fail_test "it reported success having restored nothing"
+  assert_eq "rollback_incomplete" "$(status_field phase)" \
+    "a rollback that could not restore the images must not call itself a rollback"
+  assert_contains "$OUT" "NOT the" "it must name what it failed to put back"
+  assert_contains "$OUT" "SAIVA_VERSION" "and the way out"
+}
+
+test_a_pinned_channel_does_not_need_a_recorded_digest() {
+  # The guard against over-correcting. On a version-pinned box, restoring .env restores
+  # the images by definition -- v0.16.1 still means v0.16.1 -- so the absence of a
+  # recorded digest is not a hole and must not be reported as one.
+  new_sandbox rollback-pinned; local work="$WORK"
+  add_release "$work"
+  seed_env "$work" SAIVA_SITE_ADDRESS=https://192.168.0.11 SAIVA_VERSION=v1.0.0
+  site_up
+  printf '1\n' > "$FAKE/rc.up"
+  run_deploy "$work" --apply-release
+
+  assert_eq "rolled_back" "$(status_field phase)" \
+    "a pinned channel restores its own images; this is a clean rollback"
 }
 
 test_a_second_update_does_not_overwrite_the_running_ones_status() {
