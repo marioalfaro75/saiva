@@ -34,7 +34,30 @@ env_path() { printf '%s' "${SAIVA_ENV_FILE:-$ROOT/.env}"; }
 env_begin() { # snapshot .env and start staging changes
   local real; real="$(env_path)"
   _env_stage="${real}.staging.$$"
-  if [ -f "$real" ]; then cp -p "$real" "$_env_stage"; else : > "$_env_stage"; fi
+  # Each of these is a full copy of .env -- SECRET_KEY, POSTGRES_PASSWORD, the SMTP
+  # password -- so it is created private and swept on exit rather than left lying in the
+  # working tree by a process that died between begin and commit.
+  ( umask 077; if [ -f "$real" ]; then cp "$real" "$_env_stage"; else : > "$_env_stage"; fi )
+  chmod 0600 "$_env_stage" 2>/dev/null || true
+  env_sweep_stale
+}
+
+env_sweep_stale() {
+  # Leftovers from a process that is gone. Named with the pid that made them, so "is it
+  # still running" is answerable; anything older than a day goes regardless, because a
+  # pid is reused.
+  local real; real="$(env_path)" || return 0
+  local candidate pid
+  for candidate in "${real}".staging.* "${real}".w.*; do
+    [ -f "$candidate" ] || continue
+    pid="${candidate##*.}"
+    case "$pid" in
+      ''|*[!0-9]*) rm -f "$candidate"; continue ;;
+    esac
+    kill -0 "$pid" 2>/dev/null && continue
+    rm -f "$candidate"
+  done
+  return 0
 }
 
 env_commit() { # atomically replace .env with the staged copy

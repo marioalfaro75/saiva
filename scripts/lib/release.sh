@@ -137,6 +137,9 @@ health_field() { # FIELD -> its value from the running stack's /api/health, or e
   # would store `"schema_before": "null"` in the status file -- a string that reads like
   # a value next to fields that are genuinely null.
   [ "$value" = "null" ] && value=""
+  # An object- or array-valued field is not a scalar this can report. Returning the
+  # opening brace would store "{" as though it were a value.
+  case "$value" in '{'*|'['*) value="" ;; esac
   printf '%s' "$value"
   return 0
 }
@@ -262,9 +265,32 @@ new_run_id() {
   printf '%s-%s' "$(date -u +%Y%m%dT%H%M%SZ)" "$rand"
 }
 
+# A net under every exit path, because "the status file is the only record of what
+# happened" is only true if something always writes it. The re-exec is the sharpest case:
+# the child has already moved the tree, so an exit before it reaches a terminal status
+# leaves `running / checkout` set for ever -- the panel polls, --status says a run is in
+# progress, and the box is on a release nobody applied. The same hole exists for any
+# unexpected exit: a SIGTERM from systemd's TimeoutStartSec, a disk filling up, a bug.
+_finalise_on_exit() {
+  local rc=$?
+  case "$(status_get phase)" in
+    running|requested) : ;;
+    *) return 0 ;;   # a terminal status was written; nothing to add
+  esac
+  status_finish failed "The update stopped at step '$(status_get step)' without finishing \
+(exit status $rc). The tree may already be on the new release; nothing was rolled back. \
+Run ./scripts/deploy.sh --status on the host, then ./scripts/deploy.sh --apply-release to \
+try again or --rollback to put it back." "$rc"
+  log ""
+  log "✖ Stopped at step '$(status_get step)' without finishing (exit $rc)."
+  log "  ./scripts/deploy.sh --status   what it got to"
+  log "  ./scripts/deploy.sh --rollback put the box back"
+}
+
 apply_release() {
   state_init
   acquire_lock
+  trap _finalise_on_exit EXIT
 
   if [ -z "${RESUME_RUN:-}" ]; then
     _release_prepare
@@ -332,8 +358,11 @@ Nothing has been changed."
   # Hand over to the checked-out copy of this script. See the header: git replaced this
   # file's inode a moment ago and bash is still reading the old bytes.
   log "    handing over to $target's own deploy script"
-  # SAIVA_LOCK_HELD rides across: fd 9 and its flock survive the exec, so the new image
-  # must not re-open it. See acquire_lock.
+  # The hand-over is not an exit: clear the trap so it does not write a failure for a run
+  # that is about to continue in the new image. SAIVA_LOCK_HELD rides across because fd 9
+  # and its flock survive the exec, so the new image must not re-open it (see
+  # acquire_lock), and the child installs its own trap.
+  trap - EXIT
   SAIVA_LOCK_HELD=1 exec "$ROOT/scripts/deploy.sh" --apply-release --resume "$RUN_ID"
 }
 
@@ -507,13 +536,16 @@ _rollback() { # MESSAGE -- put the box back, then say exactly what state it is i
     local migrated=0
     [ "$schema_now" = "ahead" ] && migrated=1
     if [ -n "$unpinned" ]; then
+      local schema_note=""
+      [ "$migrated" = "1" ] && schema_note=" The database was also already migrated, so \
+the schema is ahead of whatever is running now."
       # The site answers, but on images this function did not choose. Saying "rolled
       # back" here would be the same class of claim the old panel made.
       status_finish rollback_incomplete \
         "$why. The configuration was restored but the $unpinned image(s) were not: nothing \
 recorded which digest was running, and SAIVA_VERSION is the rolling '$channel' channel, \
 which now points at the release that failed. Pin SAIVA_VERSION to a known-good tag and \
-run the update again." 1
+run the update again.${schema_note}" 1
       log ""
       log "⚠  Put the configuration back, but NOT the $unpinned image(s)."
       log "   Nothing recorded which digest was running, and '$channel' now points at the"
@@ -560,6 +592,7 @@ Either roll forward, or restore the pre-migration dump with ./scripts/restore-ba
 rollback_last() { # --rollback: undo the most recent applied run, on purpose
   state_init
   acquire_lock
+  trap _finalise_on_exit EXIT
   RUN_ID="$(status_get run_id)"
   [ -n "$RUN_ID" ] && record_has "$RUN_ID" \
     || fail "no update record to roll back to. ./scripts/restore-backup.sh lists database dumps."

@@ -122,7 +122,18 @@ def health(response: Response) -> dict[str, str | None]:
     try:
         with db_engine.connect() as conn:
             conn.execute(sa_text("SELECT 1"))
-        payload.update(read_schema_state(db_engine).as_dict())
+            # Same connection: holding a second one from the pool on every health check
+            # is how a health check becomes the thing that exhausts the pool.
+            try:
+                payload.update(read_schema_state(db_engine, conn=conn).as_dict())
+            except Exception as exc:  # noqa: BLE001 - a readable DB with an unreadable history
+                # Deliberately NOT a 503, and deliberately not "database": "error". The
+                # database answered; it is the migration history this image cannot read.
+                # Reporting that as an unreachable database sends whoever is debugging
+                # to the wrong half of the system, and fails a gate over something a
+                # restart cannot fix.
+                payload["schema"] = "unknown"
+                payload["detail"] = type(exc).__name__
     except Exception as exc:  # noqa: BLE001 - any failure to reach the DB is the answer
         payload["status"] = "degraded"
         payload["database"] = "error"

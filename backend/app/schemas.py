@@ -886,8 +886,11 @@ class UpdateStatus(BaseModel):
     # The two fields that stop "no update found" being rendered as reassurance:
     # check_failed means the request to GitHub did not succeed, and comparable means the
     # running version is semver and so can be compared at all.
-    check_failed: bool = False
-    comparable: bool = True
+    # No defaults that read as reassurance. A caller that forgets to set these -- a new
+    # code path, a partially-populated object in a test -- should produce "I could not
+    # check" and "I cannot compare", not a confident all-clear.
+    check_failed: bool
+    comparable: bool
     release_url: str | None = None
     release_notes: str | None = None
     published_at: str | None = None

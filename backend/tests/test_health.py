@@ -42,7 +42,7 @@ def test_health_is_200_and_honest_when_the_database_is_ahead(
 ) -> None:
     """The regression guard for the gate-thrash failure described in this module's docstring."""
     monkeypatch.setattr(
-        app_main, "read_schema_state", lambda engine: SchemaState(AHEAD, "0099", "0012")
+        app_main, "read_schema_state", lambda engine, cfg=None, conn=None: SchemaState(AHEAD, "0099", "0012")
     )
 
     response = client.get("/api/health")
@@ -64,7 +64,7 @@ def test_every_schema_state_is_servable(
 ) -> None:
     """No schema reading may make this endpoint fail. Only an unreachable database may."""
     monkeypatch.setattr(
-        app_main, "read_schema_state", lambda engine: SchemaState(state, "0001", "0012")
+        app_main, "read_schema_state", lambda engine, cfg=None, conn=None: SchemaState(state, "0001", "0012")
     )
 
     response = client.get("/api/health")
@@ -100,6 +100,85 @@ def test_health_is_503_when_the_database_cannot_be_reached(
     body = response.json()
     assert body["status"] == "degraded"
     assert body["database"] == "error"
+
+
+def test_an_unreadable_migration_history_is_not_reported_as_a_dead_database(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The two failures are different and the fix for each is different.
+
+    `database: error` + 503 is the verdict reserved for "this process cannot reach the
+    database", which a restart or a db container coming back may fix. A database that
+    answers while the image cannot read its own migration history is a different problem
+    and must not be reported as the first one -- it sends whoever is debugging to the
+    wrong half of the system, and fails a deploy gate over something no restart fixes.
+    """
+
+    def unreadable(*_args: object, **_kwargs: object) -> None:
+        raise RuntimeError("Can't locate revision identified by 'nonsense'")
+
+    monkeypatch.setattr(app_main, "read_schema_state", unreadable)
+
+    response = client.get("/api/health")
+
+    assert response.status_code == 200, "the database is fine; only the history is not"
+    body = response.json()
+    assert body["database"] == "ok"
+    assert body["schema"] == "unknown"
+    assert body["detail"] == "RuntimeError"
+
+
+def test_the_schema_state_really_is_read_on_every_request(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Guards the tests above, which pass whatever the endpoint reports if it never asks.
+
+    Every other test here patches read_schema_state, so none of them notices if the
+    endpoint stops calling it. This one counts the calls.
+    """
+    calls: list[int] = []
+    real = app_main.read_schema_state
+
+    def counting(*args: object, **kwargs: object) -> object:
+        calls.append(1)
+        return real(*args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(app_main, "read_schema_state", counting)
+
+    client.get("/api/health")
+    client.get("/api/health")
+
+    assert len(calls) == 2, "the endpoint is not reading the schema state per request"
+
+
+def test_health_holds_one_connection_per_request(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Two at once on every 30-second probe is how a health check exhausts a small pool."""
+    open_now = 0
+    high_water = 0
+    real_connect = app_main.db_engine.connect
+
+    def counting_connect(*args: object, **kwargs: object) -> object:
+        nonlocal open_now, high_water
+        conn = real_connect(*args, **kwargs)  # type: ignore[arg-type]
+        open_now += 1
+        high_water = max(high_water, open_now)
+        original_close = conn.close
+
+        def close() -> None:
+            nonlocal open_now
+            open_now -= 1
+            original_close()
+
+        conn.close = close  # type: ignore[method-assign]
+        return conn
+
+    monkeypatch.setattr(app_main.db_engine, "connect", counting_connect)
+
+    client.get("/api/health")
+
+    assert high_water == 1, f"health held {high_water} connections at once"
 
 
 def test_health_leaks_nothing_about_the_failure(

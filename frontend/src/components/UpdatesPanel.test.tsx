@@ -263,6 +263,39 @@ describe("a check that could not be made", () => {
   });
 });
 
+describe("when the panel itself cannot get an answer", () => {
+  it("says so when the status cannot be read, instead of showing nothing", async () => {
+    vi.spyOn(api, "updateCheck").mockResolvedValue(UP_TO_DATE);
+    vi.spyOn(api, "updateRun").mockRejectedValue(new Error("Failed to fetch"));
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(
+      <QueryClientProvider client={client}>
+        <UpdatesPanel />
+      </QueryClientProvider>,
+    );
+
+    expect(await screen.findByText(/can.t read the updater.s status/i)).toBeInTheDocument();
+    // And it must name the two routes that still work when this one does not.
+    expect(screen.getByText("/_saiva/update-status.json")).toBeInTheDocument();
+    expect(screen.getByText("./scripts/deploy.sh --status")).toBeInTheDocument();
+  });
+
+  it("says so when the update check cannot be loaded at all", async () => {
+    vi.spyOn(api, "updateCheck").mockRejectedValue(new Error("Failed to fetch"));
+    vi.spyOn(api, "updateRun").mockResolvedValue(NO_RUN);
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(
+      <QueryClientProvider client={client}>
+        <UpdatesPanel />
+      </QueryClientProvider>,
+    );
+
+    expect(await screen.findByText(/couldn.t load the update check/i)).toBeInTheDocument();
+    expect(screen.getByText(/not saying there isn.t one/i)).toBeInTheDocument();
+    expect(screen.queryByText(tick)).not.toBeInTheDocument();
+  });
+});
+
 describe("the version line", () => {
   it("shows the build when the version alone cannot identify it", async () => {
     show({ current_version: "edge", current_build: "sha-1a2b3c4", comparable: false });

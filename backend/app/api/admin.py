@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, status
+from pydantic import ValidationError
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -183,10 +184,25 @@ def update_status(_user: models.User = Depends(require_owner)) -> schemas.Update
     That is deliberate: the failure this whole design exists to remove was a UI that
     filled a gap in its knowledge with the word "applied".
     """
+    available = updates.apply_available()
     record = updates.read_update_status()
     if record is None:
-        return schemas.UpdateRun(phase=None, available=updates.apply_available())
-    return schemas.UpdateRun(available=updates.apply_available(), **{
-        key: record.get(key) for key in schemas.UpdateRun.model_fields
+        return schemas.UpdateRun(phase=None, available=available)
+    fields = {
+        key: record.get(key)
+        for key in schemas.UpdateRun.model_fields
         if key in record and key != "available"
-    })
+    }
+    try:
+        return schemas.UpdateRun(available=available, **fields)
+    except ValidationError:
+        # A status file whose field types do not match -- a half-written render, a
+        # hand-edit, a future version of the updater -- must not 500 the settings page.
+        # The page exists to report on a broken update; being broken BY one is the one
+        # thing it cannot do.
+        return schemas.UpdateRun(
+            available=available,
+            phase="unreadable",
+            message="The updater's status file is not in a shape this version understands. "
+            "Run ./scripts/deploy.sh --status on the host to see it.",
+        )

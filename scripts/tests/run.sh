@@ -168,7 +168,15 @@ run_test() {
   local before=$FAIL
   printf '%s\n' "• $name"
   OUT=""; RC=0
-  "test_$name"
+  "test_$name" || true
+  # errexit must be OFF here. A helper that ends with `set -e` switches it on for the
+  # whole suite, and the next assertion that returns 1 kills the run silently -- 33 tests
+  # become 12 and the summary never prints. It has happened twice, so it is checked.
+  case "$-" in
+    *e*) printf '  %sHARNESS BUG%s %s left errexit on; the rest of the suite would be skipped\n' \
+           "$RED" "$OFF" "$name"
+         set +e; FAIL=$((FAIL + 1)); FAILED_NAMES+=("$name (errexit leak)") ;;
+  esac
   if [ "$FAIL" -eq "$before" ]; then
     PASS=$((PASS + 1)); printf '  %sok%s\n' "$GREEN" "$OFF"
   else
@@ -302,27 +310,21 @@ test_destroy_refuses_without_the_word() {
   # `make destroy` is one word from `make down` and removes the household's records AND
   # every pre-migration dump -- the dumps a restore reads FROM. Nothing tested the gate.
   new_sandbox destroy-wrong; local work="$WORK"
-  set +e
-  OUT="$(cd "$work" && printf 'yes\n' | ./scripts/confirm-destroy.sh 2>&1)"; RC=$?
-  set -e
+  OUT="$(cd "$work" && printf 'yes\n' | ./scripts/confirm-destroy.sh 2>&1)" && RC=0 || RC=$?
   [ "$RC" -ne 0 ] || fail_test "typing 'yes' was accepted as the confirmation"
   assert_contains "$OUT" "db_backups" "the prompt must name the backups, which is what people miss"
 }
 
 test_destroy_refuses_when_there_is_no_terminal() {
   new_sandbox destroy-no-tty; local work="$WORK"
-  set +e
-  OUT="$(cd "$work" && ./scripts/confirm-destroy.sh </dev/null 2>&1)"; RC=$?
-  set -e
+  OUT="$(cd "$work" && ./scripts/confirm-destroy.sh </dev/null 2>&1)" && RC=0 || RC=$?
   [ "$RC" -ne 0 ] || fail_test "a non-interactive run destroyed the database without asking"
 }
 
 test_destroy_proceeds_only_on_the_exact_word() {
   new_sandbox destroy-right; local work="$WORK"
-  set +e
-  OUT="$(cd "$work" && SAIVA_CONFIRM_DESTROY=destroy-saiva-data ./scripts/confirm-destroy.sh 2>&1)"
-  RC=$?
-  set -e
+  OUT="$(cd "$work" && SAIVA_CONFIRM_DESTROY=destroy-saiva-data ./scripts/confirm-destroy.sh 2>&1)" \
+    && RC=0 || RC=$?
   assert_eq "0" "$RC" "the documented non-interactive override did not work: $OUT"
 }
 
@@ -330,9 +332,7 @@ test_make_destroy_cannot_be_carried_past_a_refusal() {
   # As two recipe lines, `make -i` / `make -k` carry on past the refused confirmation and
   # run `down -v` anyway. Joined with && there is no line for make to continue past.
   new_sandbox destroy-make; local work="$WORK"
-  set +e
-  OUT="$(cd "$work" && make -i destroy COMPOSE="echo WOULD-RUN:" </dev/null 2>&1)"; RC=$?
-  set -e
+  OUT="$(cd "$work" && make -i destroy COMPOSE="echo WOULD-RUN:" </dev/null 2>&1)" && RC=0 || RC=$?
   assert_not_contains "$OUT" "WOULD-RUN" \
     "make carried on past the refused confirmation and ran the destructive command"
 }
@@ -633,6 +633,120 @@ test_a_second_update_does_not_overwrite_the_running_ones_status() {
   assert_contains "$OUT" "already running" "it must say why it refused"
   assert_eq "running" "$(grep -m1 '^phase' "$FAKE/state/status.kv" | cut -f2)" \
     "the refusal overwrote the in-flight run's status"
+}
+
+# ======================================================================================
+# The host agent and the privilege boundary
+# ======================================================================================
+
+agent_sandbox() { # sets AGENT_HOME, writes a conf and a stub deploy.sh
+  AGENT_HOME="$SANDBOX_ROOT/agent-$1"
+  mkdir -p "$AGENT_HOME/state/requests" "$AGENT_HOME/checkout/scripts" "$AGENT_HOME/etc"
+  git init -q "$AGENT_HOME/checkout"
+  cat > "$AGENT_HOME/etc/agent.conf" <<EOF
+SAIVA_CHECKOUT=$AGENT_HOME/checkout
+SAIVA_STATE_DIR=$AGENT_HOME/state
+EOF
+  cat > "$AGENT_HOME/checkout/scripts/deploy.sh" <<'STUB'
+#!/usr/bin/env bash
+case "$1" in --apply-release) exit "${STUB_RC:-0}" ;; esac
+STUB
+  chmod +x "$AGENT_HOME/checkout/scripts/deploy.sh"
+}
+
+run_agent() {
+  # `&& RC=0 || RC=$?`, never `set +e` / `set -e`. See run_deploy: a helper that ends with
+  # `set -e` switches errexit on for the whole suite from its first call, and the next
+  # assertion that returns 1 kills the run. That bug was fixed in run_deploy and then
+  # written again here, which is why run_test now checks for it after every test.
+  OUT="$(SAIVA_AGENT_CONF="$AGENT_HOME/etc/agent.conf" STUB_RC="${STUB_RC:-0}" \
+    "$REPO/scripts/saiva-update-agent" "$@" 2>&1)" && RC=0 || RC=$?
+}
+
+test_a_press_the_host_cannot_act_on_does_not_vanish() {
+  # The request is consumed BEFORE the work, so a failing release cannot loop -- which
+  # means the status file is the only record that the press happened. deploy.sh has exit
+  # paths that run before it has any state to write to (no Docker daemon, no compose),
+  # and on those the panel would otherwise keep showing the PREVIOUS run as green.
+  agent_sandbox vanish
+  printf '{"phase":"applied","to_version":"v1.0.0"}\n' > "$AGENT_HOME/state/status.json"
+  : > "$AGENT_HOME/state/requests/req-1"
+  STUB_RC=1 run_agent
+
+  [ "$RC" -ne 0 ] || fail_test "the agent reported success for a deploy that failed"
+  local phase; phase="$(sed -n 's/.*"phase": *"\([^"]*\)".*/\1/p' "$AGENT_HOME/state/status.json")"
+  assert_eq "failed" "$phase" "the press vanished: the panel still shows the previous run"
+  assert_contains "$(cat "$AGENT_HOME/state/status.json")" "did not start" \
+    "and it must say what to check"
+}
+
+test_a_deploy_that_reports_for_itself_is_left_alone() {
+  # The guard against over-correcting: when deploy.sh DOES write a status, the agent
+  # must not overwrite it with a generic failure.
+  agent_sandbox reports
+  cat > "$AGENT_HOME/checkout/scripts/deploy.sh" <<'STUB'
+#!/usr/bin/env bash
+# The --apply-release spelling matters: the agent refuses a checkout whose deploy script
+# predates the flag, so a stub without it never reaches the branch under test.
+case "$1" in
+  --apply-release)
+    echo '{"phase":"rolled_back","message":"the real reason"}' > "$SAIVA_STATE_DIR/status.json"
+    exit 1 ;;
+esac
+STUB
+  chmod +x "$AGENT_HOME/checkout/scripts/deploy.sh"
+  : > "$AGENT_HOME/state/requests/req-1"
+  OUT="$(SAIVA_AGENT_CONF="$AGENT_HOME/etc/agent.conf" SAIVA_STATE_DIR="$AGENT_HOME/state" \
+    "$REPO/scripts/saiva-update-agent" 2>&1)" && RC=0 || RC=$?
+  assert_contains "$(cat "$AGENT_HOME/state/status.json")" "the real reason" \
+    "the agent overwrote the deploy's own account of what happened"
+}
+
+test_the_agent_removes_a_planted_link_without_following_it() {
+  # The boundary the first version of this got wrong. Making the request's CONTENTS
+  # inert is not enough if something can plant a symlink where root looks.
+  agent_sandbox symlink
+  printf 'SECRET\n' > "$AGENT_HOME/victim"
+  ln -s "$AGENT_HOME/victim" "$AGENT_HOME/state/requests/evil"
+  mkfifo "$AGENT_HOME/state/requests/pipe" 2>/dev/null || true
+  run_agent
+
+  assert_eq "0" "$RC" "a planted entry must not fail the agent"
+  assert_eq "" "$(ls -A "$AGENT_HOME/state/requests")" "the drop-box must be swept clean"
+  assert_eq "SECRET" "$(cat "$AGENT_HOME/victim")" "the agent followed the link"
+  assert_not_contains "$OUT" "applying" "a link is not a request, so nothing should run"
+}
+
+test_the_agent_notices_when_its_state_directory_disagrees_with_env() {
+  agent_sandbox disagree
+  printf 'SAIVA_STATE_DIR=/somewhere/else\n' > "$AGENT_HOME/checkout/.env"
+  run_agent --self-check
+
+  [ "$RC" -ne 0 ] || fail_test "--self-check passed while the two halves disagree"
+  assert_contains "$OUT" "DISAGREEMENT" "it must name the problem"
+}
+
+test_a_run_that_dies_mid_way_still_leaves_a_terminal_status() {
+  # The sharpest case is the re-exec'd child: the tree has already moved, so an exit
+  # before a terminal status is written leaves `running / checkout` set forever -- the
+  # panel polls, --status says a run is in progress, and the box is on a release nobody
+  # applied. The same net has to cover any unexpected exit.
+  new_sandbox dies-midway; local work="$WORK"
+  add_release "$work"
+  seed_env "$work" SAIVA_SITE_ADDRESS=https://192.168.0.11
+  site_up
+  # Kill the deploy once it reaches the pull step, as a systemd timeout or an OOM would.
+  ( while ! grep -q 'pull:' "$FAKE/state/run.log" 2>/dev/null; do sleep 0.05; done
+    pkill -TERM -f 'deploy.sh --apply-release' 2>/dev/null ) &
+  local killer=$!
+  run_deploy "$work" --apply-release
+  kill "$killer" 2>/dev/null; wait "$killer" 2>/dev/null
+
+  local phase; phase="$(status_field phase)"
+  assert_not_contains "$phase" "running" \
+    "a killed run left phase=$phase, so the panel polls forever for a status nobody wrote"
+  assert_contains "$(status_json)" "without finishing" "and it must say what happened"
+  assert_contains "$(status_json)" "--rollback" "and name the way out"
 }
 
 # ======================================================================================

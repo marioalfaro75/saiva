@@ -44,6 +44,7 @@ default) — see the migration-discipline test, which enforces that for new ones
 from __future__ import annotations
 
 from dataclasses import dataclass
+from functools import lru_cache
 from pathlib import Path
 
 from alembic.config import Config
@@ -62,6 +63,18 @@ UNKNOWN = "unknown"
 # image (/app), so resolve it from this file rather than from the working directory —
 # uvicorn and pytest do not agree on what the working directory is.
 ALEMBIC_INI = Path(__file__).resolve().parent.parent / "alembic.ini"
+
+
+@lru_cache(maxsize=1)
+def _script_directory() -> ScriptDirectory:
+    """The migration history, parsed once.
+
+    /api/health reads the schema state on every request and the image HEALTHCHECK calls
+    it every 30 seconds. Re-parsing twelve migration modules each time is work nobody
+    asked for, and it grows with every release. The history cannot change inside a
+    running process -- the files are baked into the image -- so once is right.
+    """
+    return ScriptDirectory.from_config(alembic_config())
 
 
 def alembic_config() -> Config:
@@ -126,14 +139,24 @@ def _stored_revision(conn: Connection) -> str | None:
         return ",".join(heads) if heads else None
 
 
-def read_schema_state(engine: Engine, cfg: Config | None = None) -> SchemaState:
-    """Compare the database's stored revision with this image's migration history."""
-    cfg = cfg or alembic_config()
-    script = ScriptDirectory.from_config(cfg)
+def read_schema_state(
+    engine: Engine, cfg: Config | None = None, conn: Connection | None = None
+) -> SchemaState:
+    """Compare the database's stored revision with this image's migration history.
+
+    `conn` lets a caller that already has a connection reuse it. /api/health did not, and
+    so held two pooled connections at once on every request -- its own `SELECT 1` and
+    this function's -- which on a small pool is a way to make a health check the thing
+    that exhausts it.
+    """
+    script = _script_directory() if cfg is None else ScriptDirectory.from_config(cfg)
     head = script.get_current_head()
 
-    with engine.connect() as conn:
+    if conn is not None:
         current = _stored_revision(conn)
+    else:
+        with engine.connect() as owned:
+            current = _stored_revision(owned)
 
     if current is None:
         return SchemaState(FRESH, None, head)

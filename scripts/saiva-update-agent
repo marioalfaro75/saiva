@@ -114,7 +114,36 @@ apply_once() {
 Update the checkout by hand once, then press Update now again."
     die "deploy.sh in the checkout predates --apply-release"
   fi
-  exec "$SAIVA_CHECKOUT/scripts/deploy.sh" --apply-release
+
+  # Run it rather than exec it, so there is somebody left to notice if it exits without
+  # saying anything. A press must never vanish: the request is consumed BEFORE the work
+  # (so a failing release cannot become an infinite loop of failing releases), which
+  # means the status file is the only record that the press happened at all. deploy.sh
+  # has exit paths that run before it has any state to write to -- no Docker daemon, no
+  # compose binary -- and on those the panel would otherwise keep showing the PREVIOUS
+  # run's green "applied" while the press disappeared.
+  local before after rc=0
+  before="$(status_fingerprint)"
+  set +e
+  "$SAIVA_CHECKOUT/scripts/deploy.sh" --apply-release
+  rc=$?
+  set -e
+  after="$(status_fingerprint)"
+  if [ "$before" = "$after" ]; then
+    write_failure_status "The update did not start: the deploy script exited with status \
+$rc before it could report anything. Run ./scripts/deploy.sh --apply-release on the host \
+to see why; the usual causes are the Docker daemon not running, or the checkout having \
+uncommitted changes."
+    note "deploy.sh exited $rc without writing a status; recorded a failure"
+  fi
+  return "$rc"
+}
+
+status_fingerprint() {
+  # Enough to tell "the deploy wrote something" from "it did not". Deliberately not a
+  # content hash of the whole file: a run that fails and a run that succeeds both change
+  # it, which is all this needs to know.
+  stat -c '%Y %s' "$STATE/status.json" 2>/dev/null || printf 'absent'
 }
 
 watch_loop() {
@@ -149,6 +178,18 @@ self_check() {
       "$STATE" "${owner:-?}" "${mode:-?}"
     printf 'A container that can write here can make root open files of its choosing.\n'
     printf 'Fix it by re-running: sudo %s/scripts/install-updater.sh\n' "${SAIVA_CHECKOUT:-.}"
+    problems=1
+  fi
+
+  # The agent and the deploy must agree on where state lives, or the agent's own failure
+  # reports land somewhere the containers do not mount. The deploy reads .env, because
+  # that is what docker-compose interpolates the bind mounts from.
+  local from_env=""
+  [ -r "${SAIVA_CHECKOUT:-}/.env" ] &&
+    from_env="$(sed -n 's/^SAIVA_STATE_DIR=//p' "$SAIVA_CHECKOUT/.env" | tail -n 1 | tr -d '"'"'"'"' )"
+  if [ -n "$from_env" ] && [ "$from_env" != "$STATE" ]; then
+    printf '\nDISAGREEMENT: this agent uses %s but .env says %s.\n' "$STATE" "$from_env"
+    printf 'The deploy follows .env, so set SAIVA_STATE_DIR in %s to match.\n' "$CONF"
     problems=1
   fi
 

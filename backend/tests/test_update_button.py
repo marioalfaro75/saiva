@@ -315,6 +315,24 @@ def test_a_malformed_status_file_does_not_break_the_page(
     assert response.json()["phase"] == "unreadable"
 
 
+def test_a_status_file_in_an_unexpected_shape_does_not_break_the_page(
+    auth_client: TestClient, update_dir: Path
+) -> None:
+    """The settings page exists to report on a broken update. Being broken BY one is the
+    one thing it cannot do, so a field of the wrong type is reported rather than raised."""
+    (update_dir / "status.json").write_text(
+        json.dumps({"phase": "applied", "log_tail": "not a list, a string"}),
+        encoding="utf-8",
+    )
+
+    response = auth_client.get("/api/admin/update-status")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["phase"] == "unreadable"
+    assert "deploy.sh --status" in (body["message"] or "")
+
+
 def test_the_terminal_phase_that_cannot_claim_a_clean_rollback(
     auth_client: TestClient, update_dir: Path
 ) -> None:

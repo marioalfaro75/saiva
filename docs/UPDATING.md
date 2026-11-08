@@ -27,6 +27,13 @@ gate      ask https://<your address>/ and /api/health, from the host, whether
           the site actually answers
 ```
 
+The gate waits three minutes (`SAIVA_GATE_TRIES`, in 2-second steps). A failing update
+therefore takes up to **six** — three before it gives up, and three more re-gating after
+the rollback — and holds the update lock for the whole of it, so a second press is
+refused with "another update is already running" until it finishes. Raise the budget on a
+slow box; it has to cover a cold start, which includes `pg_dump` of the household's
+database and any migrations.
+
 If the gate fails — or the pull fails, or the stack does not come up — the box is put
 back: your `.env`, the previous checkout, and the exact image digests that were running,
 pinned so the rollback works offline and ignores where `latest` has moved to. Then it

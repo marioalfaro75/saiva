@@ -302,6 +302,25 @@ export function UpdatesPanel() {
         </div>
       )}
 
+      {run.isError && !superseded && (
+        <div className="notice notice-warn">
+          <strong>Can&rsquo;t read the updater&rsquo;s status</strong>
+          <div>
+            {(run.error as Error).message}. That is normal for a few seconds while the app
+            restarts during an update. If it persists, the status is also at{" "}
+            <code>/_saiva/update-status.json</code>, served by the proxy rather than this
+            app, and <code>./scripts/deploy.sh --status</code> on the host always works.
+          </div>
+        </div>
+      )}
+
+      {check.isError && (
+        <p className="muted">
+          Couldn&rsquo;t load the update check: {(check.error as Error).message}. This page
+          cannot tell you whether an update exists — it is not saying there isn&rsquo;t one.
+        </p>
+      )}
+
       {data && !data.check_enabled && (
         <p className="muted">Update checks are turned off on this deployment.</p>
       )}

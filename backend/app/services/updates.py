@@ -139,7 +139,11 @@ TERMINAL_PHASES = frozenset(
         "rollback_failed",
     }
 )
-ACTIVE_PHASES = frozenset({"requested", "running"})
+# Only what scripts/lib/state.sh actually writes. `requested` was in here and nothing
+# ever wrote it, which made the set look like it covered the window between the button
+# being pressed and the deploy starting. It does not -- that window is covered by a
+# pending entry in the drop-box, which is why _pending_request() is checked first.
+ACTIVE_PHASES = frozenset({"running"})
 
 
 def update_dir() -> Path | None:
