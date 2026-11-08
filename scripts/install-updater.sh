@@ -13,7 +13,8 @@
 # What it installs:
 #   /usr/local/lib/saiva/saiva-update-agent   the agent, copied out of the checkout
 #   /etc/saiva/agent.conf                     where the checkout and the state live
-#   /var/lib/saiva/update                     the request + status directory
+#   /var/lib/saiva/update                     root-owned; status, logs, rollback records
+#   /var/lib/saiva/update/requests            the one directory the app may write into
 #   systemd units (if systemd is running)     a .path that watches for a request
 set -euo pipefail
 
@@ -77,14 +78,33 @@ EOF
 chmod 0644 "$CONF"
 echo "  → $CONF"
 
-install -d "$STATE"
-install -d -m 0755 "$STATE/records"
-# Owned by the api container's uid, mode 0775: that container needs to write one file
-# here, and nothing else on the box needs to write anything. Caddy reads it through a
-# read-only mount and the agent runs as root.
-chown "$API_UID" "$STATE"
-chmod 0775 "$STATE"
-echo "  → $STATE (writable by the api container, uid $API_UID)"
+# The layout, and why each mode is what it is. The first version of this handed the
+# directory itself to the api container, and an adversarial review showed what that
+# allows: owning a directory means being able to unlink and rename root-owned entries
+# inside it, so the container could point root's `deploy.lock` and `run.log` at any file
+# on the host (both are opened by shell redirections, which follow symlinks), point
+# `run.log` at a file it wanted to READ back through the status API, and rename
+# `records/` aside so a rollback restored its .env and pinned its images.
+#
+# So the container gets a drop-box, not the directory:
+#
+#   $STATE            root:root 0755   everything root writes; the container reads only
+#   $STATE/records    root:root 0700   holds a copy of .env -- nobody else reads it
+#   $STATE/requests   root:<api> 0730  create and delete only; 0730 means it cannot even
+#                                      list what is in there
+#
+# And root never opens anything inside requests/: the agent asks `find -type f`, which
+# does not follow symlinks, and unlinks what it finds.
+install -d -o root -g root -m 0755 "$STATE"
+install -d -o root -g root -m 0700 "$STATE/records"
+install -d -o root -g "$API_UID" -m 0730 "$STATE/requests"
+# Re-assert on an upgrade from the old layout, where install -d leaves an existing
+# directory's mode alone.
+chown root:root "$STATE" && chmod 0755 "$STATE"
+chown root:root "$STATE/records" && chmod 0700 "$STATE/records"
+chown "root:$API_UID" "$STATE/requests" && chmod 0730 "$STATE/requests"
+echo "  → $STATE (root-owned)"
+echo "  → $STATE/requests (the api container, uid $API_UID, may drop a request here)"
 
 if [ -d /run/systemd/system ]; then
   cat > "$UNIT_DIR/saiva-update.service" <<EOF
@@ -108,7 +128,11 @@ Description=Watch for an in-app Saiva update request
 Documentation=file://$ROOT/docs/UPDATING.md
 
 [Path]
-PathExists=$STATE/request
+# A glob over the drop-box rather than one fixed filename: the api writes a uniquely
+# named request so two presses cannot collide on the same path, and the agent removes
+# everything it finds there, so the unit cannot be left re-triggering on an entry it
+# refused to act on.
+PathExistsGlob=$STATE/requests/*
 Unit=saiva-update.service
 
 [Install]

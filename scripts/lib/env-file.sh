@@ -54,11 +54,26 @@ _env_target() { # the file writes go to: the staging copy when staging, else .en
 
 # --- reading ----------------------------------------------------------------------
 
-env_get() { # KEY [FILE] -> value, or empty if absent
-  local key="$1" file="${2:-$(_env_target)}"
+env_get() { # KEY [FILE] -> value as COMPOSE would read it, or empty if absent
+  local key="$1" file="${2:-$(_env_target)}" raw
   [ -f "$file" ] || return 0
   # The last assignment wins, which is what compose does with a duplicated key.
-  sed -n "s/^${key}=//p" "$file" | tail -n 1
+  raw="$(sed -n "s/^${key}=//p" "$file" | tail -n 1)"
+  # And then read it the way compose does, because a reader that disagrees with the thing
+  # actually interpreting the file is how two halves of this script end up believing
+  # different values. Concretely: SAIVA_STATE_DIR="/var/lib/saiva/update" made state_dir
+  # return a path with quotes in it, so the deploy wrote its status somewhere nothing
+  # mounts; and a quoted SAIVA_VERSION defeated the rolling-channel test in the rollback.
+  case "$raw" in
+    ' '*'#'*|$'\t'*'#'*) : ;;                       # leading whitespace: leave alone
+    *[[:space:]]'#'*) raw="${raw%%[[:space:]]#*}" ;; # inline comment, as compose reads it
+  esac
+  raw="${raw%"${raw##*[![:space:]]}"}"              # trailing whitespace
+  case "$raw" in
+    \"*\") raw="${raw#\"}"; raw="${raw%\"}" ;;
+    \'*\') raw="${raw#\'}"; raw="${raw%\'}" ;;
+  esac
+  printf '%s' "$raw"
 }
 
 env_has() { # KEY [FILE] -> 0 if the key is present at all (even empty)
@@ -81,7 +96,17 @@ env_set() { # KEY VALUE -- update in place, or append
       END { if (!done) print k "=" v }
     ' "$file" > "$tmp"
   else
-    [ -f "$file" ] && cat "$file" > "$tmp" || : > "$tmp"
+    : > "$tmp"
+    if [ -f "$file" ]; then
+      cat "$file" > "$tmp"
+      # A .env whose last line is not newline-terminated -- which is what every editor
+      # that "removes the trailing newline" leaves, and what `printf 'K=v' > .env`
+      # leaves -- used to swallow the new key onto the end of the previous one. One
+      # existing value silently corrupted, the new key not added at all, and the deploy
+      # printing "→ .env gained 1 setting(s)" about something it had not done.
+      [ -s "$tmp" ] && [ "$(tail -c 1 "$tmp" | od -An -c | tr -d ' ')" != "\\n" ] \
+        && printf '\n' >> "$tmp"
+    fi
     printf '%s=%s\n' "$key" "$value" >> "$tmp"
   fi
   mv -f "$tmp" "$file"

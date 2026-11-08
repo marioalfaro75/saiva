@@ -3,6 +3,11 @@
 
 # The deploy's own state when it cannot use /var/lib (developer checkouts only).
 .saiva-state/
+# The .env transaction's working files. Normally renamed away within milliseconds; a
+# process killed mid-write leaves one, and it is a full copy of .env -- SECRET_KEY,
+# POSTGRES_PASSWORD and the rest -- sitting in the working tree.
+.env.staging.*
+.env.w.*
 *.env.local
 
 # Python

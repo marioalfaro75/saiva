@@ -61,7 +61,32 @@ state_dir() {
   printf '%s' "$ROOT/.saiva-state"
 }
 
-state_init() { mkdir -p "$(state_dir)" "$(state_dir)/records"; }
+# The layout, and why each mode is what it is. An adversarial review proved the first
+# version of this wrong end to end: the api container owned $STATE, and owning a
+# directory means being able to unlink and rename root-owned entries inside it. From
+# there the container could point `deploy.lock` and `run.log` at any host file (both are
+# opened by shell redirections, which follow symlinks, so root truncated /etc/shadow and
+# appended its log over a crontab), could point `run.log` at a file it wanted to READ
+# (status_flush puts its last 40 lines into status.json, which the api serves), and could
+# rename `records/` aside and substitute its own -- so a rollback restored an attacker's
+# .env and pinned every service to an attacker-chosen image.
+#
+#   $STATE            root:root 0755   everything root writes; the container only reads
+#   $STATE/records    root:root 0700   holds a copy of .env, so not readable by anyone else
+#   $STATE/requests   root:<api> 0730  the ONLY thing the container may write into, and
+#                                      0730 so it cannot even list what is in there
+#
+# The container gets $STATE read-only and $STATE/requests read-write, as two mounts. Root
+# never opens anything inside requests/: it looks for a regular file with `find -type f`,
+# which does not follow symlinks, and unlinks what it finds. That is what makes "the most
+# a compromised api container can ask for is an update" true rather than merely intended.
+requests_dir() { printf '%s/requests' "$(state_dir)"; }
+
+state_init() {
+  local dir; dir="$(state_dir)"
+  mkdir -p "$dir" "$dir/records" "$(requests_dir)"
+  chmod 0700 "$dir/records" 2>/dev/null || true
+}
 
 # --- the status record ------------------------------------------------------------
 #
@@ -90,9 +115,23 @@ status_get() { # KEY -> value
 }
 
 json_escape() { # stdin -> a JSON string body (no surrounding quotes)
+  # The named escapes, and then EVERY remaining C0 control byte as \u00XX. Leaving them
+  # raw produces invalid JSON, and because both status files come out of the same
+  # renderer, one stray byte in any value breaks both at once -- the private one the API
+  # reads and the public one Caddy serves, which is the one that is supposed to still
+  # answer when everything else does not. A compose error message carrying an ANSI escape
+  # is enough to do it.
   sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' -e 's/\r//g' \
       -e 's/\x08/\\b/g' -e 's/\x0c/\\f/g' -e 's/\t/\\t/g' \
-      | awk 'BEGIN{ORS=""} {if (NR>1) print "\\n"; print}'
+      | LC_ALL=C awk '
+          BEGIN { ORS = ""; for (i = 0; i < 32; i++) ctl[sprintf("%c", i)] = sprintf("\\u%04x", i) }
+          {
+            if (NR > 1) print "\\n"
+            line = ""
+            n = length($0)
+            for (j = 1; j <= n; j++) { c = substr($0, j, 1); line = line (c in ctl ? ctl[c] : c) }
+            print line
+          }'
 }
 
 _json_kv() { # KEY VALUE -> "key": "value" or "key": null
@@ -149,8 +188,10 @@ PY
   _render_status "${SAIVA_STATUS_PUBLIC_FIELDS[@]}" > "$dir/.status-public.json.$$"
   mv -f "$dir/.status-public.json.$$" "$dir/status-public.json"
   # World-readable: Caddy serves the public one, and the api container reads the private
-  # one through a read-only mount. Neither contains a secret.
+  # one through a read-only mount. Neither contains a secret -- the private one carries
+  # the deploy's log tail, which the API only ever returns to an authenticated owner.
   chmod 0644 "$dir/status.json" "$dir/status-public.json" 2>/dev/null || true
+  chmod 0640 "$dir/run.log" 2>/dev/null || true
 }
 
 status_step() { # STEP [MESSAGE] -- advance and publish in one call
@@ -182,7 +223,15 @@ record_dir() { printf '%s/records/%s' "$(state_dir)" "$1"; }
 record_capture() { # RUN_ID -- write down what is running right now
   local run="$1" dir; dir="$(record_dir "$run")"
   mkdir -p "$dir"
-  [ -f "$(env_path)" ] && cp -p "$(env_path)" "$dir/env"
+  chmod 0700 "$dir" 2>/dev/null || true
+  # A verbatim copy of .env: SECRET_KEY, POSTGRES_PASSWORD, SMTP_PASSWORD and the
+  # notifications token. 0600 under a 0700 records/ -- the first version left it 0644
+  # inside a directory both containers had mounted, which handed the api process two
+  # secrets compose deliberately does not give it.
+  if [ -f "$(env_path)" ]; then
+    ( umask 077; cp "$(env_path)" "$dir/env" )
+    chmod 0600 "$dir/env" 2>/dev/null || true
+  fi
   git -C "$ROOT" rev-parse HEAD > "$dir/revision" 2>/dev/null || : > "$dir/revision"
   git -C "$ROOT" describe --tags --exact-match HEAD > "$dir/tag" 2>/dev/null || : > "$dir/tag"
   local svc

@@ -66,11 +66,21 @@ services:
       - "8000"
     volumes:
       - db_backups:/backups
-      # The update channel. Read-write because the button writes one file into it:
-      # `request`, which is empty of anything the updater acts on. The updater resolves
-      # the release itself, so a compromised api container cannot choose what gets
-      # deployed -- only that an update happens.
-      - ${SAIVA_STATE_DIR:-/var/lib/saiva/update}:/run/saiva-update
+      # The update channel, as TWO mounts, and that split is the security boundary.
+      #
+      # Read-only on the directory, read-write on the drop-box inside it. Giving the
+      # container the whole directory was reviewed and broken end to end: owning a
+      # directory means being able to unlink and rename root-owned entries inside it, so
+      # the container could point root's deploy.lock and run.log at any file on the host
+      # (shell redirections follow symlinks), point run.log at a file it wanted read back
+      # through the status API, and substitute its own records/ so a rollback restored
+      # its .env and pinned its images.
+      #
+      # Now it reads status.json and writes one uniquely-named file into requests/. Root
+      # never opens anything in there -- the agent asks `find -type f`, which does not
+      # follow symlinks, and unlinks what it finds.
+      - ${SAIVA_STATE_DIR:-/var/lib/saiva/update}:/run/saiva-update:ro
+      - ${SAIVA_STATE_DIR:-/var/lib/saiva/update}/requests:/run/saiva-update/requests
 
   web:
     image: ${SAIVA_WEB_IMAGE:-${SAIVA_REGISTRY:-ghcr.io/marioalfaro75}/saiva-web:${SAIVA_VERSION:-latest}}

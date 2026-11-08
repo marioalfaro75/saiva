@@ -2,107 +2,177 @@
 # The host side of the in-app "Update now" button.
 #
 # This is the only piece of Saiva that runs outside a container, and it is deliberately
-# the smallest thing that can do the job. It does four things: notice that a request
-# file exists, delete it, and run `scripts/deploy.sh --apply-release` in the checkout
-# with no arguments. That is the whole program.
+# the smallest thing that can do the job: notice that a request exists, delete it, and
+# run `scripts/deploy.sh --apply-release` in the checkout with no arguments.
 #
-# WHY IT TAKES NO PARAMETERS. The api container is reachable from the network. It can
-# write one file into one directory, and nothing in that file selects what gets
-# deployed: the target release is resolved here, from the tags on `origin`. So the most
-# a compromised api container can ask for is the update the button was going to do
-# anyway. The alternative -- letting the request name a ref, a branch or a command --
-# turns "a container can write a file" into "a container can make root run arbitrary
-# code", which is not a trade worth making for a convenience feature.
+# WHY IT TAKES NO PARAMETERS, AND WHY THAT IS NOT ENOUGH ON ITS OWN. The api container is
+# reachable from the network. The first version of this made the request file's CONTENTS
+# inert and stopped there, and an adversarial review showed that was only half the
+# argument: the container owned the directory the request sat in, and owning a directory
+# means being able to unlink and rename root-owned entries inside it. From there it could
+# point root's `deploy.lock` and `run.log` at any file on the host (shell redirections
+# follow symlinks), could point `run.log` at a file it wanted read back through the
+# status API, and could substitute its own `records/` so a rollback restored an
+# attacker's .env and pinned every service to an attacker-chosen image.
+#
+# So the boundary is now a drop-box rather than a shared directory:
+#
+#   $STATE            root:root 0755   everything root writes; the container reads only
+#   $STATE/requests   root:<api> 0730  the only thing it may write, and 0730 so it
+#                                      cannot list what is in there either
+#
+# and root never OPENS anything in requests/. It asks `find -type f` (which does not
+# follow symlinks) whether a regular file is there, and unlinks whatever it finds. A
+# symlink, a FIFO or a directory planted there is removed without being touched. The
+# target release is resolved here, from the tags on `origin`, so the most a compromised
+# api container can ask for is the update the button was going to do anyway.
 #
 # WHY IT IS A COPY AND NOT A SYMLINK INTO THE CHECKOUT. Whatever applies updates cannot
 # apply its own updates the same way. If this file lived in the checkout, every release
-# would be able to change what runs as root on the box, and `git checkout` would be a
-# privilege escalation. So scripts/install-updater.sh COPIES it to /usr/local/lib/saiva
-# and a human re-runs that installer when it changes. The cost is that it can go stale,
-# and the mitigation is `--self-check`, which says so out loud rather than leaving you
-# to find out.
+# could change what runs as root. scripts/install-updater.sh therefore COPIES it, and a
+# human re-runs that installer when it changes. The cost is that it can go stale, and the
+# mitigation is `--self-check`, which says so rather than leaving you to find out.
 #
 #   saiva-update-agent             apply an update if one has been requested, then exit
 #   saiva-update-agent --watch     the same, in a poll loop (for hosts without systemd)
 #   saiva-update-agent --self-check  report config, paths, and whether this copy is stale
 set -euo pipefail
 
-AGENT_VERSION=1
+AGENT_VERSION=2
 CONF="${SAIVA_AGENT_CONF:-/etc/saiva/agent.conf}"
 
 die() { printf 'saiva-update-agent: %s\n' "$*" >&2; exit 1; }
+note() { printf 'saiva-update-agent: %s\n' "$*"; }
 
 load_conf() {
   [ -r "$CONF" ] || die "$CONF is missing or unreadable. Run scripts/install-updater.sh."
-  # The config file is root-owned and sets two values. It is not a place to put logic;
-  # anything sourced here runs as root.
+  # Root-owned, two values, no logic: anything sourced here runs as root.
   # shellcheck disable=SC1090
   . "$CONF"
   [ -n "${SAIVA_CHECKOUT:-}" ] || die "SAIVA_CHECKOUT is not set in $CONF"
   [ -d "$SAIVA_CHECKOUT/.git" ] || die "SAIVA_CHECKOUT ($SAIVA_CHECKOUT) is not a git checkout"
   [ -x "$SAIVA_CHECKOUT/scripts/deploy.sh" ] || die "no deploy script at $SAIVA_CHECKOUT/scripts/deploy.sh"
+  # Deliberately NOT exported, and deliberately not passed to deploy.sh. scripts/lib/
+  # state.sh resolves the state directory from .env, which is what docker-compose
+  # interpolates the bind mounts from; letting this file override it is how the button
+  # and `make update` would come to write their status to two different places, which is
+  # the failure state.sh's own header warns about.
   STATE="${SAIVA_STATE_DIR:-/var/lib/saiva/update}"
-  REQUEST="$STATE/request"
+  REQUESTS="$STATE/requests"
+}
+
+# Everything in requests/ is removed; only a regular file counts as a request. `find -P`
+# (the default) does not follow symlinks, so a planted link, FIFO or directory is deleted
+# without ever being opened -- and without spinning the systemd path unit, which is what
+# leaving a non-regular entry behind used to do until the start limiter killed the button.
+consume_requests() { # -> 0 if a real request was there
+  [ -d "$REQUESTS" ] || return 1
+  local found=1
+  if find "$REQUESTS" -mindepth 1 -maxdepth 1 -type f -print -quit 2>/dev/null | grep -q .; then
+    found=0
+  fi
+  find "$REQUESTS" -mindepth 1 -maxdepth 1 -exec rm -rf -- {} + 2>/dev/null || true
+  return "$found"
+}
+
+# A press must never vanish. If the agent cannot get as far as running the deploy, it
+# writes a terminal status itself, because the only thing the owner can see is that file:
+# a request consumed with nothing written leaves the panel showing the PREVIOUS run's
+# green "applied" while the press they just made has disappeared.
+write_failure_status() { # MESSAGE
+  local now; now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  local tmp="$STATE/.status.json.$$"
+  mkdir -p "$STATE" 2>/dev/null || return 0
+  cat > "$tmp" <<EOF
+{
+  "schema_version": 1,
+  "run_id": "agent-$now",
+  "phase": "failed",
+  "step": "agent",
+  "trigger": "button",
+  "started_at": "$now",
+  "finished_at": "$now",
+  "message": "$1",
+  "exit_code": "1"
+}
+EOF
+  chmod 0644 "$tmp" 2>/dev/null || true
+  mv -f "$tmp" "$STATE/status.json" 2>/dev/null || rm -f "$tmp"
+  cp -f "$STATE/status.json" "$STATE/status-public.json" 2>/dev/null || true
 }
 
 apply_once() {
-  [ -f "$REQUEST" ] || return 0
+  consume_requests || return 0
+  note "request consumed; applying the newest release"
 
-  # Consume the request BEFORE doing any work. If the update fails, or this process is
-  # killed, the request must not still be sitting there for the path unit to re-trigger
-  # on: that is how a failing release becomes an infinite loop of failing releases.
-  local requested_by
-  requested_by="$(head -c 200 "$REQUEST" 2>/dev/null | tr -d '\000-\037' || true)"
-  rm -f "$REQUEST"
-  printf 'saiva-update-agent: request consumed (%s)\n' "${requested_by:-no detail}"
-
-  # `requested_by` is recorded in the log and used for NOTHING else. It is written by a
-  # network-facing container; it is evidence, not instruction.
-  cd "$SAIVA_CHECKOUT"
-  exec env \
-    SAIVA_UPDATE_TRIGGER=button \
-    SAIVA_STATE_DIR="$STATE" \
-    "$SAIVA_CHECKOUT/scripts/deploy.sh" --apply-release
+  cd "$SAIVA_CHECKOUT" || {
+    write_failure_status "The update agent could not enter $SAIVA_CHECKOUT."
+    die "could not cd to $SAIVA_CHECKOUT"
+  }
+  if ! grep -q -- '--apply-release' "$SAIVA_CHECKOUT/scripts/deploy.sh" 2>/dev/null; then
+    write_failure_status "The deploy script in $SAIVA_CHECKOUT does not support --apply-release. \
+Update the checkout by hand once, then press Update now again."
+    die "deploy.sh in the checkout predates --apply-release"
+  fi
+  exec "$SAIVA_CHECKOUT/scripts/deploy.sh" --apply-release
 }
 
 watch_loop() {
   local interval="${SAIVA_AGENT_POLL_SECONDS:-5}"
-  printf 'saiva-update-agent: watching %s every %ss\n' "$REQUEST" "$interval"
+  note "watching $REQUESTS every ${interval}s"
   while true; do
-    if [ -f "$REQUEST" ]; then
-      # A subshell, because apply_once execs: in --watch mode the loop has to survive
-      # the update it just ran.
-      ( apply_once ) || printf 'saiva-update-agent: update exited non-zero\n' >&2
-    fi
+    # A subshell, because apply_once execs: in --watch mode the loop has to survive the
+    # update it just ran.
+    ( apply_once ) || note "update exited non-zero"
     sleep "$interval"
   done
 }
 
 self_check() {
+  local problems=0
   printf 'agent version   : %s\n' "$AGENT_VERSION"
   printf 'config          : %s\n' "$CONF"
   printf 'checkout        : %s\n' "${SAIVA_CHECKOUT:-<unset>}"
-  printf 'state directory : %s\n' "$STATE"
-  printf 'request file    : %s%s\n' "$REQUEST" "$([ -f "$REQUEST" ] && printf ' (one is pending)' || true)"
-  printf 'writable by     : %s\n' "$(stat -c '%U:%G %a' "$STATE" 2>/dev/null || echo '<missing>')"
+  printf 'state directory : %s  [%s]\n' "$STATE" \
+    "$(stat -c '%U:%G %a' "$STATE" 2>/dev/null || echo missing)"
+  printf 'requests        : %s  [%s]\n' "$REQUESTS" \
+    "$(stat -c '%U:%G %a' "$REQUESTS" 2>/dev/null || echo missing)"
+  printf 'pending request : %s\n' \
+    "$(find "$REQUESTS" -mindepth 1 -maxdepth 1 -type f 2>/dev/null | wc -l)"
 
-  local in_tree="$SAIVA_CHECKOUT/scripts/saiva-update-agent"
-  if [ -r "$in_tree" ] && ! cmp -s "$in_tree" "$0"; then
+  # The state directory must NOT be owned or writable by anyone but root: see the header.
+  local mode owner
+  mode="$(stat -c '%a' "$STATE" 2>/dev/null || echo '')"
+  owner="$(stat -c '%U' "$STATE" 2>/dev/null || echo '')"
+  if [ "$owner" != "root" ] || [ "${mode:-777}" != "755" ]; then
+    printf '\nWRONG PERMISSIONS: %s should be root-owned and 0755, not %s %s.\n' \
+      "$STATE" "${owner:-?}" "${mode:-?}"
+    printf 'A container that can write here can make root open files of its choosing.\n'
+    printf 'Fix it by re-running: sudo %s/scripts/install-updater.sh\n' "${SAIVA_CHECKOUT:-.}"
+    problems=1
+  fi
+
+  local in_tree="${SAIVA_CHECKOUT:-}/scripts/saiva-update-agent"
+  if [ ! -r "$in_tree" ]; then
+    printf '\nCANNOT COMPARE: no %s to compare this copy against.\n' "$in_tree"
+    problems=1
+  elif ! cmp -s "$in_tree" "$0"; then
     printf '\nSTALE: the checkout ships a different version of this agent.\n'
     printf 'This copy runs as root and is not updated by a release, on purpose.\n'
     printf 'Read the difference, then re-install it:\n'
     printf '  diff %s %s\n' "$0" "$in_tree"
     printf '  sudo %s/scripts/install-updater.sh\n' "$SAIVA_CHECKOUT"
-    return 1
+    problems=1
   fi
-  printf '\nup to date with the checkout\n'
-  return 0
+
+  [ "$problems" = "0" ] && printf '\nup to date with the checkout, permissions correct\n'
+  return "$problems"
 }
 
 case "${1:-once}" in
   once)         load_conf; apply_once ;;
   --watch)      load_conf; watch_loop ;;
   --self-check) load_conf; self_check ;;
-  -h|--help)    sed -n '2,30p' "$0" | sed 's/^# \{0,1\}//' ;;
+  -h|--help)    sed -n '2,37p' "$0" | sed 's/^# \{0,1\}//' ;;
   *)            die "unknown argument: $1" ;;
 esac

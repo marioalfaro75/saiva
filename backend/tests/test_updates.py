@@ -87,12 +87,14 @@ def test_update_asks_the_host_when_the_updater_is_installed(
     happened. The full set of behaviours around the new endpoint is in
     tests/test_update_button.py; this is the one that used to live here.
     """
+    # The layout the installer builds: the container may write only into requests/.
     directory = tmp_path / "saiva-update"
-    directory.mkdir()
+    (directory / "requests").mkdir(parents=True)
     monkeypatch.setenv("SAIVA_UPDATE_DIR", str(directory))
 
     resp = auth_client.post("/api/admin/update")
 
     assert resp.status_code == 202
     assert resp.json()["status"] == "requested"
-    assert (directory / "request").is_file(), "the host was never actually asked"
+    dropped = list((directory / "requests").iterdir())
+    assert len(dropped) == 1 and dropped[0].is_file(), "the host was never actually asked"

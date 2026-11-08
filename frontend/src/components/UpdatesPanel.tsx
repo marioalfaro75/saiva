@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 
 import { api } from "../api/client";
 import type { UpdateRun, UpdateStatus } from "../api/types";
@@ -29,11 +29,37 @@ import { SPA_VERSION } from "../version";
  */
 
 const POLL_WHILE_RUNNING_MS = 2000;
+// How long to wait for the host to pick a request up before saying it has not. The agent
+// is a systemd path unit; if it fires at all it fires within a second. Two minutes is
+// generous and finite -- an unbounded wait is a spinner that never resolves, which is its
+// own way of telling the owner nothing.
+const HOST_PICKUP_TIMEOUT_MS = 120_000;
+// And how long a run may claim to be running. Matches STALE_RUN_AFTER in
+// backend/app/services/updates.py: systemd's own limit for the update unit is 30 minutes,
+// so a `running` older than that is a status file nobody came back to -- a host killed
+// mid-update, a timeout, a power cut. Saying "Updating…" forever is the same shape of
+// lie as "Update applied."
+const STALE_RUNNING_MS = 35 * 60_000;
 
 type Tone = "good" | "warn" | "bad" | "info";
 
-function phaseSummary(run: UpdateRun): { tone: Tone; title: string; detail: string } | null {
+function phaseSummary(
+  run: UpdateRun,
+  stale: boolean,
+  age: number | null,
+): { tone: Tone; title: string; detail: string } | null {
   if (!run.phase) return null;
+  if (run.phase === "running" && stale) {
+    return {
+      tone: "bad",
+      title: "An update started and never finished",
+      detail:
+        `It began ${Math.round((age ?? STALE_RUNNING_MS) / 60_000)} minutes ago and the updater has not ` +
+        `written anything since, so it is not running any more — the host was probably ` +
+        `restarted or the update timed out. Check \`./scripts/deploy.sh --status\` and ` +
+        `\`journalctl -u saiva-update.service\` on the box before pressing this again.`,
+    };
+  }
   const from = run.from_version ?? "the previous version";
   const to = run.to_version ?? "the new version";
   switch (run.phase) {
@@ -122,7 +148,20 @@ function versionLine(data: UpdateStatus | undefined): string {
 
 export function UpdatesPanel() {
   const qc = useQueryClient();
-  const [requested, setRequested] = useState(false);
+  // The run id that was showing when "Update now" was pressed. Until a DIFFERENT run
+  // appears, the previous run's outcome is not news about the press that just happened.
+  //
+  // Without this, pressing Update now on a box that had updated before rendered the old
+  // run immediately: a green "Updated to v1.0.0 — Update applied and the site answered"
+  // with a "Reload to use it" button, while the update to v1.1.0 had not started. That
+  // is the bug this whole rewrite exists to kill, re-created one level up.
+  const [supersededRunId, setSupersededRunId] = useState<string | null | undefined>(undefined);
+  const [pressedAt, setPressedAt] = useState<number | null>(null);
+  // Two "enough time has passed" booleans, decided on timers rather than by reading the
+  // clock while rendering. Both are bounds on a wait that would otherwise be infinite,
+  // and an unresolvable spinner tells the owner as little as a false success does.
+  const [gaveUpWaiting, setGaveUpWaiting] = useState(false);
+  const [staleAfterMs, setStaleAfterMs] = useState<number | null>(null);
 
   const check = useQuery({ queryKey: ["update-check"], queryFn: () => api.updateCheck() });
   const run = useQuery({
@@ -132,12 +171,46 @@ export function UpdatesPanel() {
     // it; an error keeps it going, because an api container being recreated mid-update
     // is exactly when the next poll matters most.
     refetchInterval: (query) => {
-      const phase = query.state.data?.phase;
-      if (requested && !phase) return POLL_WHILE_RUNNING_MS;
-      return phase === "running" ? POLL_WHILE_RUNNING_MS : false;
+      const data = query.state.data;
+      // Keep polling while a press is outstanding, while the run we are watching is the
+      // one that was already there, or while something is actually running.
+      if (supersededRunId !== undefined && data?.run_id === supersededRunId) {
+        // Bounded: stop once the host has plainly not picked it up.
+        const waited = pressedAt === null ? 0 : Date.now() - pressedAt;
+        return waited < HOST_PICKUP_TIMEOUT_MS ? POLL_WHILE_RUNNING_MS : false;
+      }
+      if (data?.phase !== "running") return false;
+      // Safe to read the clock here: this is a callback, not render.
+      const began = data.started_at ? Date.parse(data.started_at) : NaN;
+      if (!Number.isNaN(began) && Date.now() - began > STALE_RUNNING_MS) return false;
+      return POLL_WHILE_RUNNING_MS;
     },
     retry: false,
   });
+
+  useEffect(() => {
+    if (pressedAt === null) return;
+    setGaveUpWaiting(false);
+    const timer = setTimeout(() => setGaveUpWaiting(true), HOST_PICKUP_TIMEOUT_MS);
+    return () => clearTimeout(timer);
+  }, [pressedAt]);
+
+  const startedAt = run.data?.started_at ?? null;
+  const runPhase = run.data?.phase ?? null;
+  useEffect(() => {
+    if (runPhase !== "running") {
+      setStaleAfterMs(null);
+      return;
+    }
+    const age = startedAt === null ? null : Date.now() - Date.parse(startedAt);
+    if (age !== null && age > STALE_RUNNING_MS) {
+      setStaleAfterMs(age);
+      return;
+    }
+    const remaining = age === null ? STALE_RUNNING_MS : STALE_RUNNING_MS - age;
+    const timer = setTimeout(() => setStaleAfterMs(STALE_RUNNING_MS), Math.max(remaining, 0));
+    return () => clearTimeout(timer);
+  }, [runPhase, startedAt]);
 
   const recheck = useMutation({
     mutationFn: () => api.updateCheck(true),
@@ -147,20 +220,52 @@ export function UpdatesPanel() {
   const startUpdate = useMutation({
     mutationFn: () => api.runUpdate(),
     onSuccess: () => {
-      setRequested(true);
+      setSupersededRunId(run.data?.run_id ?? null);
+      setPressedAt(Date.now());
       void qc.invalidateQueries({ queryKey: ["update-run"] });
     },
   });
 
   const data = check.data;
-  const summary = run.data ? phaseSummary(run.data) : null;
+  // A run we have already been told to disregard reports nothing. `waiting` is its own
+  // state: the host has been asked and has not written anything yet.
+  const superseded =
+    supersededRunId !== undefined && (run.data?.run_id ?? null) === supersededRunId;
+  const summary = superseded
+    ? gaveUpWaiting
+      ? {
+          tone: "bad" as Tone,
+          title: "The host has not picked this up",
+          detail:
+            "The request was written but nothing on the box acted on it within two " +
+            "minutes. The update agent is probably not installed or not enabled: run " +
+            "`sudo ./scripts/install-updater.sh` on the host, or update with `make update`.",
+        }
+      : {
+          tone: "info" as Tone,
+          title: "Asked the host to update…",
+          detail:
+            "Waiting for the updater to start. This page will say what happened, " +
+            "including if it fails, and keeps working while the app restarts.",
+        }
+    : run.data
+      ? phaseSummary(run.data, staleAfterMs !== null, staleAfterMs)
+      : null;
   const busy = summary?.tone === "info";
 
   // Three conditions, all of which must hold. The old version showed a tick for the
   // absence of bad news, which includes "the check failed" and "this build has no
   // version to compare".
   const confirmedUpToDate =
-    !!data && data.check_enabled && !data.check_failed && data.comparable && !data.update_available;
+    !!data &&
+    data.check_enabled &&
+    !data.check_failed &&
+    data.comparable &&
+    !data.update_available &&
+    // A re-check that errored leaves `data` holding the PREVIOUS answer, so the tick
+    // would stand as though it were current. It is not: the last thing that happened is
+    // that we could not ask.
+    !recheck.isError;
 
   return (
     <div className="card">
@@ -178,7 +283,7 @@ export function UpdatesPanel() {
         <div className={`notice notice-${summary.tone}`}>
           <strong>{summary.title}</strong>
           <div>{summary.detail}</div>
-          {run.data?.started_at && (
+          {!superseded && run.data?.started_at && (
             <div className="muted" style={{ marginTop: 4, fontSize: "0.9em" }}>
               started {run.data.started_at}
               {run.data.finished_at ? ` · finished ${run.data.finished_at}` : null}
@@ -249,6 +354,13 @@ export function UpdatesPanel() {
         )}
       </div>
 
+      {recheck.isError && (
+        <p className="muted" style={{ marginTop: 8 }}>
+          Couldn&rsquo;t check for updates just now: {(recheck.error as Error).message}. This
+          page is showing what it knew before, not a fresh answer.
+        </p>
+      )}
+
       {startUpdate.isError && (
         <p className="muted" style={{ marginTop: 8 }}>
           Couldn&rsquo;t start the update: {(startUpdate.error as Error).message}
@@ -263,7 +375,7 @@ export function UpdatesPanel() {
         </p>
       )}
 
-      {run.data?.log_tail && run.data.log_tail.length > 0 && summary?.tone !== "good" && (
+      {!superseded && run.data?.log_tail && run.data.log_tail.length > 0 && summary?.tone !== "good" && (
         <details style={{ marginTop: 12 }}>
           <summary className="muted">What the updater logged</summary>
           <pre style={{ overflowX: "auto", fontSize: "0.85em" }}>

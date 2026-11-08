@@ -18,6 +18,7 @@ answer rather than defaulting to good news.
 
 from __future__ import annotations
 
+import datetime as dt
 import json
 import os
 from pathlib import Path
@@ -32,10 +33,20 @@ AGENT = Path(__file__).resolve().parents[2] / "scripts" / "saiva-update-agent"
 
 @pytest.fixture
 def update_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """The layout the installer builds: a root-owned directory with a drop-box in it.
+
+    The container may write only into requests/. Everything else is mounted read-only,
+    because owning the directory would let this process make root open files of its
+    choosing -- see scripts/saiva-update-agent.
+    """
     directory = tmp_path / "saiva-update"
-    directory.mkdir()
+    (directory / "requests").mkdir(parents=True)
     monkeypatch.setenv("SAIVA_UPDATE_DIR", str(directory))
     return directory
+
+
+def _write_status(directory: Path, **fields: object) -> None:
+    (directory / "status.json").write_text(json.dumps(fields), encoding="utf-8")
 
 
 @pytest.fixture
@@ -52,7 +63,7 @@ def test_apply_is_unavailable_without_a_configured_directory(no_update_dir: None
     assert updates.apply_available() is False
 
 
-def test_apply_is_unavailable_when_the_directory_is_not_writable(
+def test_apply_is_unavailable_when_the_drop_box_is_not_writable(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """A mount that exists but is read-only must not advertise a working button.
@@ -61,15 +72,31 @@ def test_apply_is_unavailable_when_the_directory_is_not_writable(
     it said yes whenever somebody had set them, whatever the filesystem thought.
     """
     directory = tmp_path / "read-only"
-    directory.mkdir()
-    directory.chmod(0o555)
+    (directory / "requests").mkdir(parents=True)
+    (directory / "requests").chmod(0o555)
     monkeypatch.setenv("SAIVA_UPDATE_DIR", str(directory))
     try:
         if os.geteuid() == 0:
             pytest.skip("running as root, which can write to a 0555 directory anyway")
         assert updates.apply_available() is False
     finally:
-        directory.chmod(0o755)
+        (directory / "requests").chmod(0o755)
+
+
+def test_apply_is_unavailable_when_only_the_outer_directory_exists(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An old-layout box, upgraded but not re-installed, must report honestly.
+
+    Before the drop-box existed the container owned the whole directory. A box in that
+    state has SAIVA_UPDATE_DIR set and no requests/ in it, and the right answer is "the
+    button is not set up here", not a request dropped where nothing is watching.
+    """
+    directory = tmp_path / "old-layout"
+    directory.mkdir()
+    monkeypatch.setenv("SAIVA_UPDATE_DIR", str(directory))
+
+    assert updates.apply_available() is False
 
 
 def test_the_endpoint_refuses_and_says_how_to_fix_it(
@@ -97,16 +124,40 @@ def test_pressing_update_writes_a_request_the_host_can_see(
     body = response.json()
     assert body["status"] == "requested", "no more 'update_started' for something not started"
     assert body["request_id"]
-    assert (update_dir / "request").is_file()
-    assert list(update_dir.glob(".request.tmp")) == [], "the staging file must be renamed away"
+    dropped = list((update_dir / "requests").iterdir())
+    assert len(dropped) == 1 and dropped[0].is_file()
+    assert not dropped[0].name.startswith("."), "the staging file must be renamed away"
 
 
 def test_the_request_is_written_atomically(update_dir: Path) -> None:
     """The host watches for this file's existence, so it must never see a partial one."""
-    updates.request_update(requested_by="someone@example.invalid")
+    request_id = updates.request_update(requested_by="someone@example.invalid")
 
     # The only artefact left behind is the final name.
-    assert sorted(p.name for p in update_dir.iterdir()) == ["request"]
+    assert sorted(p.name for p in (update_dir / "requests").iterdir()) == [request_id]
+
+
+def test_two_presses_do_not_collide_on_one_filename(update_dir: Path) -> None:
+    """A fixed temp name made the loser of a race get a 503 blaming the filesystem."""
+    first = updates.request_update(requested_by="a@example.invalid")
+    second = updates.request_update(requested_by="b@example.invalid")
+
+    assert first != second
+    names = sorted(p.name for p in (update_dir / "requests").iterdir())
+    assert names == sorted([first, second])
+
+
+def test_the_app_writes_nowhere_but_the_drop_box(update_dir: Path) -> None:
+    """The security boundary, asserted rather than assumed.
+
+    Everything outside requests/ is mounted read-only on a real box. This checks the app
+    does not even try, so a future change that did would fail here rather than fail at
+    runtime on a deployment somebody had re-installed correctly.
+    """
+    before = sorted(p.name for p in update_dir.iterdir())
+    updates.request_update(requested_by="owner@example.invalid")
+
+    assert sorted(p.name for p in update_dir.iterdir()) == before
 
 
 def test_the_request_carries_nothing_that_selects_what_is_deployed(update_dir: Path) -> None:
@@ -117,8 +168,8 @@ def test_the_request_carries_nothing_that_selects_what_is_deployed(update_dir: P
     container can make root run arbitrary code". It names the time and the user, for the
     host's log, and nothing else.
     """
-    updates.request_update(requested_by="owner@example.invalid")
-    contents = (update_dir / "request").read_text()
+    request_id = updates.request_update(requested_by="owner@example.invalid")
+    contents = (update_dir / "requests" / request_id).read_text()
 
     assert contents.splitlines() == [contents.strip()], "one line, so there is nowhere to hide"
     keys = {part.split("=", 1)[0] for part in contents.split() if "=" in part}
@@ -133,20 +184,32 @@ def test_the_agent_never_reads_the_request_for_anything_but_logging() -> None:
     only thing it does with the contents is put them in a message.
     """
     source = AGENT.read_text()
-    assert 'requested_by="$(head -c 200 "$REQUEST"' in source, (
-        "the agent no longer reads the request the way this test understands; re-check "
-        "by hand that its contents still cannot select what gets deployed"
-    )
-    uses = [line.strip() for line in source.splitlines() if "requested_by" in line]
-    # The declaration, the comment, the assignment, and the printf that logs it.
-    assert len(uses) <= 5, f"requested_by is used in more places than expected: {uses}"
-    allowed = ("#", "local requested_by", "requested_by=", "printf")
-    for line in uses:
-        assert line.startswith(allowed), (
-            f"the agent does something with the request's contents beyond logging: {line}"
-        )
+    # It must not read them at all now: it asks whether a regular file is there and
+    # deletes whatever it finds, without opening anything.
+    assert "-type f" in source, "the agent no longer looks for a regular file"
+    for reader in ("head -c", "cat ", "read ", "$(<"):
+        offenders = [
+            line.strip()
+            for line in source.splitlines()
+            if reader in line and "REQUESTS" in line and not line.lstrip().startswith("#")
+        ]
+        assert not offenders, f"the agent reads the request's contents: {offenders}"
     assert "--apply-release" in source
     assert "--ref" not in source, "the agent must not be able to pass a ref through"
+
+
+def test_the_agent_never_follows_a_link_planted_in_the_drop_box() -> None:
+    """The other half, and the one the first version got wrong.
+
+    Making the request's CONTENTS inert is not enough if the container owns the
+    directory: it can plant a symlink and have root open it. `find` without -L does not
+    follow links, and the agent unlinks rather than opens.
+    """
+    source = AGENT.read_text()
+    assert "find" in source and " -L " not in source, (
+        "the agent follows symlinks when looking for requests"
+    )
+    assert "-mindepth 1 -maxdepth 1" in source, "the sweep must not descend"
 
 
 def test_a_second_press_while_one_is_running_is_refused(
@@ -160,6 +223,45 @@ def test_a_second_press_while_one_is_running_is_refused(
     assert "already running" in second.json()["detail"]
 
 
+def test_a_run_stuck_at_running_eventually_stops_blocking_the_button(
+    auth_client: TestClient, update_dir: Path
+) -> None:
+    """There has to be a way back that is not a shell on the LXC.
+
+    A status file left at `running` -- a host killed mid-update, a systemd timeout, a
+    power cut -- used to 409 the button forever, and the only fix was deleting a file in
+    /var/lib/saiva/update over SSH. On a box whose whole point is not needing a terminal,
+    that is the wrong answer.
+    """
+    stale = dt.datetime.now(dt.UTC) - dt.timedelta(hours=2)
+    _write_status(
+        update_dir, phase="running", step="pull",
+        started_at=stale.strftime("%Y-%m-%dT%H:%M:%SZ"),
+    )
+
+    assert updates.update_in_progress() is False
+    assert auth_client.post("/api/admin/update").status_code == 202
+
+
+def test_a_run_that_started_moments_ago_still_blocks_the_button(
+    auth_client: TestClient, update_dir: Path
+) -> None:
+    """The guard against over-correcting: a live update must still refuse a second one."""
+    now = dt.datetime.now(dt.UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+    _write_status(update_dir, phase="running", step="pull", started_at=now)
+
+    assert updates.update_in_progress() is True
+    assert auth_client.post("/api/admin/update").status_code == 409
+
+
+def test_a_running_status_with_no_timestamp_is_treated_as_live(update_dir: Path) -> None:
+    """Unknown means in progress, not free to start another."""
+    _write_status(update_dir, phase="running")
+    assert updates.update_in_progress() is True
+    _write_status(update_dir, phase="running", started_at="not a timestamp")
+    assert updates.update_in_progress() is True
+
+
 def test_requesting_an_update_is_audited(auth_client: TestClient, update_dir: Path) -> None:
     auth_client.post("/api/admin/update")
 
@@ -170,10 +272,6 @@ def test_requesting_an_update_is_audited(auth_client: TestClient, update_dir: Pa
 # --------------------------------------------------------------------------------------
 # Reading back what the host did
 # --------------------------------------------------------------------------------------
-
-
-def _write_status(directory: Path, **fields: object) -> None:
-    (directory / "status.json").write_text(json.dumps(fields), encoding="utf-8")
 
 
 def test_status_is_reported_verbatim_from_the_host_record(

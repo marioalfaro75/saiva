@@ -1,5 +1,5 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { api } from "../api/client";
@@ -53,7 +53,10 @@ const NO_RUN: UpdateRun = {
 function show(status: Partial<UpdateStatus> = {}, run: Partial<UpdateRun> = {}) {
   vi.spyOn(api, "updateCheck").mockResolvedValue({ ...UP_TO_DATE, ...status });
   vi.spyOn(api, "updateRun").mockResolvedValue({ ...NO_RUN, ...run });
-  const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  vi.spyOn(api, "runUpdate").mockResolvedValue({ status: "requested", request_id: "r1" });
+  const client = new QueryClient({
+    defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
+  });
   render(
     <QueryClientProvider client={client}>
       <UpdatesPanel />
@@ -176,6 +179,87 @@ describe("what it says about a run that has happened", () => {
 
     await screen.findByText(/updated to v0\.17\.0/i);
     expect(screen.queryByText(/what the updater logged/i)).not.toBeInTheDocument();
+  });
+});
+
+describe("pressing the button", () => {
+  it("does not present the previous run as the result of the press just made", async () => {
+    // The bug this whole rewrite exists to kill, re-created one level up: the panel
+    // rendered the LAST run's green "Updated to v1.0.0" with a Reload button the instant
+    // Update now was pressed, before the new update had started.
+    show(
+      { update_available: true, latest_version: "v1.1.0" },
+      { phase: "applied", run_id: "the-old-run", to_version: "v1.0.0" },
+    );
+    const button = await screen.findByRole("button", { name: /update now/i });
+    expect(screen.getByText(/updated to v1\.0\.0/i)).toBeInTheDocument();
+
+    fireEvent.click(button);
+
+    await waitFor(() =>
+      expect(screen.getByText(/asked the host to update/i)).toBeInTheDocument(),
+    );
+    expect(screen.queryByText(/updated to v1\.0\.0/i)).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /reload to use it/i })).not.toBeInTheDocument();
+  });
+
+  it("says plainly that it is waiting, rather than showing nothing", async () => {
+    show({ update_available: true, latest_version: "v1.1.0" }, { phase: null });
+
+    fireEvent.click(await screen.findByRole("button", { name: /update now/i }));
+
+    expect(await screen.findByText(/waiting for the updater to start/i)).toBeInTheDocument();
+  });
+});
+
+describe("waits that would otherwise never end", () => {
+  it("gives up on a host that never picks the request up, and says what to do", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      show({ update_available: true, latest_version: "v1.1.0" }, { phase: null });
+      fireEvent.click(await screen.findByRole("button", { name: /update now/i }));
+      await screen.findByText(/waiting for the updater to start/i);
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(125_000);
+      });
+
+      expect(screen.getByText(/host has not picked this up/i)).toBeInTheDocument();
+      expect(screen.getByText(/install-updater\.sh/)).toBeInTheDocument();
+    } finally {
+      vi.useRealTimers();
+    }
+  }, 20_000);
+
+  it("stops calling a long-dead run 'Updating…'", async () => {
+    // A status file left at `running` -- a host restarted mid-update, a systemd timeout
+    // -- used to spin "Updating…" forever and disable every button. Saying nothing
+    // indefinitely is the same shape of failure as saying the wrong thing.
+    const old = new Date(Date.now() - 90 * 60_000).toISOString();
+    show({}, { phase: "running", step: "pull", started_at: old, run_id: "dead" });
+
+    expect(await screen.findByText(/started and never finished/i)).toBeInTheDocument();
+    expect(screen.getByText(/saiva-update\.service/)).toBeInTheDocument();
+  });
+
+  it("still reports a run that started moments ago as running", async () => {
+    const now = new Date().toISOString();
+    show({}, { phase: "running", step: "pull", started_at: now, run_id: "live" });
+
+    expect(await screen.findByText(/updating…/i)).toBeInTheDocument();
+  });
+});
+
+describe("a check that could not be made", () => {
+  it("does not leave the tick standing when a re-check errors", async () => {
+    show();
+    expect(await screen.findByText(tick)).toBeInTheDocument();
+    vi.spyOn(api, "updateCheck").mockRejectedValue(new Error("network is down"));
+
+    fireEvent.click(screen.getByRole("button", { name: /check for updates/i }));
+
+    await waitFor(() => expect(screen.queryByText(tick)).not.toBeInTheDocument());
+    expect(screen.getByText(/showing what it knew before/i)).toBeInTheDocument();
   });
 });
 

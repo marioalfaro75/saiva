@@ -86,7 +86,7 @@ site_url() {
   case "$raw" in http://*|https://*) printf '%s' "$raw" ;; *) printf 'https://%s' "$raw" ;; esac
 }
 
-_probe_once() { # URL -> 0 if the whole stack answers through the published address
+_probe_once() { # URL [with-resolve] -> 0 if the whole stack answers at that address
   local url="$1" host body resolve=()
   host="${url#*://}"; host="${host%%/*}"; host="${host%%:*}"
   [ $# -gt 1 ] && resolve=(--resolve "${host}:443:127.0.0.1" --resolve "${host}:80:127.0.0.1")
@@ -101,8 +101,25 @@ _probe_once() { # URL -> 0 if the whole stack answers through the published addr
   return 0
 }
 
-probe_site() { # URL -> 0 if reachable either directly or pinned to loopback
-  _probe_once "$1" || _probe_once "$1" with-resolve
+probe_site() { # URL -> 0 if reachable the way this deployment is published
+  # The loopback fallback is allowed ONLY on a deployment that is meant to be loopback
+  # only. That distinction is the whole value of this gate.
+  #
+  # An earlier version always fell back to `--resolve host:443:127.0.0.1`, which is a
+  # probe that cannot fail for the reason the gate exists to catch: a site published on
+  # 127.0.0.1 answers that probe perfectly while being unreachable from the LAN -- which
+  # is precisely the outage that prompted all of this, and precisely what the old
+  # in-container check could not see either. A gate that cannot observe its own failure
+  # mode is worse than no gate, because it certifies.
+  #
+  # Where the fallback is still right: a box whose SAIVA_BIND_ADDR is 127.0.0.1 and whose
+  # SAIVA_SITE_ADDRESS is a name that resolves elsewhere (split DNS, a hosts entry on
+  # other machines). There the direct probe fails for a reason that is not a fault.
+  if _probe_once "$1"; then return 0; fi
+  case "$(env_get SAIVA_BIND_ADDR)" in
+    127.0.0.1|localhost|::1|"") _probe_once "$1" with-resolve ;;
+    *) return 1 ;;
+  esac
 }
 
 health_field() { # FIELD -> its value from the running stack's /api/health, or empty
@@ -112,14 +129,30 @@ health_field() { # FIELD -> its value from the running stack's /api/health, or e
   # "panel polls forever for an answer nobody wrote" failure this design exists to
   # remove. Not answering is an ordinary result here, not an error.
   local url; url="$(site_url)"
-  curl -fsS -k --max-time 10 "$url/api/health" 2>/dev/null \
+  local value
+  value="$(curl -fsS -k --max-time 10 "$url/api/health" 2>/dev/null \
     | sed -n "s/.*\"$1\"[[:space:]]*:[[:space:]]*\"\{0,1\}\([^\",}]*\)\"\{0,1\}.*/\1/p" \
-    | head -n 1 || true
+    | head -n 1 || true)"
+  # A JSON null is an ABSENT value, not the four characters "null". Passing it through
+  # would store `"schema_before": "null"` in the status file -- a string that reads like
+  # a value next to fields that are genuinely null.
+  [ "$value" = "null" ] && value=""
+  printf '%s' "$value"
   return 0
 }
 
+# How long the gate waits before giving up and rolling back, in 2-second steps.
+#
+# 90 is three minutes, and it is a budget rather than a guess: a cold start on this box
+# has to pull images, run `pg_dump` of the household's database and apply migrations
+# before uvicorn binds. The install path (deploy.sh) uses the same default. Raise it with
+# SAIVA_GATE_TRIES on a slow box -- and note the real worst case is this budget TWICE,
+# once for the release and once for the re-gate after a rollback, during which the deploy
+# lock is held and the panel shows `running / gate`.
+SAIVA_GATE_TRIES_DEFAULT=90
+
 wait_for_site() { # -> 0 when the site answers, within the configured budget
-  local tries="${SAIVA_GATE_TRIES:-90}" url; url="$(site_url)"
+  local tries="${SAIVA_GATE_TRIES:-$SAIVA_GATE_TRIES_DEFAULT}" url; url="$(site_url)"
   local i
   for i in $(seq 1 "$tries"); do
     if probe_site "$url"; then
@@ -198,6 +231,12 @@ If you really mean to go back to $target, pass --allow-downgrade."
 # --- the state machine --------------------------------------------------------------
 
 acquire_lock() {
+  # Already held across the hand-over. `exec` replaces the process image but keeps its
+  # file descriptors, and an flock belongs to the open file description -- so the
+  # re-executed copy is still the lock holder. Re-opening fd 9 here would CLOSE that
+  # description, drop the lock, and re-take it: a window in which `make update` and the
+  # in-app button could both get in, with the tree already moved by one of them.
+  if [ "${SAIVA_LOCK_HELD:-}" = "1" ]; then return 0; fi
   local lock; lock="$(state_dir)/deploy.lock"
   exec 9>"$lock"
   if ! flock -n 9; then
@@ -293,7 +332,9 @@ Nothing has been changed."
   # Hand over to the checked-out copy of this script. See the header: git replaced this
   # file's inode a moment ago and bash is still reading the old bytes.
   log "    handing over to $target's own deploy script"
-  exec "$ROOT/scripts/deploy.sh" --apply-release --resume "$RUN_ID"
+  # SAIVA_LOCK_HELD rides across: fd 9 and its flock survive the exec, so the new image
+  # must not re-open it. See acquire_lock.
+  SAIVA_LOCK_HELD=1 exec "$ROOT/scripts/deploy.sh" --apply-release --resume "$RUN_ID"
 }
 
 _release_apply() {
@@ -391,6 +432,13 @@ _rollback() { # MESSAGE -- put the box back, then say exactly what state it is i
   log ""
   log "FAILED: $why"
   status_set message "$why"
+  # The phase matters as much as the step. On the --rollback path the status file still
+  # said `applied` from the previous run, so for the whole time the box was being rolled
+  # back the panel showed a green "Updated to vX" with a "Reload to use it" button,
+  # inviting the owner to reload a site that was not answering.
+  status_set phase running
+  status_set finished_at ""
+  status_set exit_code ""
   status_step rollback "putting the box back the way it was"
 
   local record; record="$(record_dir "$RUN_ID")"
@@ -450,11 +498,14 @@ _rollback() { # MESSAGE -- put the box back, then say exactly what state it is i
   $COMPOSE up -d --remove-orphans >>"$(state_dir)/run.log" 2>&1 || true
   _reload_caddy || true
 
-  local schema_now; schema_now="$(health_field schema)"
-  local migrated=0
-  [ "$schema_now" = "ahead" ] && migrated=1
-
   if wait_for_site; then
+    # Asked only once the site answers. Asking in the instant `up -d` returns reads a
+    # container that has not finished starting, so `schema` comes back empty and the one
+    # outcome docs/UPDATING.md devotes its longest section to -- the migration succeeded
+    # and the schema is now ahead of the code -- was decided before the api could speak.
+    local schema_now; schema_now="$(health_field schema)"
+    local migrated=0
+    [ "$schema_now" = "ahead" ] && migrated=1
     if [ -n "$unpinned" ]; then
       # The site answers, but on images this function did not choose. Saying "rolled
       # back" here would be the same class of claim the old panel made.

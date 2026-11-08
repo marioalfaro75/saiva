@@ -117,11 +117,32 @@ sudo ./scripts/install-updater.sh
 That installs a small agent at `/usr/local/lib/saiva/saiva-update-agent`, a systemd path
 unit watching for a request, and the shared directory the api container writes into.
 
-The agent **takes no parameters, and reads nothing out of the request file that could
-select what gets deployed.** It resolves the target release itself. That is the line
-between a convenience feature and a path from a network-facing container to root: the
-most a compromised api container can ask for is the update the button was going to do
-anyway.
+The agent **takes no parameters, and never opens the request at all.** It asks whether a
+regular file exists in one directory, deletes whatever it finds there, and resolves the
+target release itself from the tags on `origin`.
+
+That second half is not belt-and-braces; it is the half the first version of this got
+wrong. Making the request's *contents* inert is not enough if the container owns the
+*directory*, because owning a directory means being able to unlink and rename root-owned
+entries inside it. A review demonstrated the consequences end to end: the container could
+point root's `deploy.lock` and `run.log` at any file on the host (shell redirections
+follow symlinks, so root truncated a file and appended its log over another), point
+`run.log` at a file it wanted read back through the status API, and rename the rollback
+records aside so a rollback restored its own `.env` and pinned every service to an image
+of its choosing.
+
+So the boundary is a drop-box, not a shared directory:
+
+```
+/var/lib/saiva/update            root:root 0755   status, logs, rollback records
+/var/lib/saiva/update/records    root:root 0700   holds a copy of .env
+/var/lib/saiva/update/requests   root:<api> 0730  the only thing the app may write
+```
+
+The app mounts the outer directory read-only and the drop-box read-write. `0730` means it
+cannot even list what is in there. Root looks with `find -type f`, which does not follow
+symlinks, and unlinks rather than reads. With that, the claim holds: the most a
+compromised api container can ask for is the update the button was going to do anyway.
 
 It is a **copy**, not a symlink into the checkout, for the same reason — otherwise every
 release could change what runs as root on your box. The cost is that it can go stale, so

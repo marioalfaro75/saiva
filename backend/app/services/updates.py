@@ -116,8 +116,15 @@ def latest_release_cached(repo: str, force: bool = False) -> Release | None:
 
 # --- asking the host to apply an update, and reading back what it did ----------------
 
-REQUEST_FILENAME = "request"
+REQUESTS_DIRNAME = "requests"
 STATUS_FILENAME = "status.json"
+
+# How long a run may claim to be "running" before this process stops believing it. The
+# button 409s while an update is in flight, and without an expiry there is no way back
+# from a status file left at `running` -- a host killed mid-update, a systemd
+# TimeoutStartSec, a power cut -- except a shell on the box. systemd's own limit for the
+# update unit is 30 minutes, so anything past that is not running any more.
+STALE_RUN_AFTER = dt.timedelta(minutes=35)
 
 # Phases the host updater can report. Kept here so the API and the panel agree on the
 # vocabulary, and so an unrecognised one is visible rather than silently rendered as
@@ -141,6 +148,17 @@ def update_dir() -> Path | None:
     return Path(raw) if raw else None
 
 
+def requests_dir() -> Path | None:
+    """The drop-box: the one path this container may write into.
+
+    Everything else under SAIVA_UPDATE_DIR is mounted read-only, because owning that
+    directory would let this process make root open files of its choosing. See
+    scripts/saiva-update-agent for the whole argument.
+    """
+    directory = update_dir()
+    return directory / REQUESTS_DIRNAME if directory else None
+
+
 def apply_available() -> bool:
     """Whether pressing the button can actually do anything.
 
@@ -150,29 +168,32 @@ def apply_available() -> bool:
     is what the old test (`bool(watchtower_url and watchtower_token)`) did: both came
     from a .env this container could check nothing about.
     """
-    directory = update_dir()
-    return bool(directory and directory.is_dir() and os.access(directory, os.W_OK))
+    drop_box = requests_dir()
+    return bool(drop_box and drop_box.is_dir() and os.access(drop_box, os.W_OK))
 
 
 def request_update(requested_by: str) -> str:
-    """Write the request file. Returns the request id.
+    """Drop a request for the host updater. Returns the request id.
 
-    The CONTENTS are a note for the host's log and nothing else. The agent deletes this
-    file without reading anything out of it that could select what gets deployed: it
-    resolves the target release itself, from the tags on origin. So the most this
-    container can ask for is "an update", never "this code" -- which is the line between
-    a convenience feature and a path from a network-facing container to root.
+    The agent never opens this file. It asks `find -type f` whether one exists and
+    unlinks what it finds, so the contents are a note for whoever reads the host's log
+    and nothing else -- the target release is resolved on the host, from the tags on
+    origin. The most this container can ask for is "an update", never "this code".
+
+    The name is unique per request. A fixed one meant two presses raced on the same temp
+    path, and the loser got a 503 whose message blamed the directory's permissions -- a
+    false diagnosis of a directory that was plainly writable.
     """
-    directory = update_dir()
-    if directory is None:
+    drop_box = requests_dir()
+    if drop_box is None:
         raise RuntimeError("SAIVA_UPDATE_DIR is not set in this deployment")
-    request_id = dt.datetime.now(dt.UTC).strftime("%Y%m%dT%H%M%SZ")
+    request_id = f"{dt.datetime.now(dt.UTC).strftime('%Y%m%dT%H%M%S%fZ')}-{os.getpid()}"
     # Written then renamed, so the host's path unit cannot fire on a half-written file.
-    tmp = directory / f".{REQUEST_FILENAME}.tmp"
+    tmp = drop_box / f".{request_id}.tmp"
     tmp.write_text(
         f"requested_at={request_id} requested_by={requested_by}\n", encoding="utf-8"
     )
-    tmp.replace(directory / REQUEST_FILENAME)
+    tmp.replace(drop_box / request_id)
     return request_id
 
 
@@ -191,9 +212,37 @@ def read_update_status() -> dict[str, Any] | None:
     return payload if isinstance(payload, dict) else None
 
 
+def _pending_request() -> bool:
+    drop_box = requests_dir()
+    if drop_box is None:
+        return False
+    try:
+        return any(entry.is_file() for entry in drop_box.iterdir())
+    except OSError:
+        # 0730 on the drop-box means this container may create and unlink but not list.
+        # That is deliberate, and it means "is one pending" is a question only the host
+        # can answer; the status file answers it a moment later.
+        return False
+
+
 def update_in_progress() -> bool:
-    """True while a request is queued or a run is under way."""
-    directory = update_dir()
-    if directory is not None and (directory / REQUEST_FILENAME).exists():
+    """True while a request is queued or a run is genuinely under way.
+
+    Deliberately not "while the status says running". A status file left at `running` --
+    a host killed mid-update, a systemd timeout, a power cut -- would otherwise 409 the
+    button forever with no way back except a shell on the box, which is the opposite of
+    what this design is for. A run older than the host unit's own timeout is not running.
+    """
+    if _pending_request():
         return True
-    return (read_update_status() or {}).get("phase") in ACTIVE_PHASES
+    status = read_update_status() or {}
+    if status.get("phase") not in ACTIVE_PHASES:
+        return False
+    started = status.get("started_at")
+    if not isinstance(started, str):
+        return True
+    try:
+        began = dt.datetime.fromisoformat(started.replace("Z", "+00:00"))
+    except ValueError:
+        return True
+    return dt.datetime.now(dt.UTC) - began < STALE_RUN_AFTER

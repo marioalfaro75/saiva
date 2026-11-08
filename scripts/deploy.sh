@@ -211,7 +211,7 @@ fi
 state_init
 echo -n "Waiting for the app to answer at $(site_url)"
 healthy=0
-for _ in $(seq 1 "${SAIVA_GATE_TRIES:-60}"); do
+for _ in $(seq 1 "${SAIVA_GATE_TRIES:-$SAIVA_GATE_TRIES_DEFAULT}"); do
   if probe_site "$(site_url)"; then healthy=1; break; fi
   echo -n "."
   sleep 2

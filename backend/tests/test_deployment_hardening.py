@@ -218,23 +218,67 @@ def test_no_container_can_reach_the_docker_daemon() -> None:
             )
 
 
-def test_the_update_channel_is_a_directory_and_nothing_more() -> None:
-    """What the api container got instead of the Docker API.
+def test_the_app_can_write_only_the_drop_box_and_read_the_rest() -> None:
+    """The security boundary, and the one this design got wrong the first time.
 
-    One bind mount of one directory. A test rather than a comment because the obvious
-    'improvement' when the button needs to do something new is to widen this, and the
-    whole security argument for the design is that it cannot be widened from inside.
+    Giving the container the whole directory was reviewed and broken end to end. Owning a
+    directory means being able to unlink and rename root-owned entries inside it, so the
+    container could point root's deploy.lock and run.log at any file on the host (shell
+    redirections follow symlinks), point run.log at a file it wanted to READ back through
+    the status API, and rename records/ aside so a rollback restored its .env and pinned
+    every service to an image of its choosing.
+
+    Two mounts: read-only on the directory, read-write on the drop-box inside it. The
+    obvious 'improvement' when the button needs to do something new is to widen this, so
+    it is a test rather than a comment.
     """
     api = _compose(COMPOSE_PROD)["services"]["api"]
     mounts = [str(v) for v in (api.get("volumes") or [])]
     update_mounts = [m for m in mounts if "saiva-update" in m]
-    assert len(update_mounts) == 1, f"expected one update mount on api, got {update_mounts}"
-    assert update_mounts[0].endswith(":/run/saiva-update"), (
-        f"the update mount is not the plain directory the agent expects: {update_mounts[0]}"
+    assert len(update_mounts) == 2, f"expected two update mounts on api, got {update_mounts}"
+
+    outer = [m for m in update_mounts if m.endswith(":/run/saiva-update:ro")]
+    assert outer, (
+        f"the api container can write the whole update directory: {update_mounts}. "
+        "That is enough to make root open files of its choosing."
     )
+    drop_box = [m for m in update_mounts if m.endswith(":/run/saiva-update/requests")]
+    assert drop_box, f"no writable drop-box mount for the button: {update_mounts}"
+    assert "/requests:" in drop_box[0], (
+        f"the writable mount is not the requests sub-directory: {drop_box[0]}"
+    )
+
     env = {str(k): str(v) for k, v in (api.get("environment") or {}).items()}
     assert env.get("SAIVA_UPDATE_DIR") == "/run/saiva-update", (
         "the api container is not told where its update directory is"
+    )
+
+
+def test_the_installer_never_hands_the_state_directory_to_the_container() -> None:
+    """The fix for that, asserted where it is made.
+
+    `chown <api uid> $STATE` is one word away from `chown root:<api uid> $STATE/requests`
+    and the difference is a privilege escalation, so it is worth a test that reads the
+    installer rather than trusting the comment above it.
+    """
+    installer = (REPO / "scripts" / "install-updater.sh").read_text()
+    lines = [
+        line.strip()
+        for line in installer.splitlines()
+        if not line.lstrip().startswith("#") and ("chown" in line or "install -d" in line)
+    ]
+    assert lines, "no ownership statements found in the installer, so this proves nothing"
+    for line in lines:
+        if "requests" in line:
+            continue
+        assert "API_UID" not in line, (
+            f"the installer gives the api container something other than the drop-box: {line}"
+        )
+    assert any("0730" in line and "requests" in line for line in lines), (
+        "the drop-box is not 0730, so the container can list what is in it"
+    )
+    assert any("0700" in line and "records" in line for line in lines), (
+        "records/ is not 0700, and it holds a verbatim copy of .env"
     )
 
 
@@ -354,8 +398,10 @@ def test_the_state_directory_has_one_spelling() -> None:
     """
     default = "/var/lib/saiva/update"
     compose = COMPOSE_PROD.read_text()
-    assert compose.count("${SAIVA_STATE_DIR:-" + default + "}") == 2, (
-        "the api and caddy mounts no longer both interpolate SAIVA_STATE_DIR with the "
+    # Three now: the api's read-only mount of the directory, its read-write mount of the
+    # drop-box inside it, and caddy's read-only mount.
+    assert compose.count("${SAIVA_STATE_DIR:-" + default + "}") == 3, (
+        "the api and caddy mounts no longer all interpolate SAIVA_STATE_DIR with the "
         f"default {default}"
     )
     assert default in (REPO / "scripts" / "lib" / "state.sh").read_text()
