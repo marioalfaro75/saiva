@@ -166,13 +166,29 @@ def _dumps_in(directory: Path) -> list[Path]:
     return sorted(directory.glob("saiva-*-premigrate.sql.gz"))
 
 
-@pytest.fixture
+@pytest.fixture(autouse=True)
 def backups(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """Autouse, because forgetting it writes to the real /backups.
+
+    Two tests here did forget it. As root they passed -- `os.makedirs("/backups")`
+    succeeds and the dumps land on the filesystem root -- and in CI, which is not root,
+    they failed with PermissionError. The test that is about not writing dumps was
+    writing them to the wrong place, and the environment was the only thing that
+    noticed. Autouse removes the whole class of mistake rather than the two instances.
+    """
     directory = tmp_path / "backups"
     directory.mkdir()
     monkeypatch.setenv("SAIVA_BACKUP_DIR", str(directory))
     monkeypatch.setenv("SAIVA_BACKUP_BEFORE_MIGRATE", "1")
     return directory
+
+
+def test_no_test_in_this_file_can_write_to_the_real_backup_directory() -> None:
+    """The guard on the guard: autouse is easy to remove, and nothing would say so."""
+    assert os.environ.get("SAIVA_BACKUP_DIR", "/backups") != "/backups", (
+        "SAIVA_BACKUP_DIR is not redirected, so a dump in this suite would be written to "
+        "the real /backups"
+    )
 
 
 def _stored_revision(engine: sa.Engine) -> str | None:

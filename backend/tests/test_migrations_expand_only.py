@@ -18,15 +18,16 @@ Nothing enforced it before this file. `alembic upgrade head` and `alembic check`
 checks.yml prove the migrations run and that they agree with the models; neither has any
 opinion about whether they are additive.
 
-Two tests carry the rule, and the second is what makes the first worth believing. The first
-reads all twelve migrations and refuses anything non-additive. The second feeds the checker
-a synthetic migration per forbidden construct and asserts each is caught, and a synthetic
-additive migration that must be accepted — so a checker that quietly stops recognising
-`drop_column`, or one that has grown too strict to let an ordinary add_column through,
-fails loudly instead of reading green. A checker like this is worthless without that
-second test: "no violations found" and "found nothing at all" are the same green.
+The first test reads all twelve migrations and refuses anything non-additive. The rest are
+there because "no violations found" and "found nothing at all" are the same green, and a
+checker nobody checks drifts toward the second. So the checker is built to make silence
+impossible rather than merely unlikely: every statement in an upgrade() must be a shape it
+recognises, and anything else is reported as "this guard cannot tell what that does". The
+synthetic tests then pin each half of that down — one assertion per forbidden construct,
+one migration using every allowed shape that must still pass, and one regression test per
+hole an adversarial review found and this file now closes.
 
-The third test points the other way; its docstring explains why the downgrade() bodies are
+The last test points the other way; its docstring explains why the downgrade() bodies are
 the problem rather than the solution.
 """
 
@@ -50,10 +51,7 @@ VERSIONS_DIR = BACKEND / "migrations" / "versions"
 # and foreign-key constraints appear only as sa.UniqueConstraint/sa.ForeignKeyConstraint
 # arguments inside create_table, never as standalone operations.
 #
-# The list below is a little wider than observed usage — it also admits the three
-# standalone constraint-adding operations, because those are what an additive revision
-# against an existing table reaches for, and refusing them would push a contributor toward
-# raw SQL, which is worse. It is no wider than that. Everything else is refused by default,
+# So the list is exactly observed usage, and everything else is refused by default —
 # including operations that look harmless, because the two failure modes are not
 # symmetrical: refusing one wrongly costs a deliberate one-line edit here, read in review;
 # permitting one wrongly costs a schema change that breaks an image rollback in production.
@@ -61,14 +59,31 @@ VERSIONS_DIR = BACKEND / "migrations" / "versions"
 # create_primary_key is deliberately absent. It reads like a create_* sibling, but adding a
 # primary key makes its columns NOT NULL and builds a unique index, so it fails outright on
 # a table with rows — the opposite of additive.
+#
+# The list used to be three entries wider: create_unique_constraint, create_foreign_key and
+# create_check_constraint, on the grounds that those are what an additive revision against
+# an existing table reaches for, and that refusing them pushes a contributor toward raw SQL.
+# That argument does not survive the one this file is built on. A constraint is not an
+# addition from the point of view of the rolled-back image: it is a new rule that image has
+# never heard of, enforced against the rows it is still writing. Add a UNIQUE constraint and
+# the previous release's next legitimate duplicate is rejected by the database; add a CHECK
+# and a write it made happily yesterday fails today. That is precisely the "writes that
+# touch something the newer release added" hazard that dbinit's tolerance of a newer schema
+# is supposed to make survivable, and a constraint is the one addition that reaches
+# backwards into the old code's behaviour instead of sitting beside it. They can also fail
+# outright on existing rows that violate them, which an add_column cannot do.
+#
+# Refusing them costs nothing today: no migration here uses any of the three. The safe
+# shape is the one this file already teaches for drops, run forwards — ship the release
+# that stops writing rows the constraint would reject, then add the constraint in the next
+# revision, by which time the oldest image anyone would roll back to already respects it.
+# If some future constraint genuinely cannot wait, the refusal is one deliberate edit here
+# with a reason attached, read in review. That is the point of keeping the list narrow.
 _ADDITIVE_OPERATIONS = frozenset(
     {
         "create_table",
         "create_index",
         "add_column",
-        "create_unique_constraint",
-        "create_foreign_key",
-        "create_check_constraint",
     }
 )
 
@@ -95,6 +110,23 @@ _REFUSED_BECAUSE = {
         "adds a primary key, which makes its columns NOT NULL and builds a unique index, "
         "so it fails on a table that already has rows"
     ),
+    "create_unique_constraint": (
+        "adds a UNIQUE constraint to a table that already exists. It fails outright if two "
+        "rows already collide, and it keeps being enforced against an image that has never "
+        "heard of it: roll back to that image and the next duplicate it legitimately writes "
+        "is rejected by the database. Add the constraint in the release after the one that "
+        "stopped writing duplicates, the way a drop waits one release"
+    ),
+    "create_check_constraint": (
+        "adds a CHECK constraint to a table that already exists, with the same two problems "
+        "as a UNIQUE constraint: it fails on rows that already violate it, and once it is "
+        "there it rejects writes an older image makes without knowing the rule exists"
+    ),
+    "create_foreign_key": (
+        "adds a FOREIGN KEY to a table that already exists. Postgres validates every row "
+        "already there, and from then on rejects any insert whose parent row is missing — "
+        "including inserts from an older image written before the parent was required"
+    ),
     "execute": (
         "runs a raw statement. This is refused whether or not the statement happens to be "
         "additive: an AST cannot read SQL, a prefix check would wave through "
@@ -109,13 +141,30 @@ _REFUSED_BECAUSE = {
 # narrowing or widening.
 _ALTER_COLUMN_DESCRIPTORS = frozenset({"schema", "table_name", "column_name"})
 
+_UNREADABLE_CALL = (
+    "is not a call this guard can account for. Inside upgrade(), a call has to be an "
+    "Alembic operation on the module's `op` (or on a batch block's handle), op.f(), or a "
+    "sqlalchemy value being described to Alembic inside one of those. This is none of "
+    "them, so the guard cannot say what it does to the schema — and in a file whose whole "
+    "job is to constrain what a migration may do, 'I cannot tell' has to read as a failure "
+    "rather than as a pass"
+)
+
+_UNREADABLE_STATEMENT = (
+    "is not a statement shape this guard can read. An expand-only upgrade() is a flat "
+    "sequence of op.<operation>(...) calls and `with op.batch_alter_table(...)` blocks, "
+    "which is what all twelve migrations are. Anything else — an assignment that aliases "
+    "`op`, a loop, a conditional, a nested def, an import — gives the migration a way to "
+    "act that this checker cannot follow, so it is refused rather than waved through"
+)
+
 
 def _alembic_op_names(tree: ast.Module) -> set[str]:
     """What `op` is spelled as in this module.
 
     Every migration here writes `from alembic import op`, so hardcoding "op" would work
-    today. Resolving it matters for the same reason the non-vacuity test exists: a checker
-    that silently matches nothing reads exactly like a clean bill of health, and an
+    today. Resolving it matters for the same reason the per-statement rule below exists: a
+    checker that silently matches nothing reads exactly like a clean bill of health, and an
     `import ... as` away from the house style should not be the thing that produces one.
     """
     names: set[str] = set()
@@ -127,26 +176,50 @@ def _alembic_op_names(tree: ast.Module) -> set[str]:
     return names
 
 
-def _upgrade_function(tree: ast.Module) -> ast.FunctionDef | None:
+def _sqlalchemy_names(tree: ast.Module) -> set[str]:
+    """What sqlalchemy is reachable as in this module: `sa` here, by house style.
+
+    Needed because a create_table's arguments are full of sa.Column(...) and
+    sa.ForeignKeyConstraint(...) calls. Those describe a value for Alembic to render, so
+    they are allowed where they appear — but only there, which is why the name has to be
+    resolved rather than assumed: see _describes_schema.
+    """
+    names: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                if alias.name == "sqlalchemy" or alias.name.startswith("sqlalchemy."):
+                    names.add(alias.asname or alias.name.split(".")[0])
+        elif isinstance(node, ast.ImportFrom) and node.module:
+            if node.module == "sqlalchemy" or node.module.startswith("sqlalchemy."):
+                for alias in node.names:
+                    names.add(alias.asname or alias.name)
+    return names
+
+
+def _upgrade_function(tree: ast.Module) -> ast.FunctionDef | ast.AsyncFunctionDef | None:
+    """The upgrade() Alembic will actually call: the LAST module-level definition of it.
+
+    Taking the first was a real hole, not a nicety. Python binds the name as it executes
+    the module, so with two `def upgrade` the second one wins and the first is dead code.
+    A checker reading the first would have judged a body that never runs and passed a file
+    whose live body drops a table — the exact failure this whole file exists to prevent,
+    hidden behind a green test. AsyncFunctionDef is included for the same reason: Alembic
+    would not run one, but if someone wrote one last it is still what the name is bound to,
+    and this guard must not fall back to judging an earlier sync body instead.
+    """
+    found: ast.FunctionDef | ast.AsyncFunctionDef | None = None
     for node in tree.body:
-        if isinstance(node, ast.FunctionDef) and node.name == "upgrade":
-            return node
-    return None
+        if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef) and node.name == "upgrade":
+            found = node
+    return found
 
 
-def _is_a_no_op_body(function: ast.FunctionDef) -> bool:
-    """True for `pass` and for a docstring on its own: nothing to vouch for either way."""
-    for statement in function.body:
-        if isinstance(statement, ast.Pass):
-            continue
-        if (
-            isinstance(statement, ast.Expr)
-            and isinstance(statement.value, ast.Constant)
-            and isinstance(statement.value.value, str)
-        ):
-            continue
-        return False
-    return True
+def _is_nothing(statement: ast.stmt) -> bool:
+    """True for `pass` and for a bare constant (a docstring, `...`): a no-op either way."""
+    if isinstance(statement, ast.Pass):
+        return True
+    return isinstance(statement, ast.Expr) and isinstance(statement.value, ast.Constant)
 
 
 def _is_column_construction(node: ast.expr) -> bool:
@@ -155,6 +228,31 @@ def _is_column_construction(node: ast.expr) -> bool:
     if isinstance(node.func, ast.Attribute):
         return node.func.attr == "Column"
     return isinstance(node.func, ast.Name) and node.func.id == "Column"
+
+
+def _describes_schema(call: ast.Call, schema_names: frozenset[str]) -> bool:
+    """True if this call builds a sqlalchemy value rather than doing something.
+
+    sa.Column(...), sa.String(length=32), sa.ForeignKeyConstraint(...), sa.false(): these
+    are arguments, and Alembic renders them into the statement it runs. The test is where
+    the chain is rooted, so sa.dialects.postgresql.JSONB() and sa.String(32).with_variant()
+    both qualify.
+
+    This is deliberately only consulted for calls nested inside a recognised operation.
+    `sa.create_engine(...)` is rooted at sa too, and a statement of its own that reaches
+    the database behind Alembic's back is exactly what must not be waved through.
+    """
+    root: ast.AST = call.func
+    while True:
+        if isinstance(root, ast.Attribute):
+            root = root.value
+        elif isinstance(root, ast.Call):
+            root = root.func
+        elif isinstance(root, ast.Subscript):
+            root = root.value
+        else:
+            break
+    return isinstance(root, ast.Name) and root.id in schema_names
 
 
 def _alter_column_problem(call: ast.Call) -> str | None:
@@ -261,15 +359,34 @@ def expand_only_violations(source: str) -> list[str]:
     An empty list means the upgrade only adds things (and may widen a column to nullable).
     The checker walks the upgrade() body specifically: a downgrade() full of drops is
     expected and is not this function's business.
+
+    The rule is per statement, not per file. Every statement has to be a shape this guard
+    recognises — an operation call, a batch block, or a no-op — and every call inside one
+    has to be an operation, op.f(), or a sqlalchemy value. Anything else is reported.
+    That is what makes the twelve-migration test above non-vacuous without a counter to
+    back it up: there is no way for this checker to read a file and find nothing, because
+    a statement it cannot read is itself a violation. A per-file "did we recognise at least
+    one operation" counter was not enough — one create_index at the top disarmed it for
+    everything underneath, and four separate shapes (an alias of `op` bound by an
+    assignment, a connection built straight from sqlalchemy, getattr on the operation name,
+    a string handed to exec) came back with zero violations on that account.
     """
     tree = ast.parse(source)
-    op_names = _alembic_op_names(tree) or {"op"}
+    op_names = frozenset(_alembic_op_names(tree) or {"op"})
+    schema_names = frozenset(_sqlalchemy_names(tree) or {"sa"})
     upgrade = _upgrade_function(tree)
     if upgrade is None:
         return ["no module-level upgrade() function, so there is nothing to check"]
 
     violations: list[str] = []
-    operations_seen = 0
+
+    def report(node: ast.AST, reason: str) -> None:
+        # One line per violation: ast.unparse keeps the newlines of a multi-line call, and
+        # a report that wraps is a report nobody reads to the end.
+        rendered = " ".join(ast.unparse(node).split())
+        if len(rendered) > 120:
+            rendered = rendered[:117] + "..."
+        violations.append(f"line {node.lineno}: {rendered} — {reason}")
 
     def operation_name(call: ast.Call, batch_names: frozenset[str]) -> str | None:
         """The method name if this call is an Alembic operation, else None."""
@@ -282,34 +399,21 @@ def expand_only_violations(source: str) -> list[str]:
             return call.func.attr
         return None
 
-    def refuse(call: ast.Call, reason: str) -> None:
-        rendered = ast.unparse(call)
-        if len(rendered) > 120:
-            rendered = rendered[:117] + "..."
-        violations.append(f"line {call.lineno}: {rendered} — {reason}")
-
-    def judge(call: ast.Call, batch_names: frozenset[str]) -> None:
-        nonlocal operations_seen
-        name = operation_name(call, batch_names)
-        if name is None or name in _NAME_HELPERS:
-            return
-
-        operations_seen += 1
-
+    def judge(call: ast.Call, name: str, batch_names: frozenset[str]) -> None:
         if name in _BLOCK_OPENERS:
             return
         if name in _CONDITIONAL_OPERATIONS:
             problem = _alter_column_problem(call)
             if problem:
-                refuse(call, problem)
+                report(call, problem)
             return
         if name in _ADDITIVE_OPERATIONS:
             problem = _add_column_problem(call) if name == "add_column" else None
             if problem:
-                refuse(call, problem)
+                report(call, problem)
             return
 
-        refuse(
+        report(
             call,
             _REFUSED_BECAUSE.get(
                 name,
@@ -318,38 +422,56 @@ def expand_only_violations(source: str) -> list[str]:
             ),
         )
 
-    def visit(node: ast.AST, batch_names: frozenset[str]) -> None:
+    def check_expression(
+        node: ast.AST, batch_names: frozenset[str], *, inside_operation: bool
+    ) -> None:
+        nested = inside_operation
+        if isinstance(node, ast.Call):
+            name = operation_name(node, batch_names)
+            if name is None:
+                if not (inside_operation and _describes_schema(node, schema_names)):
+                    report(node, _UNREADABLE_CALL)
+            elif name in _NAME_HELPERS:
+                nested = True
+            else:
+                judge(node, name, batch_names)
+                nested = True
+        for child in ast.iter_child_nodes(node):
+            check_expression(child, batch_names, inside_operation=nested)
+
+    def check_statement(statement: ast.stmt, batch_names: frozenset[str]) -> None:
+        if _is_nothing(statement):
+            return
+
         # AsyncWith as well as With, not because a migration would ever be async, but
         # because missing the block would silently take `batch.drop_column(...)` out of
         # scope rather than failing — the one way this checker could go quiet.
-        if isinstance(node, ast.With | ast.AsyncWith):
+        if isinstance(statement, ast.With | ast.AsyncWith):
             bound = set(batch_names)
-            for item in node.items:
-                visit(item.context_expr, batch_names)
+            for item in statement.items:
                 context = item.context_expr
+                check_expression(context, batch_names, inside_operation=False)
                 if (
                     isinstance(context, ast.Call)
                     and operation_name(context, batch_names) in _BLOCK_OPENERS
                     and isinstance(item.optional_vars, ast.Name)
                 ):
                     bound.add(item.optional_vars.id)
-            for statement in node.body:
-                visit(statement, frozenset(bound))
+            for inner in statement.body:
+                check_statement(inner, frozenset(bound))
             return
-        if isinstance(node, ast.Call):
-            judge(node, batch_names)
-        for child in ast.iter_child_nodes(node):
-            visit(child, batch_names)
+
+        if isinstance(statement, ast.Expr):
+            check_expression(statement.value, batch_names, inside_operation=False)
+            return
+
+        # Not a shape the guard reads. It is reported, and then walked anyway, so that an
+        # operation hidden inside it is named too rather than left to the generic message.
+        report(statement, _UNREADABLE_STATEMENT)
+        check_expression(statement, batch_names, inside_operation=False)
 
     for statement in upgrade.body:
-        visit(statement, frozenset())
-
-    if not operations_seen and not _is_a_no_op_body(upgrade):
-        violations.append(
-            "nothing in this upgrade() was recognised as an Alembic operation, so this "
-            "guard cannot vouch for it — it does its work some way the checker in "
-            f"{pathlib.Path(__file__).name} cannot see"
-        )
+        check_statement(statement, frozenset())
     return violations
 
 
@@ -372,8 +494,9 @@ def test_every_migration_upgrade_is_expand_only() -> None:
     )
     assert not offenders, (
         "These upgrade() bodies are not expand-only. The rule: a migration may add "
-        "tables, columns, indexes and constraints, and may widen a column to nullable. It "
-        "may not drop, rename or narrow anything, and it may not touch a row.\n\n"
+        "tables, columns and indexes, and may widen a column to nullable. It may not drop, "
+        "rename or narrow anything, it may not add a constraint to a table that already "
+        "exists, and it may not touch a row.\n\n"
         "The reason is the rollback path. app/dbinit.py lets an older image run against a "
         "newer database, so recovering from a bad release is 'deploy the previous image' "
         "and nothing else. A migration that drops or renames something breaks the older "
@@ -384,7 +507,8 @@ def test_every_migration_upgrade_is_expand_only() -> None:
         "the oldest image anyone would roll back to, a second migration removes it, and by "
         "then the drop is safe because the code that used it is gone. A rename is the same "
         "thing in three steps: add the new column, write both, drop the old one a release "
-        "later.\n\n"
+        "later. A new constraint waits the same way, for the same reason in reverse: the "
+        "older image is still writing rows that have never had to satisfy it.\n\n"
         f"{report}"
     )
 
@@ -404,9 +528,9 @@ def _verdict(upgrade_body: str) -> list[str]:
 
 
 # Every allowed shape in one migration, so an over-strict checker is caught as loudly as a
-# toothless one. It covers the four operations the twelve real migrations use plus the
-# three standalone constraint operations the allow-list admits, both NOT NULL spellings
-# that carry a server_default, op.f in an index name, and the batch-block equivalents.
+# toothless one. It covers the three operations the twelve real migrations use, the batch
+# block and the widening alter_column that 0009 is, both NOT NULL spellings that carry a
+# server_default, op.f in an index name, and the sa.* constructors that fill a create_table.
 _ADDITIVE_MIGRATION = """
 op.create_table(
     'statement_shapes',
@@ -415,15 +539,11 @@ op.create_table(
     sa.Column('seen_at', sa.DateTime(), nullable=True),
     sa.ForeignKeyConstraint(['household_id'], ['households.id']),
     sa.PrimaryKeyConstraint('id'),
+    sa.UniqueConstraint('household_id', 'id', name='uq_statement_shape'),
 )
 op.create_index(
     op.f('ix_statement_shapes_household_id'), 'statement_shapes', ['household_id']
 )
-op.create_unique_constraint('uq_statement_shape', 'statement_shapes', ['household_id', 'id'])
-op.create_foreign_key(
-    'fk_statement_shape_household', 'statement_shapes', 'households', ['household_id'], ['id']
-)
-op.create_check_constraint('ck_statement_shape_id', 'statement_shapes', "id <> ''")
 op.add_column('accounts', sa.Column('nickname', sa.String(length=120), nullable=True))
 op.add_column(
     'accounts', sa.Column('archived', sa.Boolean(), nullable=False, server_default=sa.false())
@@ -512,21 +632,271 @@ def test_the_checker_catches_each_forbidden_construct_and_passes_an_additive_one
     assert not _verdict("pass"), "refuses an empty upgrade(), which adds nothing and is fine"
 
 
+def test_finding_1_the_last_upgrade_definition_is_the_one_judged() -> None:
+    """Python binds the last `def upgrade`, so that is the body that must be judged.
+
+    The checker used to return the first one it found. Both halves of this matter: judging
+    the first means a live drop_table reads green, and reporting the first means dead code
+    fails a build for a body that never runs.
+    """
+    additive = (
+        "op.add_column('accounts', sa.Column('nickname', sa.String(length=120),"
+        " nullable=True))"
+    )
+    drop = "op.drop_table('budgets')"
+
+    live_drop = _migration(additive) + f"\n\ndef upgrade() -> None:\n    {drop}\n"
+    found = expand_only_violations(live_drop)
+    assert any("drop_table" in line for line in found), (
+        "judged an earlier upgrade() that Python has already rebound, so the body that "
+        f"actually runs — a drop_table — went unreported: {found}"
+    )
+
+    dead_drop = _migration(drop) + f"\n\ndef upgrade() -> None:\n    {additive}\n"
+    assert not expand_only_violations(dead_drop), (
+        "reported a drop in an upgrade() that a later definition has replaced, which is "
+        f"dead code and cannot run: {expand_only_violations(dead_drop)}"
+    )
+
+
+# The four shapes that came back with zero violations while non-vacuity was a per-module
+# counter: each contains one recognised additive operation, which was enough to disarm the
+# counter for everything after it. None of the four is an Alembic operation the old matcher
+# could see, which was read as "nothing to object to" rather than as "no idea what this is".
+_SHAPES_THAT_DISARMED_THE_OLD_COUNTER = {
+    "an alias of op bound by an assignment": (
+        "op.add_column('accounts', sa.Column('nickname', sa.String(length=120),"
+        " nullable=True))\n"
+        "helper = op\n"
+        "helper.drop_table('budgets')"
+    ),
+    "a connection built straight from sqlalchemy": (
+        "op.create_index('ix_accounts_nickname', 'accounts', ['nickname'])\n"
+        "engine = sa.create_engine('postgresql+psycopg://saiva@localhost/saiva')\n"
+        "engine.execute('DROP TABLE budgets')"
+    ),
+    "the operation name assembled at run time": (
+        "op.create_index('ix_accounts_nickname', 'accounts', ['nickname'])\n"
+        "getattr(op, 'drop_' + 'table')('budgets')"
+    ),
+    "a string handed to exec": (
+        "op.add_column('accounts', sa.Column('nickname', sa.String(length=120),"
+        " nullable=True))\n"
+        "exec(\"op.drop_table('budgets')\")"
+    ),
+}
+
+
+def test_finding_2_vacuity_is_judged_per_statement_not_per_file() -> None:
+    """One recognised operation must not vouch for the statements around it.
+
+    The old guard counted recognised operations per module and only complained if the
+    count was zero, so a single create_index at the top of a file silenced it. The rule is
+    now per statement: a statement the checker cannot read is a violation on its own,
+    because "this checker does not know what that does" is not the same as "that is fine".
+    """
+    for description, body in _SHAPES_THAT_DISARMED_THE_OLD_COUNTER.items():
+        found = _verdict(body)
+        assert found, (
+            f"{description}: a recognised operation elsewhere in the file still vouches "
+            "for a statement the checker cannot read"
+        )
+        assert any("cannot" in line or "not a" in line for line in found), (
+            f"{description}: reported something, but not that the checker cannot read it: "
+            f"{found}"
+        )
+
+    # The flip side, and the reason this is a rule about statements rather than a longer
+    # list of forbidden names: the guard must say so when it cannot read a statement, even
+    # when nothing in the statement looks dangerous.
+    assert _verdict(
+        "op.create_index('ix_accounts_nickname', 'accounts', ['nickname'])\n"
+        "print('migrated')"
+    ), "waves through a statement it cannot account for because it looks harmless"
+
+
+def test_finding_3_a_constraint_added_to_an_existing_table_is_refused() -> None:
+    """The three standalone constraint operations are off the allow-list deliberately.
+
+    They are refused because of the promise this file defends, not despite it: a UNIQUE,
+    CHECK or FOREIGN KEY constraint added to a table that already exists is enforced
+    against an image that has never heard of it, so rolling back to that image leaves it
+    making writes the database now rejects. The long comment on _ADDITIVE_OPERATIONS has
+    the full argument. No migration in the tree uses any of the three, so this costs
+    nothing today — and if that changes, this test is where the decision gets revisited.
+    """
+    assert _verdict(
+        "op.create_unique_constraint('uq_budget_household_category', 'budgets',"
+        " ['household_id', 'category_id'])"
+    ), "allows a UNIQUE constraint on an existing table"
+    assert _verdict(
+        "op.create_check_constraint('ck_budget_limit_positive', 'budgets',"
+        " 'limit_cents > 0')"
+    ), "allows a CHECK constraint on an existing table"
+    assert _verdict(
+        "op.create_foreign_key('fk_budget_household', 'budgets', 'households',"
+        " ['household_id'], ['id'])"
+    ), "allows a FOREIGN KEY on an existing table"
+
+    # The same constraints declared inside a create_table are untouched, because the table
+    # is new: there are no existing rows to fail on and no older image writing to it.
+    assert not _verdict(
+        "op.create_table(\n"
+        "    'budget_notes',\n"
+        "    sa.Column('id', sa.String(length=32), nullable=False),\n"
+        "    sa.Column('budget_id', sa.String(length=32), nullable=False),\n"
+        "    sa.ForeignKeyConstraint(['budget_id'], ['budgets.id']),\n"
+        "    sa.PrimaryKeyConstraint('id'),\n"
+        "    sa.UniqueConstraint('budget_id', name='uq_budget_note'),\n"
+        "    sa.CheckConstraint(\"id <> ''\", name='ck_budget_note_id'),\n"
+        ")"
+    ), "refuses constraints declared inside the create_table that makes the table"
+
+
 # --- the downgrade() bodies ------------------------------------------------------------
 
 # The two ways a downgrade gets invoked: the CLI, and the Python API that app/dbinit.py and
-# test_dbinit.py already use to reach Alembic. Matched as invocations rather than as the
-# bare word on purpose — refresh-images.yml uses "downgrade" in prose, and a word search
-# would report that comment as a violation and teach everyone to ignore this test.
-_RUNS_A_DOWNGRADE = re.compile(
-    r"\balembic\b[^\n]*\bdowngrade\b"  # alembic downgrade <rev>, with any flags between
-    r"|(?<!def )\b[\w.]*downgrade\s*\("  # command.downgrade(cfg, rev), and aliases of it
+# test_dbinit.py already use to reach Alembic. Both are matched against the whole file
+# rather than line by line, because both can be spelled across lines and were being missed:
+# `alembic \` with `downgrade -1` on the next line, a YAML folded block that puts the two
+# words on separate lines, and `command.downgrade \` with its arguments below it all run a
+# migration backwards and all read as nothing to a per-line search.
+#
+# The gap the CLI pattern allows between the two words is bounded and may not contain a
+# command terminator or a blank line, so it stays inside one invocation instead of pairing
+# an `alembic` near the top of a workflow with the word `downgrade` far below it.
+_RUNS_A_DOWNGRADE = (
+    # alembic downgrade <rev>, with any flags or line continuations in between.
+    re.compile(r"\balembic\b(?:(?![;&|]|\n[ \t]*\n)[\s\S]){0,120}?\bdowngrade\b"),
+    # command.downgrade(cfg, rev), and aliases of it, with the parenthesis anywhere after.
+    re.compile(r"\b[\w.]*downgrade[\s\\]*\("),
+    # The Python API named without being called, which is how it would be stashed in a
+    # variable and invoked out of sight of the pattern above.
+    re.compile(r"\b(?:alembic\s*\.\s*)?command\s*\.\s*downgrade\b"),
 )
+
+# `def downgrade` is a definition, not an invocation, and all twelve migrations have one.
+_A_DEFINITION = re.compile(r"\bdef[ \t]+$")
+
+_A_COMMENT_LINE = re.compile(r"^[ \t]*#")
+
+
+def _blanked(text: str, start: int, end: int) -> str:
+    """`text` with [start:end) turned into spaces, newlines kept.
+
+    Blanking rather than deleting is what lets a hit still be reported against the right
+    line of the real file: every offset stays where it was.
+    """
+    return (
+        text[:start]
+        + "".join("\n" if char == "\n" else " " for char in text[start:end])
+        + text[end:]
+    )
+
+
+def _without_comments(text: str) -> str:
+    """The same text with the contents of `#` comments blanked out.
+
+    Line by line, and quote-aware within a line, so `grep '#'` keeps its argument and a
+    URL fragment in a string is not read as the start of a comment. Deliberately not
+    stateful across lines: one unbalanced quote in a shell script would otherwise desync
+    the rest of the file, and this guard going quiet is the failure that matters.
+    """
+    lines = text.splitlines(keepends=True)
+    for index, line in enumerate(lines):
+        cut: int | None = None
+        if _A_COMMENT_LINE.match(line):
+            cut = len(line) - len(line.lstrip(" \t"))
+        else:
+            quote: str | None = None
+            position = 0
+            while position < len(line):
+                char = line[position]
+                if quote is not None:
+                    if char == "\\":
+                        position += 2
+                        continue
+                    if char == quote:
+                        quote = None
+                elif char in "\"'":
+                    quote = char
+                elif char == "#":
+                    cut = position
+                    break
+                position += 1
+        if cut is not None:
+            lines[index] = _blanked(line, cut, len(line))
+    return "".join(lines)
+
+
+def _without_python_prose(text: str) -> str:
+    """The same text with Python docstrings and other bare string statements blanked.
+
+    This is the "a mention is not a call" half of the fix, and it stops where it does on
+    purpose. A string standing alone as a statement is documentation — it is how this file
+    explains that `alembic downgrade -1` is the thing not to run. A string in an argument
+    list is data, and the data in this tree includes command lines: blanking every string
+    literal would hide subprocess.run(['alembic', 'downgrade', '-1']), which is exactly the
+    invocation this test exists to catch. So prose goes and arguments stay.
+
+    Unparseable input gets nothing blanked, which errs toward reporting.
+    """
+    try:
+        tree = ast.parse(text)
+    except SyntaxError:
+        return text
+
+    starts = [0]
+    for line in text.splitlines(keepends=True):
+        starts.append(starts[-1] + len(line))
+
+    redacted = text
+    for node in ast.walk(tree):
+        if (
+            isinstance(node, ast.Expr)
+            and isinstance(node.value, ast.Constant)
+            and isinstance(node.value.value, str)
+        ):
+            end_lineno = node.end_lineno or node.lineno
+            end_col = node.end_col_offset or 0
+            redacted = _blanked(
+                redacted,
+                starts[node.lineno - 1] + node.col_offset,
+                starts[end_lineno - 1] + end_col,
+            )
+    return redacted
+
+
+def downgrade_invocations(text: str, *, python: bool = False) -> list[str]:
+    """The lines in `text` that run a migration backwards, as `line N: <source>`.
+
+    Comments are stripped first, and in Python so is prose standing alone as a string,
+    because this check is worth nothing if it cries wolf: a test that fires on a comment
+    warning people off downgrades is a test everyone learns to ignore, and an ignored guard
+    is the same as no guard.
+
+    The limit is the usual one for a grep: a command assembled at runtime out of a
+    variable, or a method reached through getattr, would slip past it.
+    """
+    redacted = _without_comments(text)
+    if python:
+        redacted = _without_python_prose(redacted)
+
+    lines = text.splitlines()
+    hits: dict[int, str] = {}
+    for pattern in _RUNS_A_DOWNGRADE:
+        for match in pattern.finditer(redacted):
+            if _A_DEFINITION.search(redacted[: match.start()]):
+                continue
+            lineno = redacted.count("\n", 0, match.start()) + 1
+            source = lines[lineno - 1].strip() if lineno <= len(lines) else ""
+            hits.setdefault(lineno, f"line {lineno}: {source}")
+    return [hits[lineno] for lineno in sorted(hits)]
+
 
 # Where a downgrade could plausibly be invoked: the code the container runs, the scripts the
 # owner runs by hand, the workflows CI runs, and the compose/Dockerfile entrypoints that
-# decide what happens at boot. Not backend/tests: a test that exercises a downgrade on a
-# throwaway database is fine, and would be a good thing to have.
+# decide what happens at boot.
 _PLACES_THAT_RUN_THINGS = (
     "backend/app/**/*.py",
     "backend/Dockerfile",
@@ -536,6 +906,18 @@ _PLACES_THAT_RUN_THINGS = (
     "Makefile",
 )
 
+# Two test trees, not one. backend/tests falls outside the globs above already; scripts/
+# does not, and scripts/tests/ holds the shell suite — including the one that seeds an
+# alembic_version row and the one that exercises deploy.sh's --allow-downgrade flag. A test
+# that drives a downgrade against a throwaway database is a good thing to have, and reading
+# it as production code would either report it or teach someone to weaken the pattern until
+# it stopped. So any path with a `tests` component is skipped, wherever the tree grows one.
+_A_TEST_TREE = frozenset({"test", "tests"})
+
+
+def _is_test_support(path: pathlib.Path) -> bool:
+    return any(part in _A_TEST_TREE for part in path.relative_to(REPO).parts)
+
 
 def test_nothing_in_the_tree_runs_a_migration_backwards() -> None:
     """The downgrade() bodies are documentation, and must not become a procedure.
@@ -543,8 +925,16 @@ def test_nothing_in_the_tree_runs_a_migration_backwards() -> None:
     All twelve have one, because that is what `alembic revision --autogenerate` writes, and
     not one of them has ever been executed by anything: checks.yml runs `alembic upgrade
     head` and `alembic check`, refresh-images.yml upgrades to the previous revision on a
-    fresh database, and dbinit only ever upgrades. Grep for 'downgrade' across the tree and
-    the only hit outside migrations/ is the word in a comment.
+    fresh database, and dbinit only ever upgrades.
+
+    Grep for 'downgrade' across the tree, excluding migrations/, and there are ten hits,
+    none of them a migration going backwards. Three are prose in comments (Makefile,
+    refresh-images.yml, checks.yml), one is an eslint rule that was deliberately not
+    downgraded, one is the HSTS max-age in the Caddyfile, and five are deploy.sh's
+    --allow-downgrade flag and the tests of it — which is about going back to an older
+    image, the recovery this file's expand-only rule is what makes safe. That shape matters
+    for how this is matched: the word alone is useless as a signal, and the flag that names
+    the supported recovery must not be mistaken for the unsupported one.
 
     An untested path is worse than no path, because it looks like one. 0009's downgrade
     opens with `DELETE FROM import_batches WHERE account_id IS NULL` — it is correct about
@@ -559,42 +949,67 @@ def test_nothing_in_the_tree_runs_a_migration_backwards() -> None:
     deliberate change: delete this test, and in the same commit make CI actually run the
     downgrade chain against a seeded database, because until something executes those
     twelve bodies nobody knows whether they work.
-
-    The limit of this check is the usual one for a grep: a command assembled at runtime out
-    of a variable would slip past it.
     """
-    assert _RUNS_A_DOWNGRADE.search("alembic downgrade -1"), "misses the plain CLI form"
-    assert _RUNS_A_DOWNGRADE.search(
+    # What it must catch, including the spellings that span lines.
+    assert downgrade_invocations("alembic downgrade -1"), "misses the plain CLI form"
+    assert downgrade_invocations(
         "alembic -c alembic.ini downgrade base"
     ), "misses the CLI form with flags in between"
-    assert _RUNS_A_DOWNGRADE.search(
-        "    command.downgrade(cfg, '0011')"
+    assert downgrade_invocations(
+        "    command.downgrade(cfg, '0011')\n", python=True
     ), "misses the Python API, which is how dbinit reaches Alembic"
-    assert not _RUNS_A_DOWNGRADE.search(
-        "def downgrade() -> None:"
-    ), "fires on a migration defining its own downgrade, which every one of them does"
-    assert not _RUNS_A_DOWNGRADE.search(
-        "# code as `:latest`. That is a downgrade of a family's finance box, applied"
-    ), "fires on the word in a comment, which is refresh-images.yml line 124"
+    assert downgrade_invocations(
+        "run: |\n  alembic \\\n    downgrade -1\n"
+    ), "misses a CLI invocation continued onto the next line"
+    assert downgrade_invocations(
+        "      run: >\n        alembic\n        downgrade base\n"
+    ), "misses a CLI invocation folded across lines by YAML"
+    assert downgrade_invocations(
+        "command.downgrade \\\n    (cfg, '0011')\n", python=True
+    ), "misses a Python call whose arguments are on the next line"
+    assert downgrade_invocations(
+        "runner = command.downgrade\nrunner(cfg, '0011')\n", python=True
+    ), "misses the Python API stashed in a variable and called out of sight"
+    assert downgrade_invocations(
+        "subprocess.run(['alembic', 'downgrade', '-1'], check=True)\n", python=True
+    ), "misses a shelled-out downgrade, whose words are all string literals"
 
-    scanned = 0
+    # What it must not cry wolf on: a definition, and prose that names the thing.
+    assert not downgrade_invocations(
+        "def downgrade() -> None:\n    op.drop_table('budgets')\n", python=True
+    ), "fires on a migration defining its own downgrade, which every one of them does"
+    assert not downgrade_invocations(
+        "# code as `:latest`. That is a downgrade of a family's finance box, applied"
+    ), "fires on the word in a comment, which is refresh-images.yml line 131"
+    assert not downgrade_invocations(
+        "    --allow-downgrade) ALLOW_DOWNGRADE=1 ;;"
+    ), "fires on deploy.sh's flag for rolling back to an older image"
+
+    scanned: dict[str, int] = {}
     callers: dict[str, list[str]] = {}
     for pattern in _PLACES_THAT_RUN_THINGS:
+        scanned[pattern] = 0
         for path in sorted(REPO.glob(pattern)):
-            if not path.is_file():
+            if not path.is_file() or _is_test_support(path):
                 continue
-            scanned += 1
-            hits = [
-                line.strip()
-                for line in path.read_text(errors="replace").splitlines()
-                if _RUNS_A_DOWNGRADE.search(line)
-            ]
+            scanned[pattern] += 1
+            hits = downgrade_invocations(
+                path.read_text(errors="replace"), python=path.suffix == ".py"
+            )
             if hits:
                 callers[str(path.relative_to(REPO))] = hits
 
-    assert scanned > 20, (
-        f"only scanned {scanned} files across {_PLACES_THAT_RUN_THINGS}, which is fewer "
-        "than this tree holds — the globs are wrong and this guard would pass vacuously"
+    # Per glob, not in total, because 61 files under backend/app would otherwise hide a
+    # pattern that has stopped matching anything at all.
+    empty = sorted(name for name, count in scanned.items() if not count)
+    assert not empty, (
+        f"these globs matched no files: {empty}. Something has been renamed or moved, and "
+        "this guard is no longer looking at the place it is named for"
+    )
+    assert sum(scanned.values()) > 60, (
+        f"only scanned {sum(scanned.values())} files across {_PLACES_THAT_RUN_THINGS}, "
+        "which is fewer than this tree holds — 81 as of this writing, 61 of them under "
+        "backend/app. The globs are wrong and this guard would pass vacuously"
     )
     assert not callers, (
         "Something here runs a migration backwards. No downgrade() in "
@@ -605,4 +1020,118 @@ def test_nothing_in_the_tree_runs_a_migration_backwards() -> None:
         "If the schema really must move backwards, make CI run the downgrade chain against "
         "a seeded database first, then delete this test in the same commit: "
         f"{callers}"
+    )
+
+
+def test_finding_4_a_downgrade_spelled_across_lines_is_still_caught() -> None:
+    """One invocation, several lines: a per-line search saw nothing in either of these.
+
+    The scan reads whole files now. These two are the shapes a line-based search cannot
+    see at all — the words of one command split by a continuation — and both are things
+    somebody would really write.
+    """
+    continued_cli = (
+        "#!/usr/bin/env bash\n"
+        "set -euo pipefail\n"
+        "docker compose exec api alembic \\\n"
+        "    -c alembic.ini \\\n"
+        "    downgrade -1\n"
+    )
+    continued_call = (
+        "from alembic import command\n"
+        "\n"
+        "def rollback(cfg):\n"
+        "    command.downgrade \\\n"
+        "        (cfg, '0011')\n"
+    )
+    assert downgrade_invocations(continued_cli), (
+        "misses a CLI downgrade continued across lines with backslashes"
+    )
+    assert downgrade_invocations(continued_call, python=True), (
+        "misses a Python downgrade whose argument list starts on the next line"
+    )
+
+    # The bound on the gap is what keeps this from pairing any two distant words: an
+    # alembic command at the top and the word downgrade much further down are not one
+    # invocation, and reporting them as one would be the cry-wolf failure again.
+    assert not downgrade_invocations(
+        "- run: alembic upgrade head\n"
+        "\n"
+        "- name: notes\n"
+        "  run: echo 'rolling back is an image downgrade, not a schema one'\n"
+    ), "pairs an unrelated alembic command with the word downgrade lines later"
+
+
+def test_finding_5_prose_that_names_downgrade_is_not_an_invocation() -> None:
+    """A mention is not a call, and a guard that cries wolf is a guard nobody reads.
+
+    The pattern needs parentheses to count a Python call, which means prose that writes
+    `downgrade()` the way prose does used to trip it. Comments and standalone strings are
+    stripped before matching now, and the real call on a line that also carries a comment
+    still has to be caught.
+    """
+    assert not downgrade_invocations(
+        "# Never call downgrade() from here: see test_migrations_expand_only.py\n",
+        python=True,
+    ), "fires on a comment naming downgrade() with parentheses"
+    assert not downgrade_invocations(
+        '"""Recovery is an image rollback.\n'
+        "\n"
+        "Do not reach for `alembic downgrade -1`, and do not call command.downgrade(cfg)\n"
+        "from the app: no downgrade() body here has ever been executed.\n"
+        '"""\n',
+        python=True,
+    ), "fires on a module docstring explaining what not to do"
+    assert not downgrade_invocations(
+        "run_update()  # not a downgrade(); the schema only moves forward\n", python=True
+    ), "fires on a trailing comment naming downgrade()"
+
+    # And it must still see the real thing when prose is sitting next to it.
+    assert downgrade_invocations(
+        "command.downgrade(cfg, '0011')  # never call downgrade() from here\n", python=True
+    ), "stops seeing a real call because there is a comment on the same line"
+    assert downgrade_invocations(
+        '"""Roll the schema back."""\n'
+        "\n"
+        "def rollback(cfg):\n"
+        "    command.downgrade(cfg, '0011')\n",
+        python=True,
+    ), "stops seeing a real call in a module that has a docstring"
+
+
+def test_finding_6_a_second_test_tree_is_not_scanned_as_production_code() -> None:
+    """scripts/tests/ is a test tree, and the exclusion has to cover it.
+
+    The comment above _PLACES_THAT_RUN_THINGS used to say the globs reached 75 files with
+    4 under scripts/; they reach 85, 13 of them under scripts/, because scripts/tests/
+    holds the shell suite. Scanning it as production code puts a test that drives a
+    downgrade on a throwaway database in the same bucket as the deploy, and the only ways
+    out of that are to weaken the pattern or to ignore the test.
+    """
+    assert _is_test_support(REPO / "scripts" / "tests" / "run.sh")
+    assert _is_test_support(REPO / "backend" / "tests" / "test_dbinit.py")
+    assert not _is_test_support(REPO / "scripts" / "deploy.sh")
+    assert not _is_test_support(REPO / "scripts" / "lib" / "release.sh")
+    assert not _is_test_support(REPO / "backend" / "app" / "dbinit.py")
+
+    under_scripts = [
+        path
+        for path in sorted(REPO.glob("scripts/**/*"))
+        if path.is_file() and not _is_test_support(path)
+    ]
+    assert under_scripts, "the scripts/ glob stopped matching anything outside its tests"
+    assert not any(
+        "tests" in path.relative_to(REPO).parts for path in under_scripts
+    ), f"the scripts/ test tree is still being scanned: {under_scripts}"
+
+    # The claim the old comment got wrong, kept honest by asserting it rather than writing
+    # it down: scripts/tests/ exists and is big enough to matter.
+    in_the_test_tree = [
+        path
+        for path in sorted(REPO.glob("scripts/**/*"))
+        if path.is_file() and _is_test_support(path)
+    ]
+    assert len(in_the_test_tree) >= 4, (
+        "scripts/tests/ has fewer files than the exclusion was written for; if the shell "
+        f"suite has moved, move the exclusion with it: {in_the_test_tree}"
     )

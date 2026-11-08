@@ -97,6 +97,8 @@ PHASE="startup"
 SAFETY_DUMP=""        # final path of the pre-restore dump, once it exists
 SAFETY_DUMP_TMP=""    # the partial file it is written to first
 DB=""                 # filled in by load_settings
+DB_META=""            # "encoding|collate|ctype|owner" of DB, filled in by read_db_meta
+DB_EXISTED=0          # 1 if DB was on the server when this run started, 0 if it was not
 
 log()  { printf '%s\n' "$*" >&2; }
 blank() { printf '\n' >&2; }
@@ -107,7 +109,7 @@ die() { log "  $*"; exit 1; }
 # phase it describes rather than inside a case statement nobody reads under pressure.
 state_report() {
   case "$PHASE" in
-    startup|preflight|list)
+    startup|preflight|inspect|pre-drop|list)
       log "  Nothing was changed. The database is exactly as it was."
       ;;
     confirm)
@@ -121,27 +123,95 @@ state_report() {
         log "  backup -- it is named so that it cannot be mistaken for one."
       fi
       ;;
-    recreate)
+    drop)
       # The state line comes first and fits on one line on purpose. Whoever reads this is
       # reading the first line and nothing else until they have calmed down.
+      #
+      # This fires only while the DROP itself is in flight, which is why it describes what
+      # to check instead of asserting what happened: a drop that is REFUSED changes
+      # nothing, and a drop interrupted part way can leave the database present but marked
+      # invalid. Claiming the data was gone here, as this used to, sends someone looking
+      # for a recovery they do not need.
+      log "  STOP AND READ THIS."
+      log "  Dropping database \"${DB}\" did not report success, so what is there now has"
+      log "  to be checked rather than assumed. A refused drop leaves the data intact; an"
+      log "  interrupted one can leave the database in place but marked invalid, which"
+      log "  answers every connection with \"cannot connect to invalid database\" until it"
+      log "  is dropped again. Either way nothing has been loaded in: no dump has"
+      log "  overwritten anything."
+      log ""
+      log "  What is actually there is listed by:"
+      log ""
+      if [ "$DIRECT" -eq 1 ]; then
+        log "      psql --host ${PGHOST_EFF} --port ${PGPORT_EFF} --username ${PGUSER_EFF} -l"
+      else
+        log "      docker compose -f docker-compose.prod.yml exec db psql -U ${PGUSER_EFF} -l"
+      fi
+      recovery_hint
+      ;;
+    create)
       log "  STOP AND READ THIS."
       log "  Database \"${DB}\" does NOT hold the data it held before this script ran."
-      log "  The failure happened while dropping and recreating it, so it is now missing"
-      log "  or empty, and nothing has been loaded into it."
+      log "  It was dropped, and creating it again failed, so it is missing altogether and"
+      log "  nothing has been loaded into it."
       recovery_hint
+      ;;
+    create-fresh)
+      # Nothing was lost, and saying so plainly is the whole point of this phase existing:
+      # it is only reachable when the database was already gone before this script ran.
+      log "  Nothing was lost. Database \"${DB}\" did not exist when this script started,"
+      log "  so nothing was dropped and nothing was overwritten. Creating it failed, so it"
+      log "  is still missing and the dump was not loaded."
+      log "  Whatever removed it -- a wiped db_data volume, usually -- has to be dealt with"
+      log "  first: the database server has to be up, and \"${PGUSER_EFF}\" has to be"
+      log "  allowed to CREATE DATABASE."
       ;;
     restore)
       log "  STOP AND READ THIS."
-      log "  Database \"${DB}\" does NOT hold the data it held before this script ran."
-      log "  It was dropped and recreated, and then the dump failed to finish loading."
+      if [ "$DB_EXISTED" -eq 1 ]; then
+        log "  Database \"${DB}\" does NOT hold the data it held before this script ran."
+        log "  It was dropped and recreated, and then the dump failed to finish loading."
+      else
+        log "  Database \"${DB}\" did not exist when this script started, so nothing was"
+        log "  lost -- but nothing was restored either: it was created empty and then the"
+        log "  dump failed to finish loading."
+      fi
       log "  The load runs as a single transaction, so an error rolls the whole dump back:"
       log "  the database almost certainly exists and is completely EMPTY."
       recovery_hint
       ;;
+    restore-partial)
+      # Deliberately not the report above. --single-transaction does not cover this case:
+      # psql commits whatever it has been given when its INPUT ENDS, and a dump stream
+      # that stops part way is an end of input, not an error. So psql exits 0 having
+      # committed half a ledger. Reporting that as "completely EMPTY" would be the worst
+      # wrong answer this script could give -- it describes a database that needs
+      # restoring as one that has already been dealt with.
+      log "  STOP AND READ THIS."
+      log "  Database \"${DB}\" may hold PART of ${DUMP_NAME} -- not all of it, and not"
+      log "  nothing. The dump stopped being readable part way through, and psql commits"
+      log "  what it has when its input ends, so it reported success on an incomplete"
+      log "  load. Do not start the api against this database and do not treat it as"
+      log "  restored: load a dump that reads all the way through, or put back the state"
+      log "  this run replaced."
+      recovery_hint
+      ;;
+    verify-unreachable)
+      log "  The dump loaded and committed, but \"${DB}\" could not be queried afterwards,"
+      log "  so none of the checks got an answer -- the error is above. The database holds"
+      log "  whatever that dump contained; nothing here has managed to look at it."
+      recovery_hint
+      ;;
+    verify-empty)
+      log "  The dump loaded without error and left database \"${DB}\" with no tables at"
+      log "  all. That is not a restore of anything: whatever that file holds, it is not a"
+      log "  dump of this household's schema. Do not start the api against it."
+      recovery_hint
+      ;;
     verify)
-      log "  The dump loaded, but the checks afterwards did not pass -- read the lines"
-      log "  above for which one. Database \"${DB}\" is NOT empty; it holds whatever the"
-      log "  dump contained. Do not start the api against it until the mismatch is"
+      log "  The dump loaded, but the checks afterwards did not all pass -- the lines"
+      log "  above say which. Database \"${DB}\" holds whatever that dump contained and"
+      log "  nothing else. Do not start the api against it until the mismatch is"
       log "  understood."
       recovery_hint
       ;;
@@ -427,11 +497,28 @@ db_preflight() {
 
 # --- listing ----------------------------------------------------------------------------
 
-# "<size> <name>" per dump. Size comes from `wc -c` rather than `stat -c %s`, and the age
-# is worked out on this side from the stamp in the name, so the only commands this needs
-# inside the container are `cd`, `wc` and a `for` loop. Alpine's busybox is a different
-# build from the host's coreutils and the one path that absolutely has to work on a broken
-# box is this one, so it leans on as little of either as possible.
+# One line per directory entry matching *.sql.gz:
+#
+#     dump <size> <name>     a readable regular file; size in bytes
+#     skip <why> <name>      anything else -- a subdirectory, a dangling symlink, a file
+#                            this user cannot read
+#
+# A name is always the LAST field, so a name with a space in it survives `read -r a b rest`
+# on the other side.
+#
+# One entry that cannot be read is skipped and reported, not treated as a failure of the
+# whole listing. It used to be the latter, and the cost was out of all proportion: a
+# single unreadable file -- a half-finished `docker cp`, a directory someone created by
+# mistake, a dump restored from a tarball with the wrong owner -- ended the listing AND
+# every restore, including of the good dumps sitting right beside it. A backups directory
+# with something wrong in it is the normal case at the moment this script gets run, not an
+# exceptional one.
+#
+# Size comes from `wc -c` rather than `stat -c %s`, and the age is worked out on this side
+# from the stamp in the name, so the only commands this needs inside the container are
+# `cd`, `wc` and a `for` loop. Alpine's busybox is a different build from the host's
+# coreutils and the one path that absolutely has to work on a broken box is this one, so
+# it leans on as little of either as possible.
 #
 # Reading the age out of the NAME rather than the file's mtime is also the more correct
 # answer: the name is what pg_dump was told to call the dump when it was taken, and it
@@ -441,13 +528,56 @@ list_raw() {
     cd "$1" 2>/dev/null || exit 9
     found=0
     for f in *.sql.gz; do
-      [ -e "$f" ] || continue
+      # -e is false for a dangling symlink, which is still an entry someone will go
+      # looking for, so -L is asked as well. Both false means the glob matched nothing
+      # and "$f" is the pattern itself.
+      [ -e "$f" ] || [ -L "$f" ] || continue
       found=1
-      size=$(wc -c < "$f") || exit 1
-      printf "%s %s\n" "$size" "$f"
+      if [ -d "$f" ]; then
+        printf "skip directory %s\n" "$f"
+      elif [ ! -f "$f" ]; then
+        printf "skip not-a-file %s\n" "$f"
+      elif [ ! -r "$f" ]; then
+        printf "skip unreadable %s\n" "$f"
+      else
+        # The redirect is what reads the file, so this catches what -r cannot: a file on
+        # a failing disk, or one whose permissions changed between the test and the read.
+        size=$(wc -c < "$f" 2>/dev/null) || size=""
+        case "$size" in
+          "" | *[!0-9]*) printf "skip unreadable %s\n" "$f" ;;
+          *)             printf "dump %s %s\n" "$size" "$f" ;;
+        esac
+      fi
     done
     [ "$found" -eq 1 ] || exit 8
   ' "$BACKUP_MOUNT"
+}
+
+# One phrase per reason code list_raw can emit, so the listing and a refused restore
+# describe the same entry in the same words.
+skip_reason() {
+  case "$1" in
+    directory)  printf 'a directory, not a file' ;;
+    unreadable) printf 'cannot be read -- check its owner and permissions' ;;
+    *)          printf 'not a regular file (a dangling symlink, or a device)' ;;
+  esac
+}
+
+# The entries list_raw stepped over, named out loud. Each one is either the dump someone
+# is about to go looking for, or the reason the list is shorter than they expected; both
+# are worth a line. On stderr with the rest of the commentary, so the listing on stdout
+# stays a list of restorable dumps and nothing else.
+report_skipped() {
+  local lines="$1" why name
+  [ -n "$lines" ] || return 0
+  log "  Skipped, and NOT restorable:"
+  blank
+  while read -r why name; do
+    [ -n "${name:-}" ] || continue
+    log "    ${name}"
+    log "      $(skip_reason "$why")"
+  done < <(printf '%s' "$lines")
+  blank
 }
 
 cmd_list() {
@@ -476,18 +606,37 @@ cmd_list() {
     die "Could not read the dumps out of ${SOURCE_LABEL} (exit ${rc})."
   fi
 
-  local now; now="$(date -u +%s)"
-  log "  Dumps in ${SOURCE_LABEL}, newest first:"
-  blank
-
   # Stamped into "<epoch> <size> <name>" here so the sort is a numeric sort on a real
   # timestamp. Dumps with no stamp get epoch 0 and fall to the bottom, where an unlabelled
   # file belongs -- rather than wherever its name happens to sort.
-  local size name epoch stamped=""
-  while read -r size name; do
+  local kind size name epoch stamped="" skipped="" dumps=0 skips=0
+  while read -r kind size name; do
     [ -n "${name:-}" ] || continue
-    stamped+="$(epoch_from_name "$name") ${size} ${name}"$'\n'
+    case "$kind" in
+      dump)
+        stamped+="$(epoch_from_name "$name") ${size} ${name}"$'\n'
+        dumps=$(( dumps + 1 ))
+        ;;
+      skip)
+        skipped+="${size} ${name}"$'\n'
+        skips=$(( skips + 1 ))
+        ;;
+    esac
   done < <(printf '%s\n' "$raw")
+
+  # Entries matching *.sql.gz but not one of them readable. Distinct from the empty
+  # directory above, and the files have to be named: "no dumps" would send someone looking
+  # for files that are sitting right there.
+  if [ "$dumps" -eq 0 ]; then
+    report_skipped "$skipped"
+    die "Nothing in ${SOURCE_LABEL} can be read as a dump: all ${skips} of the entries
+  matching *.sql.gz are listed above with the reason. Fix one of those -- a permissions
+  problem on the host is the usual cause -- and run this again."
+  fi
+
+  local now; now="$(date -u +%s)"
+  log "  Dumps in ${SOURCE_LABEL}, newest first:"
+  blank
 
   # The name gets its own line: it is the thing that has to be typed back, and it is too
   # long to share one with the details inside 80 columns.
@@ -507,6 +656,8 @@ cmd_list() {
         "$(human_size "$size")"
     fi
   done < <(printf '%s' "$stamped" | sort -k1,1nr -k3,3)
+
+  report_skipped "$skipped"
 
   log "  premigrate   written by the api container just before it migrated the schema."
   log "  prerestore   written by this script just before it replaced the database."
@@ -569,10 +720,52 @@ revision_in_dump() {
   printf '%s' "$rev"
 }
 
+# --- what is on the server right now ----------------------------------------------------
+
+# Read before anything else happens, and separately from the drop, for two reasons.
+#
+# The database may not be there at all. "The db_data volume is gone and a dump is all that
+# is left" is the first case this script's header names, and it used to be the one case
+# that could not be restored: the safety dump ran first, pg_dump of a database that does
+# not exist fails, and a failed safety dump stops the restore -- so the branch below that
+# creates a missing database was unreachable on the normal path. Asking the question here
+# is what makes that case work.
+#
+# And the encoding, collation and owner have to be captured BEFORE the drop, because
+# dropping the database is also how that information is lost. A database recreated from
+# template1 instead inherits whatever encoding and collation template1 happens to have,
+# which on a host set up in a different locale is not what the dump's data was written
+# with.
+#
+# Its own phase, because a failure to READ pg_database has changed nothing. Reporting it
+# under the drop's phase -- which is what happened while this SELECT lived inside
+# recreate_database -- told the owner their database had been dropped and emptied at the
+# one moment that claim was both false and unverifiable by them.
+read_db_meta() {
+  PHASE="inspect"
+  DB_META="$(psql_on "$MAINT_DB" "select pg_encoding_to_char(encoding) || '|' || datcollate || '|' || datctype || '|' || pg_get_userbyid(datdba) from pg_database where datname = '${DB}'")"
+  if [ -n "$DB_META" ]; then
+    DB_EXISTED=1
+  else
+    DB_EXISTED=0
+  fi
+}
+
 # --- the safety dump --------------------------------------------------------------------
 
 take_safety_dump() {
   PHASE="safety-dump"
+
+  # "There is nothing to back up" is a reason to carry on; "there IS something and I could
+  # not back it up" is a reason to stop, and that is the branch below this one. Collapsing
+  # the two -- which is what happened while this ran before the database was looked at --
+  # turned the headline scenario into an abort.
+  if [ "$DB_EXISTED" -eq 0 ]; then
+    log "  No safety dump: database \"${DB}\" does not exist, so there is no current state"
+    log "  to save and nothing this restore can overwrite."
+    blank
+    return 0
+  fi
 
   if [ -n "${SAIVA_RESTORE_SKIP_SAFETY_DUMP:-}" ] || [ "$SKIP_SAFETY" -eq 1 ]; then
     log "  Skipping the safety dump because it was asked for explicitly. If this restore"
@@ -660,26 +853,31 @@ take_safety_dump() {
 # --- the restore ------------------------------------------------------------------------
 
 recreate_database() {
-  PHASE="recreate"
+  # Nothing in here has changed anything yet, and the phase has to say so -- otherwise the
+  # safety dump's report, which claims the safety dump failed, is still the one on its way
+  # out.
+  PHASE="pre-drop"
 
-  # Captured before the drop, because dropping the database is also how this information
-  # is lost. A database recreated from template1 instead inherits whatever encoding and
-  # collation template1 happens to have, which on a host set up in a different locale is
-  # not what the dump's data was written with.
-  local meta enc coll ctype owner clause=""
-  meta="$(psql_on "$MAINT_DB" "select pg_encoding_to_char(encoding) || '|' || datcollate || '|' || datctype || '|' || pg_get_userbyid(datdba) from pg_database where datname = '${DB}'")"
+  local enc coll ctype owner clause=""
 
-  if [ -n "$meta" ]; then
-    IFS='|' read -r enc coll ctype owner <<<"$meta"
+  if [ "$DB_EXISTED" -eq 1 ]; then
+    IFS='|' read -r enc coll ctype owner <<<"$DB_META"
     clause="WITH OWNER = \"${owner}\" ENCODING = '${enc}' LC_COLLATE = '${coll}' LC_CTYPE = '${ctype}' TEMPLATE = template0"
     log "  Dropping and recreating database \"${DB}\" (${enc}, ${coll}, owner ${owner})."
     # WITH (FORCE) terminates the other sessions itself, which matters because the api
     # container restarts on a loop in exactly this situation and will reconnect between a
     # pg_terminate_backend and a plain DROP. Postgres 13 and later only.
+    #
+    # The phase moves one statement at a time from here on. Each of these two statements
+    # leaves the database in a different state, and the report for one is not true of the
+    # other.
+    PHASE="drop"
     psql_on "$MAINT_DB" "DROP DATABASE \"${DB}\" WITH (FORCE)" >/dev/null
+    PHASE="create"
   else
     clause="WITH OWNER = \"${PGUSER_EFF}\" TEMPLATE = template0"
-    log "  Database \"${DB}\" does not exist yet; creating it."
+    log "  Database \"${DB}\" does not exist, so there is nothing to drop; creating it."
+    PHASE="create-fresh"
   fi
 
   psql_on "$MAINT_DB" "CREATE DATABASE \"${DB}\" ${clause}" >/dev/null
@@ -712,6 +910,10 @@ load_dump() {
     exit 1
   fi
   if [ "${rcs[0]}" -ne 0 ]; then
+    # Its own phase: psql did NOT fail here, so --single-transaction rolled nothing back.
+    # It was handed a truncated stream, treated the end of it as the end of its input, and
+    # committed. See the restore-partial report.
+    PHASE="restore-partial"
     log "  The dump could not be read all the way through (gunzip exited ${rcs[0]}),"
     log "  even though it read cleanly a moment ago."
     exit 1
@@ -721,15 +923,24 @@ load_dump() {
 }
 
 verify_restore() {
-  PHASE="verify"
+  # Three phases rather than one, because the states they describe are different and the
+  # owner acts on them differently: the checks could not be RUN, the dump left nothing at
+  # all, or a check failed. The first query is what tells the first two apart from the
+  # third.
+  PHASE="verify-unreachable"
   log "  Checking the restored database:"
 
   local tables marker rev problem=0
 
   tables="$(psql_on "$DB" "select count(*) from information_schema.tables where table_schema = 'public'")"
+  PHASE="verify"
   printf '    %-28s %s\n' "tables in public schema" "$tables" >&2
   if [ "${tables:-0}" -lt 1 ]; then
     printf '    %-28s %s\n' "" "-> EMPTY. The dump put no tables here." >&2
+    # Reported under its own phase. The generic report says the database holds what the
+    # dump contained, which here would be read as "it holds something" two lines under a
+    # check that just said it holds nothing.
+    PHASE="verify-empty"
     problem=1
   fi
 
@@ -780,28 +991,40 @@ describe_restore() {
     printf '    %-16s %s\n' "Age"        "$(human_age "$age_secs")" >&2
   fi
   printf '    %-16s %s\n' "Size"         "$(human_size "$DUMP_SIZE") compressed" >&2
-  printf '    %-16s %s\n' "Into"         "database \"${DB}\" as ${PGUSER_EFF}@${PGHOST_EFF}:${PGPORT_EFF}" >&2
+  local into="database \"${DB}\""
+  [ "$DB_EXISTED" -eq 1 ] || into="${into} (which does not exist yet)"
+  printf '    %-16s %s\n' "Into"         "${into} as ${PGUSER_EFF}@${PGHOST_EFF}:${PGPORT_EFF}" >&2
   printf '    %-16s %s\n' "Schema era"   "${DUMP_REVISION:+alembic revision }${DUMP_REVISION:-no alembic_version row in the dump}" >&2
   blank
-  log "  This REPLACES the household's database. \"${DB}\" is dropped and rebuilt from"
-  log "  the dump, so EVERYTHING WRITTEN SINCE ${taken:-THE DUMP WAS TAKEN} IS LOST:"
-  log "  every transaction imported, every category assigned, every budget edited, every"
-  if [ "$DUMP_EPOCH" -gt 0 ]; then
-    log "  bill marked paid, every login created in the last $(human_span "$age_secs")."
+  if [ "$DB_EXISTED" -eq 0 ]; then
+    # The paragraph below would be a lie here, and a frightening one: there is nothing to
+    # lose, because there is nothing there. This is the one case in this script that
+    # cannot cost anything, and whoever is reading at this hour should be told that in the
+    # same place they would otherwise be warned.
+    log "  There is no database \"${DB}\" on this server, so this restore REPLACES NOTHING."
+    log "  It creates the database and loads the dump into it. Nothing can be lost, and"
+    log "  there is no current state to take a safety dump of."
   else
-    # No stamp means no duration can be named, and inventing one from the file's mtime
-    # would be worse than saying nothing: an mtime changes when a dump is copied about.
-    log "  bill marked paid, every login created since then. How long ago that was cannot"
-    log "  be read off this file -- check the dump before answering the prompt."
-  fi
-  blank
-  if [ "$SKIP_SAFETY" -eq 1 ] || [ -n "${SAIVA_RESTORE_SKIP_SAFETY_DUMP:-}" ]; then
-    log "  The safety dump is switched off for this run, so the state being replaced will"
-    log "  NOT be saved anywhere. This is irreversible."
-  else
-    log "  Before anything is dropped, the current state is dumped to"
-    log "  ${BACKUP_MOUNT}/saiva-<now>-prerestore.sql.gz, so if this is the wrong dump the"
-    log "  mistake is undone by running this script again with that name."
+    log "  This REPLACES the household's database. \"${DB}\" is dropped and rebuilt from"
+    log "  the dump, so EVERYTHING WRITTEN SINCE ${taken:-THE DUMP WAS TAKEN} IS LOST:"
+    log "  every transaction imported, every category assigned, every budget edited, every"
+    if [ "$DUMP_EPOCH" -gt 0 ]; then
+      log "  bill marked paid, every login created in the last $(human_span "$age_secs")."
+    else
+      # No stamp means no duration can be named, and inventing one from the file's mtime
+      # would be worse than saying nothing: an mtime changes when a dump is copied about.
+      log "  bill marked paid, every login created since then. How long ago that was cannot"
+      log "  be read off this file -- check the dump before answering the prompt."
+    fi
+    blank
+    if [ "$SKIP_SAFETY" -eq 1 ] || [ -n "${SAIVA_RESTORE_SKIP_SAFETY_DUMP:-}" ]; then
+      log "  The safety dump is switched off for this run, so the state being replaced will"
+      log "  NOT be saved anywhere. This is irreversible."
+    else
+      log "  Before anything is dropped, the current state is dumped to"
+      log "  ${BACKUP_MOUNT}/saiva-<now>-prerestore.sql.gz, so if this is the wrong dump the"
+      log "  mistake is undone by running this script again with that name."
+    fi
   fi
   blank
 }
@@ -870,16 +1093,27 @@ cmd_restore() {
   # Find it in the listing rather than stat-ing it, so that "no such dump" and "that name
   # is a directory" and "the volume is empty" all arrive as one clear message, and so the
   # size and mtime shown in the warning are the ones actually on disk.
-  local raw size name rc=0
+  local raw kind size name rc=0 unreadable=""
   raw="$(list_raw)" || rc=$?
   [ "$rc" -eq 0 ] || die "No readable dumps in ${SOURCE_LABEL} (exit ${rc}), so there is nothing named
   ${DUMP_NAME} to restore. Run '$0' with no arguments."
 
   DUMP_SIZE=""
-  while read -r size name; do
-    if [ "$name" = "$DUMP_NAME" ]; then DUMP_SIZE="$size"; fi
+  while read -r kind size name; do
+    [ "$name" = "$DUMP_NAME" ] || continue
+    case "$kind" in
+      dump) DUMP_SIZE="$size" ;;
+      skip) unreadable="$size" ;;
+    esac
   done < <(printf '%s\n' "$raw")
   DUMP_EPOCH="$(epoch_from_name "$DUMP_NAME")"
+
+  # The name is there but the entry is not a dump this script can read. Said separately
+  # from "no such dump", because the two are fixed differently and the file being present
+  # is the part that would otherwise be baffling.
+  [ -z "$unreadable" ] || die "${DUMP_NAME} is in ${SOURCE_LABEL}, but it is $(skip_reason "$unreadable").
+  Nothing was changed. '$0' with no arguments lists it under \"Skipped\", along with the
+  dumps that CAN be restored."
 
   [ -n "$DUMP_SIZE" ] || die "There is no dump called ${DUMP_NAME} in ${SOURCE_LABEL}.
   Run '$0' with no arguments for the list -- the names are long and easy to mistype."
@@ -890,6 +1124,9 @@ cmd_restore() {
   DUMP_REVISION="$(revision_in_dump "$DUMP_NAME")"
 
   db_preflight
+  # Before the confirmation, not after: whether the database is there decides both what
+  # the warning says and whether there is anything to take a safety dump of.
+  read_db_meta
   confirm
   take_safety_dump
   recreate_database
