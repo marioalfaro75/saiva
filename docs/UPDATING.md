@@ -79,6 +79,33 @@ the disk. `backend/app/schema_state.py` has the whole story.
 
 ---
 
+## Getting there from a box that runs the old updater
+
+The first upgrade is the one the updater cannot do for you, because the version on the
+box does not have it yet. On the LXC, once:
+
+```bash
+cd /opt/saiva                      # wherever the checkout is
+git fetch --tags
+git checkout --detach v0.17.0      # or whichever release carries this
+sudo ./scripts/install-updater.sh  # creates the state directory and the host agent
+make update                        # applies the release the new way
+```
+
+`make update` passes `--remove-orphans`, so the `watchtower` and `docker-socket-proxy`
+containers the old design ran are stopped and removed as part of it. Nothing needs to be
+done about `WATCHTOWER_TOKEN` in `.env`: it is simply no longer read, and the reconcile
+step never deletes a key it does not recognise.
+
+After that, every update is `make update` or the button.
+
+If the checkout has local edits, the release path refuses rather than throwing them away
+— commit or stash them first. If you are not sure where the checkout is:
+`docker inspect saiva-caddy-1 --format '{{range .Mounts}}{{.Source}}{{"\n"}}{{end}}'`
+shows the host path of the mounted Caddyfile.
+
+---
+
 ## Setting up the in-app button
 
 Once per box, as root:

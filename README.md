@@ -186,7 +186,21 @@ those two things happened.
 cannot be made automatic — a release whose migration succeeded and whose code is then
 unhealthy, where the images can be rolled back and the schema cannot.
 
-To enable the in-app button, once per box:
+**The first upgrade is manual**, because the version on the box does not have the new
+updater yet. Once, on the host:
+
+```bash
+cd /opt/saiva                      # wherever the checkout is
+git fetch --tags
+git checkout --detach v0.17.0      # the release carrying this change
+sudo ./scripts/install-updater.sh  # state directory + the host agent
+make update
+```
+
+That also removes the old `watchtower` and `docker-socket-proxy` containers. Every update
+after it is `make update` or the button.
+
+To enable the in-app button on a box that skipped the installer, run it any time:
 
 ```bash
 sudo ./scripts/install-updater.sh

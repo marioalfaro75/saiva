@@ -32,14 +32,33 @@ UNIT_DIR=/etc/systemd/system
 [ -d "$ROOT/.git" ] || { echo "WARNING: $ROOT is not a git checkout, so the updater cannot" >&2
                          echo "         deliver compose, Caddyfile or script changes." >&2; }
 
-# Which user the containers run as matters: the api container writes the request file
-# into $STATE through a bind mount, so the directory has to be writable by the uid the
-# api process runs under. The image runs as a non-root user, so the simplest arrangement
-# that is not world-writable is a dedicated group both sides are in.
+# Which uid the api container runs as matters: it writes the request file into $STATE
+# through a bind mount, so that directory has to be writable by it. backend/Dockerfile
+# fixes the uid at 10001 (`useradd --uid 10001 appuser`), which is read from the
+# Dockerfile rather than hardcoded here so the two cannot drift, and confirmed against a
+# running container when there is one.
+#
+# There is deliberately no world-writable fallback. An earlier version chmod 0777 when it
+# could not work the uid out, which puts a directory Caddy serves files from, and that a
+# root oneshot watches, within reach of every account on the box. If the uid cannot be
+# determined this refuses and says what to pass.
+api_uid_from_dockerfile() {
+  sed -n 's/.*useradd[^#]*--uid[[:space:]]\{1,\}\([0-9]\{1,\}\).*/\1/p' \
+    "$ROOT/backend/Dockerfile" 2>/dev/null | head -n 1
+}
 API_UID="${SAIVA_API_UID:-}"
 if [ -z "$API_UID" ] && command -v docker >/dev/null 2>&1; then
-  API_UID="$(docker compose -f "$ROOT/docker-compose.prod.yml" exec -T api id -u 2>/dev/null | tr -d '\r' || true)"
+  API_UID="$(docker compose -f "$ROOT/docker-compose.prod.yml" exec -T api id -u 2>/dev/null \
+    | tr -cd '0-9' || true)"
 fi
+[ -n "$API_UID" ] || API_UID="$(api_uid_from_dockerfile)"
+case "$API_UID" in
+  ''|*[!0-9]*|0)
+    echo "ERROR: could not work out the uid the api container runs as." >&2
+    echo "       Pass it: sudo SAIVA_API_UID=\$(docker compose -f docker-compose.prod.yml \\" >&2
+    echo "                  exec -T api id -u) $0" >&2
+    exit 1 ;;
+esac
 
 echo "Installing the Saiva update agent"
 echo "  checkout : $ROOT"
@@ -58,23 +77,14 @@ EOF
 chmod 0644 "$CONF"
 echo "  → $CONF"
 
-install -d -m 0775 "$STATE"
+install -d "$STATE"
 install -d -m 0755 "$STATE/records"
-if [ -n "$API_UID" ] && [ "$API_UID" -gt 0 ] 2>/dev/null; then
-  # Group-own the directory by the api container's gid so the button can write its
-  # request file, without making it world-writable.
-  chgrp "$API_UID" "$STATE" 2>/dev/null || chown ":$API_UID" "$STATE" 2>/dev/null || true
-  chmod 0775 "$STATE"
-  echo "  → $STATE (group-writable by the api container's uid $API_UID)"
-else
-  chmod 0777 "$STATE"
-  echo "  → $STATE"
-  echo "    NOTE: could not determine the api container's uid, so this directory is"
-  echo "          world-writable. Nothing secret is kept in it and the agent ignores the"
-  echo "          request file's contents, but you can tighten it with:"
-  echo "            sudo chgrp <uid> $STATE && sudo chmod 0775 $STATE"
-  echo '          where <uid> is: docker compose -f docker-compose.prod.yml exec api id -u'
-fi
+# Owned by the api container's uid, mode 0775: that container needs to write one file
+# here, and nothing else on the box needs to write anything. Caddy reads it through a
+# read-only mount and the agent runs as root.
+chown "$API_UID" "$STATE"
+chmod 0775 "$STATE"
+echo "  → $STATE (writable by the api container, uid $API_UID)"
 
 if [ -d /run/systemd/system ]; then
   cat > "$UNIT_DIR/saiva-update.service" <<EOF
