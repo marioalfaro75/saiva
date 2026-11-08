@@ -29,7 +29,7 @@ hole an adversarial review found and this file now closes.
 
 test_nothing_in_the_tree_runs_a_migration_backwards points the other way; its docstring
 explains why the downgrade() bodies are the problem rather than the solution, and the two
-regression tests after it are about what that scan was missing and what it was inventing.
+regression tests that follow it are about what that scan was missing and what it was inventing.
 """
 
 from __future__ import annotations
@@ -83,6 +83,11 @@ VERSIONS_DIR = BACKEND / "migrations" / "versions"
 _ADDITIVE_OPERATIONS = frozenset(
     {
         "create_table",
+        # create_index, but NOT with unique=True -- see _check_create_index. A unique
+        # index on an existing table is a constraint wearing an index's name: it can fail
+        # on the rows already there, and it rejects writes a rolled-back image makes in
+        # good faith. Removing create_unique_constraint for exactly that reason and
+        # leaving this open would have been a distinction without a difference.
         "create_index",
         "add_column",
     }
@@ -202,6 +207,52 @@ def _sqlalchemy_names(tree: ast.Module) -> set[str]:
     return names
 
 
+def _string_argument(call: ast.Call, *, keyword: str, position: int) -> str | None:
+    """A literal string argument, by keyword or by position; None if it is not literal."""
+    for kw in call.keywords:
+        if kw.arg == keyword:
+            return kw.value.value if isinstance(kw.value, ast.Constant) else None
+    if len(call.args) > position and isinstance(call.args[position], ast.Constant):
+        value = call.args[position].value
+        return value if isinstance(value, str) else None
+    return None
+
+
+def _unique_index_problem(call: ast.Call, created_here: set[str | None]) -> str | None:
+    """A unique index on an existing table is a constraint wearing an index's name.
+
+    create_unique_constraint, create_foreign_key and create_check_constraint were taken
+    off the allow-list because each can fail on the rows already in the table, and each
+    rejects writes a rolled-back image makes in good faith -- the hazard this file exists
+    to bound. `op.create_index(..., unique=True)` does both of those things, under a name
+    that reads as additive. Leaving it open would have been a distinction without a
+    difference.
+
+    A unique index on a table this same upgrade() creates is a different matter, and is
+    allowed: the table is new, there are no existing rows, and no older image writes to a
+    table it has never heard of. 0001 does exactly that with users.email.
+    """
+    if _string_argument(call, keyword="table_name", position=1) in created_here:
+        return None
+    for keyword in call.keywords:
+        if keyword.arg != "unique":
+            continue
+        value = keyword.value
+        if isinstance(value, ast.Constant) and value.value is True:
+            return (
+                "creates a UNIQUE index on an existing table — it can fail on the rows "
+                "already there, and it rejects writes an older image makes after a "
+                "rollback. Add the index without `unique=True`, or add the uniqueness in "
+                "a later release once the data is known to satisfy it"
+            )
+        if not isinstance(value, ast.Constant):
+            return (
+                "passes a computed value for `unique=`, which this guard cannot read; "
+                "write it as a literal so the additive question has an answer"
+            )
+    return None
+
+
 def _upgrade_binding(tree: ast.Module) -> ast.stmt | None:
     """The module-level statement that leaves `upgrade` bound to what Alembic will call.
 
@@ -236,10 +287,24 @@ def _upgrade_binding(tree: ast.Module) -> ast.stmt | None:
             )
         return False
 
+    # Module level AND one level in. A `def upgrade` inside a module-level `if`, `try` or
+    # `for` rebinds the name when the module executes, and is invisible to a walk of
+    # tree.body alone -- which is a conditional teardown sitting in a migration that this
+    # guard would wave through. Anything nested deeper than that is not a shape a
+    # migration has, and the caller refuses what it cannot read, so there is no silent
+    # gap below this.
     found: ast.stmt | None = None
     for node in tree.body:
         if binds_upgrade(node):
             found = node
+            continue
+        for inner in getattr(node, "body", []) + getattr(node, "orelse", []) + [
+            handler_stmt
+            for handler in getattr(node, "handlers", [])
+            for handler_stmt in handler.body
+        ]:
+            if isinstance(inner, ast.stmt) and binds_upgrade(inner):
+                found = inner
     return found
 
 
@@ -415,6 +480,19 @@ def expand_only_violations(source: str) -> list[str]:
 
     violations: list[str] = []
 
+    # Tables this upgrade() creates itself. A constraint or a unique index on one of them
+    # carries none of the hazard the rule is about: the table is new, there are no rows to
+    # violate it, and no older image writes to a table it has never heard of. 0001 creates
+    # `users` and indexes its email column unique in the next line, which is correct and
+    # must stay correct -- so this is the difference between a rule and a nuisance.
+    created_here = {
+        _string_argument(node, keyword="table_name", position=0)
+        for node in ast.walk(upgrade)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "create_table"
+    } - {None}
+
     def report(node: ast.AST, reason: str) -> None:
         # One line per violation: ast.unparse keeps the newlines of a multi-line call, and
         # a report that wraps is a report nobody reads to the end.
@@ -443,7 +521,11 @@ def expand_only_violations(source: str) -> list[str]:
                 report(call, problem)
             return
         if name in _ADDITIVE_OPERATIONS:
-            problem = _add_column_problem(call) if name == "add_column" else None
+            problem = None
+            if name == "add_column":
+                problem = _add_column_problem(call)
+            elif name == "create_index":
+                problem = _unique_index_problem(call, created_here)
             if problem:
                 report(call, problem)
             return
@@ -828,15 +910,27 @@ _A_DEFINITION = re.compile(r"\bdef[ \t]+$")
 _A_COMMENT_LINE = re.compile(r"^[ \t]*#")
 
 
-def _blanked(text: str, start: int, end: int) -> str:
-    """`text` with [start:end) turned into spaces, newlines kept.
+# What a blanked-out comment leaves behind. NOT a space, and that is the whole point.
+#
+# The cross-line invocation patterns treat a BLANK line as a command terminator, because
+# one invocation does not span a paragraph break. Blanking a full-line comment to spaces
+# therefore manufactured a terminator in the middle of a multi-line call, and a comment
+# sitting inside one made the invocation invisible -- a silent miss introduced by the fix
+# for the opposite problem. A NUL is not whitespace, so it does not break the run; it
+# matches nothing in any pattern here; and it is one character, so every offset after it
+# stays where it was and a hit is still reported against the right line.
+_BLANK = "\x00"
 
-    Blanking rather than deleting is what lets a hit still be reported against the right
+
+def _blanked(text: str, start: int, end: int) -> str:
+    """`text` with [start:end) replaced by a filler that is neither code nor whitespace.
+
+    Replacing rather than deleting is what lets a hit still be reported against the right
     line of the real file: every offset stays where it was.
     """
     return (
         text[:start]
-        + "".join("\n" if char == "\n" else " " for char in text[start:end])
+        + "".join("\n" if char == "\n" else _BLANK for char in text[start:end])
         + text[end:]
     )
 
@@ -974,10 +1068,12 @@ def test_nothing_in_the_tree_runs_a_migration_backwards() -> None:
     head` and `alembic check`, refresh-images.yml upgrades to the previous revision on a
     fresh database, and dbinit only ever upgrades.
 
-    Grep for 'downgrade' across the tree, excluding migrations/, and there are ten hits,
-    none of them a migration going backwards. Three are prose in comments (Makefile,
-    refresh-images.yml, checks.yml), one is an eslint rule that was deliberately not
-    downgraded, one is the HSTS max-age in the Caddyfile, and five are deploy.sh's
+    Grep for 'downgrade' across the tree -- excluding .git, .venv, node_modules,
+    __pycache__, migrations/ and this file -- and there are twelve hits, none of them a
+    migration going backwards. The exclusions are part of the number, which is why they
+    are written out: quoting a count without them is a claim nobody can reproduce. Most
+    are prose in comments, one is an eslint rule that was deliberately not downgraded,
+    one is the HSTS max-age in the Caddyfile, and the rest are deploy.sh's
     --allow-downgrade flag and the tests of it — which is about going back to an older
     image, the recovery this file's expand-only rule is what makes safe. That shape matters
     for how this is matched: the word alone is useless as a signal, and the flag that names
@@ -1182,3 +1278,113 @@ def test_finding_6_a_second_test_tree_is_not_scanned_as_production_code() -> Non
         "scripts/tests/ has fewer files than the exclusion was written for; if the shell "
         f"suite has moved, move the exclusion with it: {in_the_test_tree}"
     )
+
+
+# --------------------------------------------------------------------------------------
+# Three holes a second review found in the fixes above
+# --------------------------------------------------------------------------------------
+
+
+def test_an_upgrade_redefined_inside_a_block_is_the_one_judged() -> None:
+    """`_upgrade_binding` walked tree.body only, so one level of nesting hid a teardown.
+
+    A `def upgrade` inside a module-level `if` or `try` rebinds the name when the module
+    executes. Alembic then calls that one. A guard that reads only the top level judges a
+    body that has already been replaced and passes the file -- the same class of miss as
+    judging the first of two defs, one level down.
+    """
+    hidden = (
+        "import os\n"
+        "import sqlalchemy as sa\n"
+        "from alembic import op\n"
+        "\n"
+        "def upgrade() -> None:\n"
+        "    op.add_column('accounts', sa.Column('nickname', sa.String(64), nullable=True))\n"
+        "\n"
+        "if os.environ.get('TEARDOWN'):\n"
+        "    def upgrade() -> None:\n"
+        "        op.drop_table('accounts')\n"
+    )
+    assert any("drops a table" in v for v in expand_only_violations(hidden)), (
+        "a conditional redefinition of upgrade() hid a drop from the guard"
+    )
+
+    in_a_try = (
+        "import sqlalchemy as sa\n"
+        "from alembic import op\n"
+        "\n"
+        "def upgrade() -> None:\n"
+        "    op.add_column('accounts', sa.Column('nickname', sa.String(64), nullable=True))\n"
+        "\n"
+        "try:\n"
+        "    def upgrade() -> None:\n"
+        "        op.drop_column('accounts', 'email')\n"
+        "except Exception:\n"
+        "    pass\n"
+    )
+    assert any("drops a column" in v for v in expand_only_violations(in_a_try))
+
+
+def test_a_unique_index_on_an_existing_table_is_refused() -> None:
+    """The hole left by removing the three constraint operations.
+
+    `create_unique_constraint` was taken off the allow-list because it can fail on the
+    rows already in the table and because it rejects writes a rolled-back image makes in
+    good faith. `op.create_index(..., unique=True)` does both of those, under a name that
+    reads as additive. Refusing one and allowing the other is a distinction without a
+    difference.
+    """
+    head = "import sqlalchemy as sa\nfrom alembic import op\n\ndef upgrade() -> None:\n    "
+
+    refused = expand_only_violations(
+        head + "op.create_index('uq_a', 'accounts', ['email'], unique=True)\n"
+    )
+    assert any("UNIQUE index on an existing table" in v for v in refused)
+
+    # By keyword as well as by position, because the guard reads arguments and not text.
+    by_keyword = expand_only_violations(
+        head + "op.create_index('uq_a', table_name='accounts', columns=['e'], unique=True)\n"
+    )
+    assert by_keyword, "the table named by keyword slipped past"
+
+    # And the two that must still be allowed, or this is a nuisance rather than a rule.
+    assert not expand_only_violations(
+        head + "op.create_index('ix_a', 'accounts', ['email'])\n"
+    ), "a plain index on an existing table is additive"
+    assert not expand_only_violations(
+        head
+        + "op.create_table('widgets', sa.Column('id', sa.String(32), primary_key=True))\n"
+        + "    op.create_index('uq_w', 'widgets', ['id'], unique=True)\n"
+    ), "a unique index on a table this upgrade creates has no existing rows to fail on"
+
+
+def test_a_comment_inside_a_multi_line_invocation_does_not_hide_it() -> None:
+    """A regression the comment-blanking fix introduced, caught by the next review.
+
+    The cross-line patterns treat a blank line as a command terminator, because one
+    invocation does not span a paragraph break. Blanking a full-line comment to SPACES
+    manufactured exactly that terminator inside a multi-line call, so a comment sitting
+    in the middle of one made the invocation invisible. The filler is now a character
+    that is neither code nor whitespace.
+    """
+    with_comment = (
+        "subprocess.run([\n"
+        '    "alembic",\n'
+        "    # roll it back one, as the runbook says\n"
+        '    "downgrade",\n'
+        '    "-1",\n'
+        "])\n"
+    )
+    assert downgrade_invocations(with_comment, python=True), (
+        "a comment inside the call hid the invocation"
+    )
+
+    # The two halves this balances between, asserted together so neither can be traded
+    # away for the other.
+    without_comment = with_comment.replace(
+        "    # roll it back one, as the runbook says\n", ""
+    )
+    assert downgrade_invocations(without_comment, python=True)
+    prose = "# Only ever upgrade. Never call downgrade() from here.\nrun(['alembic', 'upgrade'])\n"
+    assert not downgrade_invocations(prose, python=True), "prose is not an invocation"
+

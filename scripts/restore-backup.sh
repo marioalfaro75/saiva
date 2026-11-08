@@ -256,8 +256,9 @@ trap on_exit EXIT
 # --- running psql and pg_dump, in a container or not ------------------------------------
 #
 # Every command that touches Postgres or the dumps goes through one of the three runners
-# below, and they hold the only two `docker run` lines in this file -- one in _pg_sh, one
-# in backups_sh. (docker_preflight calls docker as well, but only to inspect: it starts
+# below, and they hold the two `docker run` lines that actually run anything -- one in
+# _pg_sh, one in backups_sh. (A third mention of `docker run` is inside an error message,
+# not a command.) (docker_preflight calls docker as well, but only to inspect: it starts
 # nothing.) Funnelling the work through them is what makes --direct mode a real code path
 # rather than a second implementation: the test exercises the same lines production does,
 # with the runner swapped underneath.

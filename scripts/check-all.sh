@@ -13,6 +13,10 @@
 #   * The Postgres-backed suites skip when no Postgres is reachable, and say so. Point
 #     SAIVA_TEST_PG_URL / PGHOST at one to include them -- without that, the rollback and
 #     restore rehearsals are not being run, however green this looks.
+#   * A few backend tests reach the network (the AI advisor's provider checks resolve a
+#     real host). Behind a proxy that does not resolve it they fail here and pass in CI.
+#     They are not special-cased, because a script that skips the tests it finds
+#     inconvenient is the kind of green that means nothing -- read the names.
 set -uo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -52,16 +56,7 @@ run "compose files parse" bash -c '
   SECRET_KEY=x SAIVA_SITE_ADDRESS=https://example.invalid \
     docker compose -f docker-compose.prod.yml config >/dev/null &&
   SECRET_KEY=x docker compose -f docker-compose.yml config >/dev/null'
-run "workflows parse" "$PY" -c '
-import pathlib, sys, yaml
-bad = []
-for path in sorted(pathlib.Path(".github/workflows").glob("*.yml")):
-    try:
-        yaml.safe_load(path.read_text())
-    except Exception as exc:
-        bad.append(f"{path}: {exc}")
-print("\n".join(bad) or f"{len(list(pathlib.Path(\".github/workflows\").glob(\"*.yml\")))} workflows parse")
-sys.exit(1 if bad else 0)'
+run "workflows parse" "$PY" "$ROOT/scripts/check_workflows.py"
 
 run "frontend: lint" bash -c "cd '$ROOT/frontend' && npm run --silent lint"
 run "frontend: types + build" bash -c "cd '$ROOT/frontend' && npm run --silent build"

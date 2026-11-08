@@ -18,14 +18,23 @@
 # confirmation, the drop and recreate, the single-transaction load, the verification -- is
 # the same code production runs, with psql and pg_dump taken off PATH instead of out of a
 # container. What --direct does NOT cover is the two `docker run` command lines themselves,
-# one in _pg_sh and one in backups_sh; they are the only part of restore-backup.sh a test
-# on a host with no Docker cannot execute. The two names inside them that can rot silently
+# one in _pg_sh and one in backups_sh. They are the only lines in restore-backup.sh that
+# a test on a host with no Docker cannot execute -- the other `docker run` occurrences in
+# that file are inside messages, not commands. The two names inside them that can rot silently
 # are checked instead, in section 1b.
 #
 # Point it at a Postgres with PGHOST/PGPORT/PGUSER. The defaults are the instance this
 # repository's sandbox runs. Exits 77 if there is no Postgres to talk to, so a runner can
 # tell "cannot run here" from "the restore is broken".
 
+# errexit is on, which has a known cost worth stating rather than discovering: when a
+# section fails in a way the assertions do not catch -- a bare command returning non-zero
+# -- the suite stops there instead of finishing, so a real regression costs the diagnosis
+# the later sections would have given. Measured against a deliberately broken script: it
+# exited 2 after section 15 and sections 16-17 never ran. Left as is on purpose; making
+# every section independent means restructuring a file whose value is that its sections
+# build on each other, and the failure mode is "less detail on a run that is already
+# red", not a wrong answer.
 set -euo pipefail
 
 ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)"
