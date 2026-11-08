@@ -20,7 +20,9 @@ leave the repository missing a migration.
 from __future__ import annotations
 
 import os
+import re
 import shutil
+import subprocess
 import uuid
 from collections.abc import Iterator
 from pathlib import Path
@@ -53,7 +55,9 @@ def _reachable_admin_url() -> str | None:
         if not url:
             continue
         try:
-            eng = sa.create_engine(url, isolation_level="AUTOCOMMIT", connect_args={"connect_timeout": 3})
+            eng = sa.create_engine(
+                url, isolation_level="AUTOCOMMIT", connect_args={"connect_timeout": 3}
+            )
             with eng.connect() as conn:
                 conn.execute(sa.text("SELECT 1"))
             eng.dispose()
@@ -69,6 +73,46 @@ pytestmark = pytest.mark.skipif(
     ADMIN_URL is None,
     reason="no Postgres reachable; set SAIVA_TEST_PG_URL to run the rollback tests",
 )
+
+
+def _client_server_version_mismatch() -> str | None:
+    """pg_dump must be the server's major, or these tests fail for an unrelated reason.
+
+    Debian's /usr/bin/pg_dump is pg_wrapper, which picks the HIGHEST installed client
+    version. On a machine with a newer client than the server, pg_dump refuses outright
+    on a version mismatch and the backup branch of dbinit raises -- which looks exactly
+    like the safety property under test having broken, and is not. Saying so costs four
+    lines and saves an afternoon.
+    """
+    if ADMIN_URL is None:
+        return None
+    try:
+        dumped = subprocess.run(  # noqa: S603 - fixed argv, no shell
+            ["pg_dump", "--version"], capture_output=True, text=True, check=False
+        ).stdout
+        client = re.search(r"\b(\d+)\.", dumped)
+        engine = sa.create_engine(ADMIN_URL)
+        with engine.connect() as conn:
+            server = conn.execute(sa.text("SHOW server_version")).scalar_one()
+        engine.dispose()
+        server_major = re.match(r"(\d+)", str(server))
+    except Exception as exc:  # noqa: BLE001 - any failure here is itself the diagnosis
+        return f"could not compare pg_dump and server versions: {exc}"
+    if not client or not server_major:
+        return f"could not parse versions (pg_dump said {dumped!r}, server said {server!r})"
+    if client.group(1) != server_major.group(1):
+        return (
+            f"pg_dump is {client.group(1)}.x but the server is {server_major.group(1)}.x. "
+            f"On Debian /usr/bin/pg_dump is pg_wrapper and picks the newest installed "
+            f"client, so put /usr/lib/postgresql/{server_major.group(1)}/bin first on PATH."
+        )
+    return None
+
+
+def test_the_tools_these_tests_need_are_the_right_versions() -> None:
+    """Runs first and fails loudly, so a toolchain problem is not read as a regression."""
+    problem = _client_server_version_mismatch()
+    assert problem is None, problem
 
 
 @pytest.fixture

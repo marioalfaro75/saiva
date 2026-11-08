@@ -91,6 +91,40 @@ jobs:
         with:
           python-version: "3.11"
       - run: pip install -e ".[dev]"
+      - name: Use the Postgres 16 client, not whatever the runner defaults to
+        # Debian's /usr/bin/pg_dump is pg_wrapper, which picks the HIGHEST installed
+        # client version -- and the runner ships a newer one than the 16 server these
+        # jobs use. The symptoms are two different confusing failures rather than one
+        # clear one: pg_dump refuses outright on a server/client mismatch, and a dump
+        # that does get written carries `SET transaction_timeout = 0`, which a 16 server
+        # rejects at restore time, so the restore "succeeds" into an empty database.
+        #
+        # The production image pins postgresql-client-16 from PGDG for exactly this
+        # reason (see backend/Dockerfile), so matching it here also means CI exercises
+        # the same client the box runs.
+        run: |
+          set -euo pipefail
+          if [ ! -x /usr/lib/postgresql/16/bin/pg_dump ]; then
+            sudo apt-get update -qq
+            sudo apt-get install -y -qq postgresql-client-16 \
+              || { . /etc/os-release
+                   echo "deb http://apt.postgresql.org/pub/repos/apt ${VERSION_CODENAME}-pgdg main" \
+                     | sudo tee /etc/apt/sources.list.d/pgdg.list >/dev/null
+                   curl -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc \
+                     | sudo gpg --dearmor -o /usr/share/keyrings/pgdg.gpg
+                   sudo sed -i 's|deb |deb [signed-by=/usr/share/keyrings/pgdg.gpg] |' \
+                     /etc/apt/sources.list.d/pgdg.list
+                   sudo apt-get update -qq
+                   sudo apt-get install -y -qq postgresql-client-16; }
+          fi
+          echo "/usr/lib/postgresql/16/bin" >> "$GITHUB_PATH"
+      - name: The client really is 16
+        run: |
+          pg_dump --version
+          pg_dump --version | grep -q ' 16\.' || {
+            echo "pg_dump is not 16; the dumps it writes will not restore into the 16 server" >&2
+            exit 1
+          }
       - name: Apply migrations (must succeed on Postgres)
         run: alembic upgrade head
       - name: Check migrations match models (no drift)
@@ -164,11 +198,40 @@ jobs:
         # Spelled out as its own step because this one defect took the production site
         # off the LAN, and a line in a 22-test summary is easy to miss.
         run: ./scripts/tests/run.sh env_is_byte_identical
-      - name: Postgres client tools
-        # psql, pg_dump and gunzip are what restore-backup.sh --direct actually runs; the
-        # server is the service above. The client must match the server major or pg_dump
-        # refuses the version it finds.
-        run: sudo apt-get install -y -qq postgresql-client-16 || sudo apt-get install -y -qq postgresql-client
+      - name: Use the Postgres 16 client, not whatever the runner defaults to
+        # Debian's /usr/bin/pg_dump is pg_wrapper, which picks the HIGHEST installed
+        # client version -- and the runner ships a newer one than the 16 server these
+        # jobs use. The symptoms are two different confusing failures rather than one
+        # clear one: pg_dump refuses outright on a server/client mismatch, and a dump
+        # that does get written carries `SET transaction_timeout = 0`, which a 16 server
+        # rejects at restore time, so the restore "succeeds" into an empty database.
+        #
+        # The production image pins postgresql-client-16 from PGDG for exactly this
+        # reason (see backend/Dockerfile), so matching it here also means CI exercises
+        # the same client the box runs.
+        run: |
+          set -euo pipefail
+          if [ ! -x /usr/lib/postgresql/16/bin/pg_dump ]; then
+            sudo apt-get update -qq
+            sudo apt-get install -y -qq postgresql-client-16 \
+              || { . /etc/os-release
+                   echo "deb http://apt.postgresql.org/pub/repos/apt ${VERSION_CODENAME}-pgdg main" \
+                     | sudo tee /etc/apt/sources.list.d/pgdg.list >/dev/null
+                   curl -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc \
+                     | sudo gpg --dearmor -o /usr/share/keyrings/pgdg.gpg
+                   sudo sed -i 's|deb |deb [signed-by=/usr/share/keyrings/pgdg.gpg] |' \
+                     /etc/apt/sources.list.d/pgdg.list
+                   sudo apt-get update -qq
+                   sudo apt-get install -y -qq postgresql-client-16; }
+          fi
+          echo "/usr/lib/postgresql/16/bin" >> "$GITHUB_PATH"
+      - name: The client really is 16
+        run: |
+          pg_dump --version
+          pg_dump --version | grep -q ' 16\.' || {
+            echo "pg_dump is not 16; the dumps it writes will not restore into the 16 server" >&2
+            exit 1
+          }
       - name: Restore from a dump, against real Postgres
         env:
           PGHOST: 127.0.0.1

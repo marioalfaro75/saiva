@@ -45,10 +45,10 @@ deploy: ## Dev file: build from source, bootstrap .env, start, wait (SEED/LAN/SI
 pull: ## Prod file: pull the GHCR images and start, no local build (same SEED/LAN/SITE)
 	@./scripts/deploy.sh --pull $(if $(filter 1,$(SEED)),--seed,) $(if $(filter 1,$(LAN)),--lan,) $(if $(SITE),--site $(SITE),)
 
-# Wired ahead of its implementation: scripts/deploy.sh does not accept --apply-release
-# yet and will exit 2 with "Unknown option" until it does. The target exists now so that
-# the in-app updater and the docs have one name to point at, rather than each growing its
-# own copy of the sequence this is meant to replace.
+# The one name everything points at: the in-app button, the docs and this target all
+# reach scripts/deploy.sh --apply-release. There is deliberately no second copy of the
+# sequence, because three copies of it is what the old design had and they delivered
+# different subsets of a release. See docs/UPDATING.md.
 update: ## Apply the newest release — tree, config and images — gated, rolled back if it fails
 	@./scripts/deploy.sh --apply-release
 
