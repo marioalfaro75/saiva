@@ -76,6 +76,14 @@ set -euo pipefail
 ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 ENV_FILE="${SAIVA_ENV_FILE:-$ROOT/.env}"
 
+# Both names are derived the way compose derives them, from the project name.
+# docker-compose.prod.yml pins that with `name: saiva`, so it is not the directory name
+# and renaming the checkout does not move the volume; SAIVA_PROJECT is here for the box
+# where it was overridden anyway. That file declares no networks of its own, so
+# `docker compose -f docker-compose.prod.yml config` reports exactly one -- default, which
+# compose creates as <project>_default -- alongside volumes caddy_config, caddy_data,
+# db_backups and db_data, and services api, caddy, db and web. <project>_default is
+# therefore the network the db service is on, and the only one worth joining.
 PROJECT="${SAIVA_PROJECT:-saiva}"
 VOLUME="${PROJECT}_db_backups"
 NETWORK="${PROJECT}_default"
@@ -124,9 +132,6 @@ state_report() {
       fi
       ;;
     drop)
-      # The state line comes first and fits on one line on purpose. Whoever reads this is
-      # reading the first line and nothing else until they have calmed down.
-      #
       # This fires only while the DROP itself is in flight, which is why it describes what
       # to check instead of asserting what happened: a drop that is REFUSED changes
       # nothing, and a drop interrupted part way can leave the database present but marked
@@ -150,6 +155,8 @@ state_report() {
       recovery_hint
       ;;
     create)
+      # The state line comes second and fits on one line on purpose. Whoever reads this is
+      # reading that line and nothing else until they have calmed down.
       log "  STOP AND READ THIS."
       log "  Database \"${DB}\" does NOT hold the data it held before this script ran."
       log "  It was dropped, and creating it again failed, so it is missing altogether and"
@@ -249,9 +256,11 @@ trap on_exit EXIT
 # --- running psql and pg_dump, in a container or not ------------------------------------
 #
 # Every command that touches Postgres or the dumps goes through one of the three runners
-# below, and they are the only places in this file that know Docker exists. That is what
-# makes --direct mode a real code path rather than a second implementation: the test
-# exercises the same lines production does, with the runner swapped underneath.
+# below, and they hold the only two `docker run` lines in this file -- one in _pg_sh, one
+# in backups_sh. (docker_preflight calls docker as well, but only to inspect: it starts
+# nothing.) Funnelling the work through them is what makes --direct mode a real code path
+# rather than a second implementation: the test exercises the same lines production does,
+# with the runner swapped underneath.
 #
 # The snippets are passed to `sh -c` with their values as POSITIONAL ARGUMENTS, never
 # interpolated into the string. A password with a space in it, or a dollar sign, is then
@@ -503,8 +512,8 @@ db_preflight() {
 #     skip <why> <name>      anything else -- a subdirectory, a dangling symlink, a file
 #                            this user cannot read
 #
-# A name is always the LAST field, so a name with a space in it survives `read -r a b rest`
-# on the other side.
+# A name is always the last field, and the reader on the other side takes it with the last
+# variable of a `read -r kind size name`, so a name with a space in it arrives whole.
 #
 # One entry that cannot be read is skipped and reported, not treated as a failure of the
 # whole listing. It used to be the latter, and the cost was out of all proportion: a
@@ -629,9 +638,9 @@ cmd_list() {
   # for files that are sitting right there.
   if [ "$dumps" -eq 0 ]; then
     report_skipped "$skipped"
-    die "Nothing in ${SOURCE_LABEL} can be read as a dump: all ${skips} of the entries
-  matching *.sql.gz are listed above with the reason. Fix one of those -- a permissions
-  problem on the host is the usual cause -- and run this again."
+    die "Nothing in ${SOURCE_LABEL} can be read as a dump: every entry matching *.sql.gz
+  is listed above with the reason it was skipped (${skips} in total). A permissions
+  problem on the host is the usual cause."
   fi
 
   local now; now="$(date -u +%s)"
@@ -743,7 +752,10 @@ revision_in_dump() {
 # one moment that claim was both false and unverifiable by them.
 read_db_meta() {
   PHASE="inspect"
-  DB_META="$(psql_on "$MAINT_DB" "select pg_encoding_to_char(encoding) || '|' || datcollate || '|' || datctype || '|' || pg_get_userbyid(datdba) from pg_database where datname = '${DB}'")"
+  DB_META="$(psql_on "$MAINT_DB" "select pg_encoding_to_char(encoding) || '|' || datcollate || '|' || datctype || '|' || pg_get_userbyid(datdba) from pg_database where datname = '${DB}'")" \
+    || die "Could not read database \"${DB}\"'s encoding, collation and owner out of
+  pg_database -- the error is above. That read is the first thing this does and nothing
+  has been attempted after it."
   if [ -n "$DB_META" ]; then
     DB_EXISTED=1
   else
@@ -1112,8 +1124,8 @@ cmd_restore() {
   # from "no such dump", because the two are fixed differently and the file being present
   # is the part that would otherwise be baffling.
   [ -z "$unreadable" ] || die "${DUMP_NAME} is in ${SOURCE_LABEL}, but it is $(skip_reason "$unreadable").
-  Nothing was changed. '$0' with no arguments lists it under \"Skipped\", along with the
-  dumps that CAN be restored."
+  '$0' with no arguments lists it under \"Skipped\", along with the dumps that CAN be
+  restored."
 
   [ -n "$DUMP_SIZE" ] || die "There is no dump called ${DUMP_NAME} in ${SOURCE_LABEL}.
   Run '$0' with no arguments for the list -- the names are long and easy to mistype."

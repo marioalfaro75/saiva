@@ -27,8 +27,9 @@ synthetic tests then pin each half of that down — one assertion per forbidden 
 one migration using every allowed shape that must still pass, and one regression test per
 hole an adversarial review found and this file now closes.
 
-The last test points the other way; its docstring explains why the downgrade() bodies are
-the problem rather than the solution.
+test_nothing_in_the_tree_runs_a_migration_backwards points the other way; its docstring
+explains why the downgrade() bodies are the problem rather than the solution, and the two
+regression tests after it are about what that scan was missing and what it was inventing.
 """
 
 from __future__ import annotations
@@ -184,33 +185,60 @@ def _sqlalchemy_names(tree: ast.Module) -> set[str]:
     they are allowed where they appear — but only there, which is why the name has to be
     resolved rather than assumed: see _describes_schema.
     """
+    def is_sqlalchemy(module: str | None) -> bool:
+        return module is not None and (
+            module == "sqlalchemy" or module.startswith("sqlalchemy.")
+        )
+
     names: set[str] = set()
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
             for alias in node.names:
-                if alias.name == "sqlalchemy" or alias.name.startswith("sqlalchemy."):
+                if is_sqlalchemy(alias.name):
                     names.add(alias.asname or alias.name.split(".")[0])
-        elif isinstance(node, ast.ImportFrom) and node.module:
-            if node.module == "sqlalchemy" or node.module.startswith("sqlalchemy."):
-                for alias in node.names:
-                    names.add(alias.asname or alias.name)
+        elif isinstance(node, ast.ImportFrom) and is_sqlalchemy(node.module):
+            for alias in node.names:
+                names.add(alias.asname or alias.name)
     return names
 
 
-def _upgrade_function(tree: ast.Module) -> ast.FunctionDef | ast.AsyncFunctionDef | None:
-    """The upgrade() Alembic will actually call: the LAST module-level definition of it.
+def _upgrade_binding(tree: ast.Module) -> ast.stmt | None:
+    """The module-level statement that leaves `upgrade` bound to what Alembic will call.
 
-    Taking the first was a real hole, not a nicety. Python binds the name as it executes
-    the module, so with two `def upgrade` the second one wins and the first is dead code.
-    A checker reading the first would have judged a body that never runs and passed a file
-    whose live body drops a table — the exact failure this whole file exists to prevent,
-    hidden behind a green test. AsyncFunctionDef is included for the same reason: Alembic
-    would not run one, but if someone wrote one last it is still what the name is bound to,
-    and this guard must not fall back to judging an earlier sync body instead.
+    The question is what Python binds, not which `def` reads first, and taking the first
+    `def upgrade` was a real hole rather than a nicety. Python binds the name as it
+    executes the module, so with two `def upgrade` the second wins and the first is dead
+    code: a checker reading the first judges a body that never runs, and passes a file
+    whose live body drops a table — the exact failure this file exists to prevent, hidden
+    behind a green test.
+
+    The same reasoning covers the shapes that are not a def at all. An `async def upgrade`
+    is not something Alembic would run, and `upgrade = _rename_it` or
+    `from ._shared import upgrade` are not house style, but each of them is still what the
+    name ends up pointing at, and this guard must not answer by judging an earlier `def`
+    that has already been replaced. So the last binding wins whatever it is, and the caller
+    refuses the ones it cannot read.
     """
-    found: ast.FunctionDef | ast.AsyncFunctionDef | None = None
+    def binds_upgrade(node: ast.stmt) -> bool:
+        if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef):
+            return node.name == "upgrade"
+        if isinstance(node, ast.Assign):
+            return any(
+                isinstance(target, ast.Name) and target.id == "upgrade"
+                for target in node.targets
+            )
+        if isinstance(node, ast.AnnAssign | ast.AugAssign):
+            return isinstance(node.target, ast.Name) and node.target.id == "upgrade"
+        if isinstance(node, ast.Import | ast.ImportFrom):
+            return any(
+                (alias.asname or alias.name.split(".")[0]) == "upgrade"
+                for alias in node.names
+            )
+        return False
+
+    found: ast.stmt | None = None
     for node in tree.body:
-        if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef) and node.name == "upgrade":
+        if binds_upgrade(node):
             found = node
     return found
 
@@ -374,9 +402,16 @@ def expand_only_violations(source: str) -> list[str]:
     tree = ast.parse(source)
     op_names = frozenset(_alembic_op_names(tree) or {"op"})
     schema_names = frozenset(_sqlalchemy_names(tree) or {"sa"})
-    upgrade = _upgrade_function(tree)
+    upgrade = _upgrade_binding(tree)
     if upgrade is None:
         return ["no module-level upgrade() function, so there is nothing to check"]
+    if not isinstance(upgrade, ast.FunctionDef | ast.AsyncFunctionDef):
+        return [
+            f"line {upgrade.lineno}: {' '.join(ast.unparse(upgrade).split())} — this is "
+            "what `upgrade` is bound to by the time Alembic looks for it, and it is not a "
+            "def this guard can read. Write the upgrade as a function in the file, the way "
+            "all twelve migrations do, so there is a body to vouch for"
+        ]
 
     violations: list[str] = []
 
@@ -656,6 +691,18 @@ def test_finding_1_the_last_upgrade_definition_is_the_one_judged() -> None:
     assert not expand_only_violations(dead_drop), (
         "reported a drop in an upgrade() that a later definition has replaced, which is "
         f"dead code and cannot run: {expand_only_violations(dead_drop)}"
+    )
+
+    # The same question — what is `upgrade` bound to when Alembic calls it — has answers
+    # that are not a def. Each of these leaves the checked body unreachable, so a guard
+    # that judged the def above it would be vouching for code that never runs.
+    rebound = _migration(additive) + "\n\nupgrade = _apply_it\n"
+    assert expand_only_violations(rebound), (
+        "judged a def that a module-level assignment has already replaced"
+    )
+    imported = _migration(additive) + "\n\nfrom ._shared import upgrade\n"
+    assert expand_only_violations(imported), (
+        "judged a def that a later import has replaced"
     )
 
 

@@ -13,13 +13,14 @@
 # exists only as a promise: a restore that cannot itself be undone is a second way to lose
 # the ledger, not a recovery from the first.
 #
-# No Docker. restore-backup.sh's --direct mode swaps its three `docker run` wrappers for
-# plain `sh -c`, so everything below -- the listing, the confirmation, the drop and
-# recreate, the single-transaction load, the verification -- is the same code production
-# runs, with psql and pg_dump taken off PATH instead of out of a container. What --direct
-# does NOT cover is the three `docker run` command lines themselves; those are three lines
-# in one function, and they are the only part of this script a test on this host cannot
-# reach.
+# No Docker. restore-backup.sh's --direct mode swaps the runners that every Postgres
+# command goes through for plain `sh -c`, so everything below -- the listing, the
+# confirmation, the drop and recreate, the single-transaction load, the verification -- is
+# the same code production runs, with psql and pg_dump taken off PATH instead of out of a
+# container. What --direct does NOT cover is the two `docker run` command lines themselves,
+# one in _pg_sh and one in backups_sh; they are the only part of restore-backup.sh a test
+# on a host with no Docker cannot execute. The two names inside them that can rot silently
+# are checked instead, in section 1b.
 #
 # Point it at a Postgres with PGHOST/PGPORT/PGUSER. The defaults are the instance this
 # repository's sandbox runs. Exits 77 if there is no Postgres to talk to, so a runner can
@@ -113,6 +114,44 @@ if grep -q 'gzip.open' "$DBINIT"; then
   ok "dbinit.py still gzips the dump"
 else
   bad "dbinit.py no longer gzips; the .sql.gz name restore-backup.sh looks for may be wrong"
+fi
+
+# --- 1b. the docker-run path joins the network compose actually creates -----------------
+#
+# The two `docker run` lines are the one part of restore-backup.sh this suite cannot
+# execute, and the two values in them are derived, not literal: <project>_default and
+# <project>_db_backups. docker-compose.prod.yml pins the project with `name: saiva` and
+# declares no networks of its own, so `docker compose config` reports exactly one network
+# -- default, created as saiva_default -- and the volumes caddy_config, caddy_data,
+# db_backups and db_data. A networks: block added to that file later, or a change to
+# `name:`, would send the restore container to a network the db service is not on, and it
+# would fail with "network not found" on the one night it is needed.
+COMPOSE="$ROOT/docker-compose.prod.yml"
+if grep -qE '^networks:' "$COMPOSE"; then
+  bad "docker-compose.prod.yml now declares networks of its own"
+  note "restore-backup.sh joins <project>_default, which is only right while compose creates just that"
+else
+  ok "docker-compose.prod.yml declares no networks, so <project>_default is the one compose creates"
+fi
+if grep -qE '^name: saiva$' "$COMPOSE"; then
+  ok "the compose project is pinned to 'saiva', which is what SAIVA_PROJECT defaults to"
+else
+  bad "docker-compose.prod.yml no longer pins 'name: saiva'; the derived volume name may be wrong"
+fi
+if grep -q 'NETWORK="${PROJECT}_default"' "$RESTORE"; then
+  ok "restore-backup.sh runs its container on <project>_default"
+else
+  bad "restore-backup.sh no longer joins <project>_default"
+fi
+if grep -q 'VOLUME="${PROJECT}_db_backups"' "$RESTORE"; then
+  ok "and mounts <project>_db_backups, where the dumps are"
+else
+  bad "restore-backup.sh no longer mounts <project>_db_backups"
+fi
+if grep -qE '^ *- db_backups:/backups$' "$COMPOSE"; then
+  ok "db_backups is still mounted into the api service at /backups"
+else
+  bad "db_backups is no longer mounted at /backups; the dump names in the listing may be wrong"
 fi
 
 # --- 2. a database that looks like the real one ------------------------------------------
@@ -407,7 +446,280 @@ if [ "$NEWCOUNT" = "1" ]; then
 fi
 (cd "$BACKUPS" && rm -f "${DECOYS[@]}")
 
-# --- 13. --help says the thing that matters most -----------------------------------------
+# --- 13. the verification after the load is asserted on, not decoration -----------------
+#
+# Every case above restores a dump that is SUPPOSED to verify, so they all pass through
+# verify_restore on its happy path and not one of them can tell whether it is checking
+# anything. The test for that is to put `problem=0` immediately before verify_restore's
+# last line, in a copied tree, and run this suite: it reported 65 passed, 0 failed. Which
+# is to say the checks the restore prints -- the table count, the households marker, the
+# alembic_version comparison -- were decoration, and a restore that loaded the wrong file
+# into the household's database would still have been reported as a success.
+#
+# The three cases below each load a file that is a valid gzip of plain SQL carrying an
+# alembic_version row, so each passes every check made BEFORE the destructive step and
+# reaches verify_restore -- and each then fails a different one of its checks. With
+# `problem=0` in place all three restores exit 0, and all three cases go red.
+
+# Builds $BACKUPS/$1 from the SQL on stdin and restores it, leaving the exit code in $rc
+# and the output in $WORK/verify.out.
+run_unverifiable() { # NAME  < SQL
+  local name="$1"
+  cat >"$WORK/verify.sql"
+  gzip -c "$WORK/verify.sql" >"$BACKUPS/$name"
+  rc=0
+  SAIVA_CONFIRM_RESTORE=restore-saiva-db run_restore "$name" >"$WORK/verify.out" 2>&1 </dev/null || rc=$?
+  rm -f "$BACKUPS/$name"
+}
+
+# Puts the ledger back from the safety dump the failed run named in its own output. Each
+# case below leaves the database holding the bad file, so this runs after every one of
+# them -- and it doubles as a check that the recovery line printed under a FAILED
+# VERIFICATION is as usable as the one printed under a failed load.
+recover_after() { # LABEL
+  local label="$1" dump
+  dump="$(grep -oE "$PRERESTORE_RE" "$WORK/verify.out" | tail -n 1 || true)"
+  if [ -z "$dump" ]; then
+    bad "$label: the failure report named no dump to recover from"
+    return 0
+  fi
+  rc=0
+  SAIVA_CONFIRM_RESTORE=restore-saiva-db run_restore "$dump" >"$WORK/verify-undo.out" 2>&1 </dev/null || rc=$?
+  if [ "$rc" -ne 0 ]; then
+    bad "$label: the recovery it printed failed (exit $rc)"
+    cat "$WORK/verify-undo.out"
+    return 0
+  fi
+  assert_eq "$label: the ledger came back" "7" "$(q 'select count(*) from transactions')"
+}
+
+# 13a. Tables, a matching alembic_version, and no `households`. dbinit.py uses that table
+# to tell a Saiva database from any other, so a dump that leaves it missing is a dump of
+# something else -- which is the mistake verification exists to catch.
+run_unverifiable "saiva-20260501-010101-premigrate.sql.gz" <<'SQL'
+CREATE TABLE widgets (id integer NOT NULL);
+CREATE TABLE alembic_version (version_num varchar(32) NOT NULL);
+COPY public.alembic_version (version_num) FROM stdin;
+0099
+\.
+SQL
+[ "$rc" -ne 0 ] && ok "a dump with no households table fails the script (exit $rc)" \
+                || { bad "a dump with no households table was reported as a successful restore"; cat "$WORK/verify.out"; }
+grep -q 'households table *MISSING' "$WORK/verify.out" && ok "it names the check that failed" \
+                || { bad "the report does not name the failed check"; cat "$WORK/verify.out"; }
+grep -q 'checks afterwards did not all pass' "$WORK/verify.out" \
+  && ok "it says the load worked and the checks did not" \
+  || { bad "the verify-phase report did not fire"; cat "$WORK/verify.out"; }
+assert_eq "the database does hold what that file contained" "t" \
+  "$(q "select to_regclass('public.widgets') is not null")"
+recover_after "13a"
+
+# 13b. An alembic_version row that is not the revision the dump declares in its COPY
+# block. Without this check a restore can only confirm that SOME schema era is present,
+# which is true of any database at all.
+run_unverifiable "saiva-20260502-020202-premigrate.sql.gz" <<'SQL'
+CREATE TABLE households (id integer NOT NULL);
+CREATE TABLE alembic_version (version_num varchar(32) NOT NULL);
+COPY public.alembic_version (version_num) FROM stdin;
+0099
+\.
+UPDATE alembic_version SET version_num = '0077';
+SQL
+[ "$rc" -ne 0 ] && ok "an alembic_version that disagrees with the dump fails the script (exit $rc)" \
+                || { bad "a mismatched alembic_version was reported as a successful restore"; cat "$WORK/verify.out"; }
+grep -q 'MISMATCH' "$WORK/verify.out" && ok "it flags the mismatch and prints both revisions" \
+                || { bad "the report does not flag the mismatch"; cat "$WORK/verify.out"; }
+recover_after "13b"
+
+# 13c. A file that loads cleanly and leaves nothing behind. This is also the second of the
+# two state reports that could state the opposite of the truth: with no tables in the
+# database at all, the report used to say "Database X is NOT empty" two lines under a
+# check that had just printed EMPTY.
+run_unverifiable "saiva-20260503-030303-premigrate.sql.gz" <<'SQL'
+SELECT 1;
+SQL
+[ "$rc" -ne 0 ] && ok "a dump that leaves the database empty fails the script (exit $rc)" \
+                || { bad "a dump that left the database empty was reported as a success"; cat "$WORK/verify.out"; }
+assert_eq "the database really is empty" "0" \
+  "$(q "select count(*) from information_schema.tables where table_schema = 'public'")"
+grep -q 'no tables at' "$WORK/verify.out" && ok "the report says the database was left with no tables" \
+                || { bad "the report does not say the database is empty"; cat "$WORK/verify.out"; }
+grep -q 'is NOT empty' "$WORK/verify.out" \
+  && bad "the report tells the owner an empty database is not empty" \
+  || ok "and does not also claim it is not empty"
+recover_after "13c"
+
+# --- 14. every state report is true at the moment it can fire ----------------------------
+#
+# The EXIT trap prints one paragraph per phase, and that paragraph is the whole of what the
+# owner has to act on at the worst moment this script has. Two of them could state the
+# opposite of the truth, because the phase was set earlier than the thing it described: a
+# failure merely READING pg_database, and a failure of the DROP itself, both reported the
+# database as already dropped and emptied when it was untouched.
+#
+# Forced with a psql on PATH that fails one named statement and passes everything else
+# through. --direct mode takes psql off PATH, which is the only reason this is reachable
+# from a test at all.
+PSQL_REAL="$(command -v psql)"
+shim_psql() { # DIR CASE-PATTERN -- a psql that fails when one of its arguments matches
+  mkdir -p "$1"
+  cat >"$1/psql" <<SH
+#!/bin/sh
+for a in "\$@"; do
+  case "\$a" in
+    $2) printf 'psql: error: forced failure from the test shim\n' >&2; exit 1 ;;
+  esac
+done
+exec "$PSQL_REAL" "\$@"
+SH
+  chmod +x "$1/psql"
+}
+
+BEFORE_ROWS="$(q 'select count(*) from transactions')"
+
+shim_psql "$WORK/shim-meta" '*pg_database*'
+rc=0
+( PATH="$WORK/shim-meta:$PATH"; SAIVA_CONFIRM_RESTORE=restore-saiva-db run_restore "$DUMP" ) \
+  >"$WORK/meta.out" 2>&1 </dev/null || rc=$?
+[ "$rc" -ne 0 ] && ok "a failure reading pg_database fails the script (exit $rc)" \
+                || { bad "a failure reading pg_database was ignored"; cat "$WORK/meta.out"; }
+grep -q 'Nothing was changed' "$WORK/meta.out" && ok "and reports that nothing was changed" \
+                || { bad "it does not say what state the database is in"; cat "$WORK/meta.out"; }
+grep -qi 'does not hold the data it held before' "$WORK/meta.out" \
+  && { bad "it reports a dropped database after a failure that touched nothing"; cat "$WORK/meta.out"; } \
+  || ok "and does not claim the database was dropped"
+assert_eq "the database was in fact untouched" "$BEFORE_ROWS" "$(q 'select count(*) from transactions')"
+
+shim_psql "$WORK/shim-drop" '"DROP DATABASE"*'
+rc=0
+( PATH="$WORK/shim-drop:$PATH"; SAIVA_CONFIRM_RESTORE=restore-saiva-db run_restore "$DUMP" ) \
+  >"$WORK/drop.out" 2>&1 </dev/null || rc=$?
+[ "$rc" -ne 0 ] && ok "a DROP that fails fails the script (exit $rc)" \
+                || { bad "a failed DROP was ignored"; cat "$WORK/drop.out"; }
+grep -q 'did not report success' "$WORK/drop.out" && ok "it says the drop did not report success" \
+                || { bad "the drop-phase report did not fire"; cat "$WORK/drop.out"; }
+grep -qi 'does not hold the data it held before' "$WORK/drop.out" \
+  && { bad "a refused DROP was reported as a database that lost its data"; cat "$WORK/drop.out"; } \
+  || ok "and does not claim the data is gone"
+grep -qE "$PRERESTORE_RE" "$WORK/drop.out" && ok "it still names the safety dump it took on the way past" \
+                || { bad "the drop-phase report names no way back"; cat "$WORK/drop.out"; }
+assert_eq "the data really is still there" "$BEFORE_ROWS" "$(q 'select count(*) from transactions')"
+
+# --- 15. the dump is all that is left ----------------------------------------------------
+#
+# The db_data volume wiped, or the database dropped by hand to be rid of a corrupt one:
+# nothing to dump, nothing to drop, nothing to lose. It is the first case this script's own
+# header names, and it was the one case the script could not do -- the safety dump ran
+# before anything had looked at the database, pg_dump of a database that does not exist
+# fails, a failed safety dump stops the restore, and so the branch that creates a missing
+# database was unreachable on the normal path.
+psql -qc "DROP DATABASE IF EXISTS \"$TESTDB\" WITH (FORCE)" -d postgres >/dev/null
+assert_eq "the database really is gone" "0" \
+  "$(psql -X -At -q -d postgres -c "select count(*) from pg_database where datname = '$TESTDB'")"
+PRERESTORE_COUNT="$(cd "$BACKUPS" && ls -1 ./*-prerestore*.sql.gz 2>/dev/null | wc -l || true)"
+
+rc=0
+SAIVA_CONFIRM_RESTORE=restore-saiva-db run_restore "$DUMP" >"$WORK/gone.out" 2>&1 </dev/null || rc=$?
+[ "$rc" -eq 0 ] && ok "it restores into a database that no longer exists (exit 0)" \
+                || { bad "it cannot restore when the database is gone (exit $rc)"; cat "$WORK/gone.out"; }
+assert_eq "the ledger came back from the dump alone"  "3"    "$(q 'select count(*) from transactions')"
+assert_eq "with the dump's schema era"                "0003" "$(q 'select version_num from alembic_version')"
+assert_eq "and the dump's own tables"                 "t"    "$(q "select to_regclass('public.households') is not null")"
+grep -q 'nothing to drop' "$WORK/gone.out" && ok "it says there was nothing to drop" \
+                || { bad "it does not say what it did about the missing database"; cat "$WORK/gone.out"; }
+grep -q 'REPLACES NOTHING' "$WORK/gone.out" && ok "and the confirmation does not threaten data that is not there" \
+                || { bad "the warning still says everything since the dump will be lost"; cat "$WORK/gone.out"; }
+assert_eq "it took no safety dump of a database that was not there" "$PRERESTORE_COUNT" \
+  "$(cd "$BACKUPS" && ls -1 ./*-prerestore*.sql.gz 2>/dev/null | wc -l || true)"
+
+# --- 16. a safety dump that cannot be taken still stops the restore ----------------------
+#
+# The other half of section 15, and the half it must not have loosened: "there is nothing
+# to back up" is a reason to carry on, "there IS something and I could not back it up" is a
+# reason to stop. A pg_dump on PATH that always fails stands in for the full disk, the
+# unwritable backups directory and the server that goes away mid-dump.
+mkdir -p "$WORK/shim-dump"
+cat >"$WORK/shim-dump/pg_dump" <<'SH'
+#!/bin/sh
+printf 'pg_dump: error: forced failure from the test shim\n' >&2
+exit 1
+SH
+chmod +x "$WORK/shim-dump/pg_dump"
+
+BEFORE_ROWS="$(q 'select count(*) from transactions')"
+rc=0
+( PATH="$WORK/shim-dump:$PATH"; SAIVA_CONFIRM_RESTORE=restore-saiva-db run_restore "$DUMP" ) \
+  >"$WORK/nodump.out" 2>&1 </dev/null || rc=$?
+[ "$rc" -ne 0 ] && ok "a safety dump that fails stops the restore (exit $rc)" \
+                || { bad "it went ahead and dropped the database with no way back"; cat "$WORK/nodump.out"; }
+grep -q 'will not be attempted' "$WORK/nodump.out" && ok "and says the restore was not attempted" \
+                || { bad "it does not say whether it went ahead"; cat "$WORK/nodump.out"; }
+assert_eq "the rows are untouched"   "$BEFORE_ROWS" "$(q 'select count(*) from transactions')"
+assert_eq "the tables are untouched" "t"            "$(q "select to_regclass('public.households') is not null")"
+
+# --- 17. one unreadable entry does not take the readable dumps with it -------------------
+#
+# A directory created by mistake, a dangling symlink left by a half-finished `docker cp`, a
+# file restored from a tarball with the wrong owner: any single entry matching *.sql.gz
+# that could not be read used to end the listing AND every restore, including of the good
+# dumps sitting beside it. A backups directory with something wrong in it is the normal
+# case at the moment anyone runs this, not an exceptional one.
+BADDIR="saiva-20260601-010101-premigrate.sql.gz"
+BADLINK="saiva-20260602-020202-premigrate.sql.gz"
+mkdir -p "$BACKUPS/$BADDIR"
+ln -s "$BACKUPS/nothing-here" "$BACKUPS/$BADLINK"
+
+rc=0
+run_restore >"$WORK/badlist.out" 2>&1 </dev/null || rc=$?
+assert_eq "the listing still exits 0 with a bad entry among the dumps" "0" "$rc"
+grep -q "$DUMP" "$WORK/badlist.out" && ok "it still lists the good dump" \
+                || { bad "one bad entry hid every good dump"; cat "$WORK/badlist.out"; }
+grep -q "$BADDIR" "$WORK/badlist.out" && ok "it names the directory it skipped" \
+                || { bad "the skipped directory is not reported at all"; cat "$WORK/badlist.out"; }
+grep -q 'a directory, not a file' "$WORK/badlist.out" && ok "and says why it skipped it" \
+                || bad "it does not say why the entry was skipped"
+grep -q "$BADLINK" "$WORK/badlist.out" && ok "it names the dangling symlink too" \
+                || bad "a dangling symlink matching *.sql.gz is not reported"
+
+rc=0
+SAIVA_CONFIRM_RESTORE=restore-saiva-db run_restore "$BADDIR" >"$WORK/baddump.out" 2>&1 </dev/null || rc=$?
+[ "$rc" -ne 0 ] && ok "it refuses to restore the bad entry (exit $rc)" \
+                || { bad "it tried to restore a directory"; cat "$WORK/baddump.out"; }
+grep -q 'a directory, not a file' "$WORK/baddump.out" \
+  && ok "and says what is wrong with it, rather than that there is no such dump" \
+  || { bad "the refusal does not say what is wrong with the entry"; cat "$WORK/baddump.out"; }
+
+# And a good dump still restores with the bad entry in place, which is the half of this
+# that actually costs a household its evening.
+psql -X -q -v ON_ERROR_STOP=1 -d "$TESTDB" >/dev/null \
+  -c "INSERT INTO transactions (account_id, posted_on, payee, amount) VALUES (1, '2026-12-01', 'Later', -1.00)"
+rc=0
+SAIVA_CONFIRM_RESTORE=restore-saiva-db run_restore "$DUMP" >"$WORK/badrestore.out" 2>&1 </dev/null || rc=$?
+[ "$rc" -eq 0 ] && ok "a good dump still restores with an unreadable entry beside it" \
+                || { bad "the bad entry broke the restore too (exit $rc)"; cat "$WORK/badrestore.out"; }
+assert_eq "and the restore really happened" "3" "$(q 'select count(*) from transactions')"
+
+if [ "$(id -u)" -ne 0 ]; then
+  # Root reads mode 000 regardless, so as root this case would assert nothing.
+  NOREAD="saiva-20260603-030303-premigrate.sql.gz"
+  printf 'x\n' | gzip -c >"$BACKUPS/$NOREAD"
+  chmod 000 "$BACKUPS/$NOREAD"
+  rc=0
+  run_restore >"$WORK/noread.out" 2>&1 </dev/null || rc=$?
+  assert_eq "the listing survives a file it is not allowed to read" "0" "$rc"
+  grep -q 'check its owner and permissions' "$WORK/noread.out" \
+    && ok "it reports the unreadable file as unreadable" \
+    || { bad "an unreadable file is not reported"; cat "$WORK/noread.out"; }
+  chmod 644 "$BACKUPS/$NOREAD"
+  rm -f "$BACKUPS/$NOREAD"
+else
+  note "skipped the unreadable-file case: this run is root, which can read mode 000"
+fi
+
+rm -rf "${BACKUPS:?}/${BADDIR:?}"
+rm -f "$BACKUPS/$BADLINK"
+
+# --- 18. --help says the thing that matters most -----------------------------------------
 
 rc=0
 run_restore --help >"$WORK/help.out" 2>&1 </dev/null || rc=$?
