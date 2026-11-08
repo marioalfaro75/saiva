@@ -239,6 +239,24 @@ test_env_reconcile_adds_new_keys_and_never_overwrites() {
     "reconcile overwrote a value that was already set"
 }
 
+test_reconcile_writes_values_the_app_can_actually_parse() {
+  # .env.example carries inline prose after some values (SMTP_TLS=true # STARTTLS...).
+  # Stripping the comment and leaving the whitespace writes `SMTP_TLS=true  `, and
+  # pydantic rejects that outright -- so the api container would not start. A reconcile
+  # that produces an unparseable .env is worse than one that produces nothing.
+  new_sandbox env-trailing; local work="$WORK"
+  seed_env "$work"
+  printf 'A_FLAG=true   # prose about the flag\nA_PATH=/srv/x\t# tabbed prose\n' \
+    >> "$work/.env.example"
+  site_up
+  run_deploy "$work" --pull
+  local offenders
+  offenders="$(grep -nE '[[:space:]]+$' "$work/.env" || true)"
+  assert_eq "" "$offenders" "reconcile left trailing whitespace on a value: $offenders"
+  assert_contains "$(cat "$work/.env")" "A_FLAG=true" "the value itself must survive"
+  assert_not_contains "$(grep '^A_PATH=' "$work/.env")" "prose" "the comment must not"
+}
+
 test_env_set_survives_values_full_of_metacharacters() {
   new_sandbox env-metachars; local work="$WORK"
   # shellcheck source=/dev/null
@@ -551,6 +569,45 @@ test_a_pinned_channel_does_not_need_a_recorded_digest() {
 
   assert_eq "rolled_back" "$(status_field phase)" \
     "a pinned channel restores its own images; this is a clean rollback"
+}
+
+test_a_rollback_from_a_failed_gate_reports_a_terminal_phase() {
+  # ADDED BY REVIEW -- currently FAILS. Every other rollback test reaches _rollback via
+  # `$COMPOSE ... || _rollback ...`, and the right-hand side of `||` is a context where
+  # errexit is suppressed for the whole function body. The GATE failure reaches it from
+  # an `if ! wait_for_site; then _rollback ...; fi` body, where errexit is LIVE -- and
+  # _rollback contains `schema_now="$(health_field schema)"`, a bare assignment from a
+  # command substitution. health_field is a `curl | sed | head` pipeline under pipefail,
+  # so when the site is not answering yet (which is the normal case a few hundred ms
+  # after `up -d` returns) it exits non-zero, the assignment inherits that, and errexit
+  # kills the script mid-rollback: no wait_for_site, no status_finish, no rolled_back /
+  # rolled_back_code_only / rollback_incomplete. The box is left with phase=running
+  # forever and the panel polls for an answer that is never written.
+  new_sandbox rollback-gate-terminal; local work="$WORK"
+  add_release "$work"
+  seed_env "$work" SAIVA_SITE_ADDRESS=https://192.168.0.11 SAIVA_VERSION=v1.0.0
+  site_up
+  printf 'sha256:old-api\n' > "$FAKE/image.api"
+  printf 'sha256:old-web\n' > "$FAKE/image.web"
+  printf 'ghcr.io/example/saiva-api@sha256:oldapi\n' > "$FAKE/digest.sha256:old-api"
+  printf 'ghcr.io/example/saiva-web@sha256:oldweb\n' > "$FAKE/digest.sha256:old-web"
+  # The release starts but does not serve, so the GATE is what fails -- and the site is
+  # still not answering at the instant the rollback's `up -d` returns, as on a real box.
+  printf 'down\n' > "$FAKE/site.after-up"
+  site_down
+  # Bring the site back a few seconds AFTER the rollback starts -- well inside
+  # wait_for_site's budget, so the only correct outcome is a terminal `rolled_back`.
+  # Keyed off the run log rather than a fixed delay so the test cannot race the gate.
+  ( while ! grep -q 'rollback:' "$FAKE/state/run.log" 2>/dev/null; do sleep 0.05; done
+    sleep 3; printf 'up\n' > "$FAKE/site"; rm -f "$FAKE/site.after-up" ) &
+  local flipper=$!
+  run_deploy "$work" --apply-release
+  kill "$flipper" 2>/dev/null; wait "$flipper" 2>/dev/null
+
+  assert_not_contains "$(status_field phase)" "running" \
+    "the rollback left phase=running: no terminal status was ever written, so the panel
+       polls forever and --status never says what happened"
+  assert_eq "1" "$RC" "a rollback must exit 1, not with curl's exit code"
 }
 
 test_a_second_update_does_not_overwrite_the_running_ones_status() {

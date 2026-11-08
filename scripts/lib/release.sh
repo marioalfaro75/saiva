@@ -106,10 +106,16 @@ probe_site() { # URL -> 0 if reachable either directly or pinned to loopback
 }
 
 health_field() { # FIELD -> its value from the running stack's /api/health, or empty
+  # Always exits 0. It is called from bare assignments inside the rollback, and a
+  # pipeline that fails under `set -o pipefail` in an errexit-live context would kill
+  # the recovery path before it could write a terminal status -- which is precisely the
+  # "panel polls forever for an answer nobody wrote" failure this design exists to
+  # remove. Not answering is an ordinary result here, not an error.
   local url; url="$(site_url)"
   curl -fsS -k --max-time 10 "$url/api/health" 2>/dev/null \
     | sed -n "s/.*\"$1\"[[:space:]]*:[[:space:]]*\"\{0,1\}\([^\",}]*\)\"\{0,1\}.*/\1/p" \
-    | head -n 1
+    | head -n 1 || true
+  return 0
 }
 
 wait_for_site() { # -> 0 when the site answers, within the configured budget
@@ -367,6 +373,20 @@ env_clear_rollback_pins() {
 # --- rollback -----------------------------------------------------------------------
 
 _rollback() { # MESSAGE -- put the box back, then say exactly what state it is in
+  # errexit OFF for the whole of this function, deliberately.
+  #
+  # This is the recovery path. Every statement in it is allowed to fail -- the old
+  # container may be gone, the registry unreachable, the site not answering yet -- and
+  # none of those may stop it reaching a terminal status, because the status file is the
+  # only thing that tells the owner what state their box is in.
+  #
+  # It is not hypothetical. _rollback is reached two ways: from `cmd || _rollback ...`,
+  # where errexit is already suppressed for the whole right-hand side, and from
+  # `if ! wait_for_site; then _rollback ...; fi`, where it is LIVE. On the second path a
+  # bare assignment from a failing command substitution killed the script mid-rollback:
+  # no re-gate, no status_finish, phase left at `running` forever, and a panel polling
+  # for an answer that was never going to be written.
+  set +e
   local why="$1"
   log ""
   log "FAILED: $why"

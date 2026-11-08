@@ -117,8 +117,13 @@ env_reconcile() { # add keys a newer .env.example introduced; never change an ex
     case "$line" in *=*) : ;; *) continue ;; esac
     key="${line%%=*}"
     value="${line#*=}"
-    # Strip an inline trailing comment the example uses for prose (SMTP_TLS=true # ...).
+    # Strip an inline trailing comment the example uses for prose (SMTP_TLS=true # ...),
+    # and then the whitespace it leaves behind. That second step is not cosmetic:
+    # pydantic parses SMTP_TLS as a bool and rejects "true  " outright, so a stray
+    # trailing space here is an api container that will not start -- found by running
+    # this against a real .env and reading what it wrote.
     value="${value%%[[:space:]]#*}"
+    value="${value%"${value##*[![:space:]]}"}"
     env_has "$key" && continue
 
     if _env_key_needs_a_decision "$key"; then blocked+=("$key"); continue; fi
