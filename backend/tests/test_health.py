@@ -28,6 +28,20 @@ from app import main as app_main
 from app.schema_state import AHEAD, BEHIND, CURRENT, SchemaState
 
 
+def _fixed_state(state: str, db_revision: str, image_head: str):  # noqa: ANN202
+    """A stand-in for read_schema_state, with its signature.
+
+    Keeping the shape here rather than inline in each test means one place to update when
+    that function grows a parameter -- which it did, and three tests then failed for a
+    reason that had nothing to do with what they were testing.
+    """
+
+    def reader(engine: object, cfg: object = None, conn: object = None) -> SchemaState:
+        return SchemaState(state, db_revision, image_head)
+
+    return reader
+
+
 def test_health_reports_what_it_can_see(client: TestClient) -> None:
     body = client.get("/api/health").json()
 
@@ -42,7 +56,7 @@ def test_health_is_200_and_honest_when_the_database_is_ahead(
 ) -> None:
     """The regression guard for the gate-thrash failure described in this module's docstring."""
     monkeypatch.setattr(
-        app_main, "read_schema_state", lambda engine, cfg=None, conn=None: SchemaState(AHEAD, "0099", "0012")
+        app_main, "read_schema_state", _fixed_state(AHEAD, "0099", "0012")
     )
 
     response = client.get("/api/health")
@@ -64,7 +78,7 @@ def test_every_schema_state_is_servable(
 ) -> None:
     """No schema reading may make this endpoint fail. Only an unreachable database may."""
     monkeypatch.setattr(
-        app_main, "read_schema_state", lambda engine, cfg=None, conn=None: SchemaState(state, "0001", "0012")
+        app_main, "read_schema_state", _fixed_state(state, "0001", "0012")
     )
 
     response = client.get("/api/health")

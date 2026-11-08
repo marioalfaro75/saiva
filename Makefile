@@ -33,7 +33,7 @@ COMPOSE_DEV  := $(COMPOSE) -f docker-compose.yml
 # in the environment; make does not pass its own variables to recipes otherwise.
 export SAIVA_CONFIRM_DESTROY
 
-.PHONY: help deploy pull update up down destroy restart logs ps seed dev-up dev-rebuild
+.PHONY: help deploy pull update up down destroy restart logs ps seed dev-up dev-rebuild check
 
 help: ## Show available targets
 	@grep -E '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) \
@@ -66,6 +66,9 @@ down: ## Stop the prod stack, database preserved
 # same command and there is no line for make to continue past.
 destroy: ## Wipe the database AND every pre-migration backup (requires a typed word)
 	@./scripts/confirm-destroy.sh && $(COMPOSE_PROD) down -v
+
+check: ## Run everything CI runs, with the same invocations
+	@./scripts/check-all.sh
 
 logs: ## Follow the API logs
 	$(COMPOSE_PROD) logs -f api
