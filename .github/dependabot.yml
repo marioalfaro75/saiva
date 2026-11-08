@@ -177,19 +177,22 @@ updates:
   # The images the compose files pin, which the two entries above do not reach: they
   # list /backend and /frontend, and the compose files live at the root.
   #
-  # This matters most for `tecnativa/docker-socket-proxy:0.3.0`. It is the only fully
-  # immutable pin in the repo — major.minor.patch, so no publisher rebuild will ever
-  # move it — and it is the container holding a line to the Docker socket. It was
-  # getting no updates from anywhere.
+  # This used to matter most for `tecnativa/docker-socket-proxy:0.3.0`, the only fully
+  # immutable pin in the repo and the container holding a line to the Docker socket.
+  # That service is gone: there is no Docker socket on the box any more. What is left
+  # here is postgres and caddy, both on tags bounded to a major so a rebuild with OS
+  # patches arrives without a pull request and a data-incompatible major cannot.
   #
   # Not ignored the way the base images are: nothing couples these to the CI matrix,
   # so there is no reason to silence them.
   #
-  # Merging one of these does not update the running container, though. Watchtower is in
-  # label-enable mode and only `api` and `web` carry the label, so caddy, postgres and the
-  # socket proxy change only when someone runs `docker compose up -d` on the host. For
-  # caddy that is the internet-facing TLS terminator, and for postgres it is the container
-  # holding the actual records -- neither is updated by anything automatic today.
+  # Merging one of these now DOES reach the running container. That used to be false and
+  # is worth stating as a change: Watchtower ran in label-enable mode and only `api` and
+  # `web` carried the label, so caddy and postgres -- the internet-facing TLS terminator
+  # and the container holding the actual records -- moved only when somebody happened to
+  # run `docker compose up -d` by hand. scripts/deploy.sh --apply-release runs
+  # `compose pull` for every service, so a merged bump here arrives with the next
+  # release, gated on the site still answering and rolled back by digest if it does not.
   - package-ecosystem: docker
     directory: "/"
     schedule:

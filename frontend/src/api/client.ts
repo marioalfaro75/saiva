@@ -37,6 +37,7 @@ import type {
   TransactionList,
   TxnGroups,
   Trend,
+  UpdateRun,
   UpdateStatus,
 } from "./types";
 
@@ -393,5 +394,7 @@ export const api = {
   meta: () => request<{ version: string }>("/meta"),
   updateCheck: (force = false) =>
     request<UpdateStatus>(`/admin/update-check${force ? "?force=true" : ""}`),
-  runUpdate: () => request<{ status: string }>("/admin/update", { method: "POST" }),
+  runUpdate: () =>
+    request<{ status: string; request_id: string }>("/admin/update", { method: "POST" }),
+  updateRun: () => request<UpdateRun>("/admin/update-status"),
 };

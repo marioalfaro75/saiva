@@ -7,8 +7,22 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONPATH=/app
 WORKDIR /app
 
+# Two identities, because one string could not carry both jobs and the attempt to make
+# it do so put the update badge permanently out of action on two channels.
+#
+# SAIVA_VERSION answers "which release is this?" and is compared against GitHub
+# releases, so it has to be semver-shaped or the comparison is meaningless. CI used to
+# bake the literal `edge` into both the :edge AND the :sha-<short> images, and since
+# parse_version returns None for anything non-semver, the app concluded "no update
+# available" and the panel showed a tick on a box that had no way to find out.
+#
+# SAIVA_BUILD answers "which exact build is this?" -- the immutable tag -- and is never
+# compared. It is what /api/health reports, what the panel shows when there is nothing
+# to compare against, and what a rollback names when it says where it went back to.
 ARG SAIVA_VERSION=dev
 ENV SAIVA_VERSION=$SAIVA_VERSION
+ARG SAIVA_BUILD=""
+ENV SAIVA_BUILD=$SAIVA_BUILD
 
 # postgresql-client-16 provides pg_dump for the pre-migration safety backup; it
 # must match the postgres:16 server, so we pull it from the PGDG apt repo. The

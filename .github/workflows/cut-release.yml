@@ -1,25 +1,48 @@
 name: Cut release
 
-# Manually cut a versioned release from the current default branch. It builds and
-# publishes the images first, then creates the tag + GitHub Release — so a release
-# never exists without its images.
+# Manually cut a versioned release from the current default branch. The order of the
+# jobs below is the whole design, so it is worth stating plainly:
 #
-# This used to claim that `:latest` could not drift from `:v<ver>`, and since
-# refresh-images.yml it is no longer true, so here is what is: `v<ver>` and
-# `sha-<sha>` are written here and never again, while `latest` and `<major.minor>`
-# are rolling pointers that a refresh moves to a rebuilt digest of this same tree.
-# `:latest` is therefore "the newest build of the newest release", not "the same
-# image as `:v<ver>`". If you want one exact image — which is what the documented
-# rollback wants — pin SAIVA_VERSION to `v<ver>` or `sha-<sha>`.
+#   1. validate the version and refuse one that already exists
+#   2. run the shared checks (checks.yml) against this ref
+#   3. build both images and push ONLY their immutable names: `v<ver>` and `sha-<short>`
+#   4. boot both images and prove they work (image-smoke.yml)
+#   5. move the rolling pointers `latest` and `<major.minor>` onto the tested digests
+#   6. create the tag and the GitHub Release
 #
-# "Written here and never again" holds for this path. The one way those immutable
-# tags move is somebody pushing a `v*` tag by hand, which fires release.yml and
-# rebuilds the same names from whatever that tag points at. All three writers of the
-# release channel now share the concurrency group below, so they cannot interleave,
-# but nothing stops that rebuild — don't hand-push version tags, use this workflow.
-# Trigger: Actions → "Cut release" → Run workflow (enter a version like 0.8.2), or
-# via the API. Tags created here use GITHUB_TOKEN, so they do not re-trigger the
-# tag-push build in release.yml (no double build).
+# Steps 4 and 5 are new, and they close the gap that mattered most. This workflow used
+# to push `latest` in the same build-push step as `v<ver>`, which meant `:latest` moved
+# before anything had executed the image: a release that could not start — a base image
+# whose libpq5 broke pg_dump, a strip that took a module the app imports — reached every
+# box following `:latest` the moment the build went green, and `restart:
+# unless-stopped` then crash-looped it. The only suite in this repository that actually
+# boots an image lived in refresh-images.yml and ran weekly on a channel production
+# does not follow. It is now a reusable workflow that both paths call, and nothing
+# rolling moves until it passes.
+#
+# `:latest` can still differ from `:v<ver>`: `latest` and `<major.minor>` are rolling
+# pointers that refresh-images.yml moves to a rebuilt digest of this same source tree,
+# so `:latest` means "the newest build of the newest release", not "the same image as
+# `:v<ver>`". If you want one exact image — which is what the documented rollback wants
+# — pin SAIVA_VERSION to `v<ver>` or to the `sha-<short>` this run publishes.
+#
+# What a failure leaves behind, since the order above makes that asymmetric. A failure
+# at or before the smoke gate leaves the `v<ver>` and `sha-<short>` image tags in GHCR
+# with no git tag and no Release — nothing announces them, nothing follows them, and
+# re-running the workflow with the same version rebuilds and overwrites both. A failure
+# after the promote leaves `:latest` correct and the announcement missing; re-run the
+# `release` job. Neither state puts an untested image where `make pull` would find it.
+#
+# `v<ver>` and `sha-<short>` are written here and never again. That used to come with a
+# caveat — somebody pushing a `v*` tag by hand fired release.yml, which rebuilt the same
+# names from whatever that tag pointed at — and the caveat is gone: release.yml now
+# refuses to publish and tells the pusher to come here instead. The two writers of the
+# rolling tags that remain, this workflow and refresh-images.yml, share the concurrency
+# group below so they cannot interleave.
+#
+# Trigger: Actions -> "Cut release" -> Run workflow (enter a version like 0.8.2), or via
+# the API. The tag created here uses GITHUB_TOKEN, so it does not fire release.yml's
+# refusal (tag pushes made with GITHUB_TOKEN do not trigger workflows).
 on:
   workflow_dispatch:
     inputs:
@@ -34,10 +57,10 @@ on:
 permissions:
   contents: read
 
-# Shared with refresh-images.yml, which writes the same `:latest`. Without it, a
-# refresh of v0.16.0 finishing after a release of v0.17.0 walks `:latest` backwards.
-# Never cancel a release in flight: its images are already published by the time the
-# tag is created, and a cancelled run leaves the two out of step.
+# Shared with refresh-images.yml, which writes the same `:latest`. Without it, a refresh
+# of v0.16.0 finishing after a release of v0.17.0 walks `:latest` backwards. Never
+# cancel a release in flight: by the time the rolling tags move, the images are already
+# published, and a cancelled run leaves the channel half-written.
 concurrency:
   group: ghcr-release-channel
   cancel-in-progress: false
@@ -50,6 +73,7 @@ jobs:
       version: ${{ steps.v.outputs.version }}
       tag: ${{ steps.v.outputs.tag }}
       major_minor: ${{ steps.v.outputs.major_minor }}
+      build: ${{ steps.v.outputs.build }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -73,26 +97,100 @@ jobs:
             echo "version=$ver"
             echo "tag=$tag"
             echo "major_minor=$(printf '%s' "$ver" | cut -d. -f1-2)"
+            # The immutable build identity, computed once here and used by both builds,
+            # by the smoke gate and by the summary, so the tag that gets pushed and the
+            # SAIVA_BUILD baked into the image cannot disagree. ci.yml had them derived
+            # independently and that is how the `sha-` image came to report its version
+            # as `edge`; see the comment on the publish jobs there.
+            echo "build=sha-${GITHUB_SHA:0:7}"
           } >> "$GITHUB_OUTPUT"
 
-  # Dispatch can be pointed at any ref, so "it came from main and main is green"
-  # is not something this workflow gets to assume.
+  # Dispatch can be pointed at any ref, so "it came from main and main is green" is not
+  # something this workflow gets to assume.
   checks:
     name: Checks
     uses: ./.github/workflows/checks.yml
 
-  images:
-    name: Publish ${{ matrix.image }}
+  # Two jobs rather than one matrix, and not for style. A matrix job has a single output
+  # namespace, so both legs would write `digest` and the second to finish would win — and
+  # the smoke gate and the promote below both need to name the exact manifest for each
+  # image. refresh-images.yml splits them for the same reason.
+  api:
+    name: Publish saiva-api
     needs: [prep, checks]
     runs-on: ubuntu-latest
     permissions:
       contents: read
       packages: write
-    strategy:
-      matrix:
-        include:
-          - { image: saiva-api, context: ./backend }
-          - { image: saiva-web, context: ./frontend }
+    outputs:
+      digest: ${{ steps.build.outputs.digest }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4.4.0
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - name: Log in to GHCR
+        uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      # Immutable names only. `latest` and `<major.minor>` are rolling pointers and they
+      # are moved by the promote job, after the smoke gate — that is the one change here
+      # that stops an unbootable release reaching the house. `v<ver>` and `sha-<short>`
+      # are safe to write now: prep has just proved `v<ver>` does not exist, and nothing
+      # follows either name until the Release announces it.
+      - name: Image metadata (tags + labels)
+        id: meta
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
+        with:
+          images: ghcr.io/${{ github.repository_owner }}/saiva-api
+          tags: |
+            type=raw,value=${{ needs.prep.outputs.tag }}
+            type=raw,value=${{ needs.prep.outputs.build }}
+      - name: Build and push
+        id: build
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: ./backend
+          # SAIVA_VERSION is the release identity and must be semver: it is what
+          # /api/update-check compares against the newest GitHub Release, and
+          # `parse_version` returns None for anything else, which the app reads as "I
+          # cannot compare". SAIVA_BUILD is the immutable identity of this exact build,
+          # never compared, and it is what /api/health reports and what a rollback names.
+          # backend/Dockerfile must declare `ARG SAIVA_BUILD` for the second one to land;
+          # until it does, BuildKit drops it with a warning and image-smoke.yml warns.
+          build-args: |
+            SAIVA_VERSION=${{ needs.prep.outputs.version }}
+            SAIVA_BUILD=${{ needs.prep.outputs.build }}
+          push: true
+          # Re-resolve the base image tag from the registry rather than trusting a
+          # local copy: a release is the one build whose base layers the house then runs
+          # for weeks, and shipping a stale `python:3.11-slim-bookworm` means waiting
+          # for the Tuesday refresh to deliver patches that existed on release day. It
+          # is only the level above the cache — when the base digest is unchanged, the
+          # GHA cache below can still replay the apt layer, and a newer
+          # postgresql-client-16 or libpq5 from PGDG would be frozen with it. That
+          # narrower case is what refresh-images.yml's uncached rebuild covers; see its
+          # comment, which spells out why it has no cache at all.
+          pull: true
+          platforms: linux/amd64,linux/arm64
+          # Keeps the pushed index a plain two-platform manifest list, which is what the
+          # promote job copies with `imagetools create`.
+          provenance: false
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  web:
+    name: Publish saiva-web
+    needs: [prep, checks]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      digest: ${{ steps.build.outputs.digest }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4.4.0
@@ -107,28 +205,138 @@ jobs:
         id: meta
         uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
         with:
-          images: ghcr.io/${{ github.repository_owner }}/${{ matrix.image }}
+          images: ghcr.io/${{ github.repository_owner }}/saiva-web
           tags: |
             type=raw,value=${{ needs.prep.outputs.tag }}
-            type=raw,value=${{ needs.prep.outputs.major_minor }}
-            type=raw,value=latest
-            type=sha
+            type=raw,value=${{ needs.prep.outputs.build }}
       - name: Build and push
+        id: build
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
-          context: ${{ matrix.context }}
+          context: ./frontend
+          # VITE_SAIVA_VERSION in frontend/Dockerfile; the SPA shows it before
+          # /api/update-check answers. SAIVA_BUILD needs an `ARG SAIVA_BUILD` there too.
           build-args: |
             SAIVA_VERSION=${{ needs.prep.outputs.version }}
+            SAIVA_BUILD=${{ needs.prep.outputs.build }}
           push: true
+          pull: true
           platforms: linux/amd64,linux/arm64
+          provenance: false
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
+  # The gate that makes this a release rather than a successful build. Same definition
+  # refresh-images.yml calls, by digest, so what is booted is exactly what the promote
+  # below re-tags.
+  #
+  # A local `uses: ./...` is resolved from THIS commit and takes no `@ref`, which is what
+  # we want: the gate travels with the pipeline, not with the tree being released.
+  #
+  # `permissions:` has to be spelled out here. A called workflow's token can only be
+  # narrower than the caller's, and the workflow-level `contents: read` above leaves
+  # `packages` at none — so without this block image-smoke.yml could not pull the images
+  # it is meant to boot. No `secrets:` block: GITHUB_TOKEN reaches a called workflow
+  # anyway, and `secrets: inherit` would hand it every other secret in the repository.
+  smoke:
+    name: Smoke
+    needs: [prep, api, web]
+    permissions:
+      contents: read
+      packages: read
+    uses: ./.github/workflows/image-smoke.yml
+    with:
+      api_image: ghcr.io/${{ github.repository_owner }}/saiva-api@${{ needs.api.outputs.digest }}
+      web_image: ghcr.io/${{ github.repository_owner }}/saiva-web@${{ needs.web.outputs.digest }}
+      expect_version: ${{ needs.prep.outputs.version }}
+
+  promote:
+    name: Point the release channel at the tested images
+    # Both images or neither, and only after both booted. Promoting per-image would
+    # leave api on the new release and web on the old one whenever one smoke job failed,
+    # and `make pull` would then hand the box a mismatched pair.
+    needs: [prep, api, web, smoke]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Log in to GHCR
+        uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      # `imagetools create` re-tags by digest — no rebuild, no QEMU — so the per-
+      # architecture manifests under `latest` are byte-identical to the ones the smoke
+      # jobs pulled and ran. Only the rolling pointers are written here; `v<ver>` and
+      # `sha-<short>` were written by the build jobs and are never moved again.
+      - name: Promote the tested digests
+        env:
+          OWNER: ${{ github.repository_owner }}
+          TAG: ${{ needs.prep.outputs.tag }}
+          MAJOR_MINOR: ${{ needs.prep.outputs.major_minor }}
+          BUILD: ${{ needs.prep.outputs.build }}
+          API_DIGEST: ${{ needs.api.outputs.digest }}
+          WEB_DIGEST: ${{ needs.web.outputs.digest }}
+        run: |
+          set -euo pipefail
+          # Two statements, not `test -n "$A" && test -n "$B"`. `set -e` exempts every
+          # command of an AND-OR list but the last, so an empty API_DIGEST would
+          # short-circuit the list with status 0 and go on to call `imagetools create`
+          # with a malformed `ghcr.io/owner/saiva-api@` source. An empty digest here means
+          # a build output went missing, which is precisely when not publishing matters.
+          test -n "$API_DIGEST"
+          test -n "$WEB_DIGEST"
+          promote() {
+            docker buildx imagetools create \
+              --tag "ghcr.io/$OWNER/$1:latest" \
+              --tag "ghcr.io/$OWNER/$1:$MAJOR_MINOR" \
+              "ghcr.io/$OWNER/$1@$2"
+          }
+          {
+            echo "### Released $TAG"
+            echo
+            echo "| image | digest | rolling tags moved |"
+            echo "| --- | --- | --- |"
+          } >> "$GITHUB_STEP_SUMMARY"
+          # Not atomic, and it cannot be: two repositories, two registry writes. If the
+          # second fails, api has moved and web has not, so the summary is written per
+          # image as each one lands — on a half-done promote the log then says which
+          # half, instead of saying nothing because the final block never ran. Re-running
+          # this job is the fix; it is idempotent.
+          for pair in "saiva-api $API_DIGEST" "saiva-web $WEB_DIGEST"; do
+            # shellcheck disable=SC2086
+            set -- $pair
+            promote "$1" "$2"
+            # Read it back rather than assume the write landed. `imagetools create` is a
+            # re-push of the source index bytes, so the tag must resolve to exactly the
+            # digest the smoke jobs ran; if it does not, something else wrote this tag
+            # between the gate and here and the run must not report success.
+            live="$(docker buildx imagetools inspect \
+              --format '{{.Manifest.Digest}}' "ghcr.io/$OWNER/$1:latest")"
+            if [ "$live" != "$2" ]; then
+              echo "::error::$1:latest resolves to $live, not the tested $2"
+              exit 1
+            fi
+            echo "| $1 | \`$2\` | latest, $MAJOR_MINOR |" >> "$GITHUB_STEP_SUMMARY"
+          done
+          {
+            echo
+            echo "Immutable pins for this release: \`$TAG\` and \`$BUILD\`."
+            echo "Neither is ever moved again, so either one is a rollback target."
+          } >> "$GITHUB_STEP_SUMMARY"
+
   release:
     name: Tag + GitHub Release
-    needs: [prep, images]
+    # Last on purpose. The in-app update badge reads GitHub Releases, so this job is
+    # what tells the house an update exists — and by the time it runs, `:latest` already
+    # serves it. The other order raises the badge for an image `make pull` cannot yet
+    # fetch. If this job fails after a successful promote, `:latest` is correct and the
+    # announcement is missing: re-run this job.
+    needs: [prep, promote]
     runs-on: ubuntu-latest
     permissions:
       contents: write

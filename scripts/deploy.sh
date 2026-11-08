@@ -1,18 +1,22 @@
 #!/usr/bin/env bash
-# Saiva — one-command container deploy.
-#
-# Bootstraps .env (with a secure random SECRET_KEY and DB password), builds the
-# images, starts the stack, waits until the app is healthy, and prints how to reach it.
+# Saiva — the one command that installs, updates and rolls back this deployment.
 #
 # Usage:
-#   ./scripts/deploy.sh                Build + start on https://localhost (this machine)
-#   ./scripts/deploy.sh --lan          ... reachable over your LAN at https://<auto-detected-ip>
-#   ./scripts/deploy.sh --site <addr>  ... at a specific address (https://192.168.1.50 or a domain)
-#   ./scripts/deploy.sh --pull         ... using prebuilt GHCR images (no local build)
-#   ./scripts/deploy.sh --seed         ... and load demo data
-#   ./scripts/deploy.sh --down         Stop the stack (database preserved)
-#   ./scripts/deploy.sh --destroy      Stop and wipe the database volume
-#   ./scripts/deploy.sh --help         Show this help
+#   ./scripts/deploy.sh                  Build + start on https://localhost (this machine)
+#   ./scripts/deploy.sh --lan            ... reachable over your LAN at https://<auto-detected-ip>
+#   ./scripts/deploy.sh --site <addr>    ... at a specific address (https://192.168.1.50 or a domain)
+#   ./scripts/deploy.sh --pull           ... using prebuilt GHCR images (no local build)
+#   ./scripts/deploy.sh --seed           ... and load demo data
+#   ./scripts/deploy.sh --apply-release  Apply the newest release: tree, config and images,
+#                                        gated on the site answering, rolled back if it does not
+#   ./scripts/deploy.sh --rollback       Undo the last applied release
+#   ./scripts/deploy.sh --status         What the last update did, and where it got to
+#   ./scripts/deploy.sh --down           Stop the stack (database preserved)
+#   ./scripts/deploy.sh --destroy        Stop and wipe the database volume
+#   ./scripts/deploy.sh --help           Show this help
+#
+# --apply-release is the path `make update` and the in-app "Update now" button both take.
+# scripts/lib/release.sh describes what it does and why it is one path and not three.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -24,6 +28,12 @@ LAN=0
 PULL=0
 SITE=""
 ACTION="up"
+# Read by scripts/lib/release.sh, which is sourced below. Exported rather than left as
+# shell variables so that shellcheck can see they are used, and so that the hand-over in
+# the release path (which replaces this process after `git checkout`) carries them.
+export TARGET_REF=""
+export RESUME_RUN=""
+export ALLOW_DOWNGRADE=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --seed|--demo) SEED=1 ;;
@@ -31,6 +41,14 @@ while [ $# -gt 0 ]; do
     --pull) PULL=1 ;;
     --site) shift; SITE="${1:-}"; [ -n "$SITE" ] || { echo "--site needs a value, e.g. https://192.168.1.50" >&2; exit 2; } ;;
     --site=*) SITE="${1#*=}" ;;
+    --apply-release|--update) ACTION="apply-release"; PULL=1 ;;
+    --ref) shift; TARGET_REF="${1:-}"; [ -n "$TARGET_REF" ] || { echo "--ref needs a tag, e.g. v0.17.0" >&2; exit 2; } ;;
+    --ref=*) TARGET_REF="${1#*=}" ;;
+    --resume) shift; RESUME_RUN="${1:-}"; [ -n "$RESUME_RUN" ] || { echo "--resume needs a run id" >&2; exit 2; } ;;
+    --resume=*) RESUME_RUN="${1#*=}" ;;
+    --allow-downgrade) ALLOW_DOWNGRADE=1 ;;
+    --rollback) ACTION="rollback"; PULL=1 ;;
+    --status) ACTION="status" ;;
     --down) ACTION="down" ;;
     --destroy) ACTION="destroy" ;;
     -h|--help) ACTION="help" ;;
@@ -40,7 +58,20 @@ while [ $# -gt 0 ]; do
 done
 
 if [ "$ACTION" = "help" ]; then
-  sed -n '2,15p' "$0" | sed 's/^# \{0,1\}//'
+  sed -n '2,19p' "$0" | sed 's/^# \{0,1\}//'
+  exit 0
+fi
+
+# shellcheck source=lib/env-file.sh
+. "$SCRIPT_DIR/lib/env-file.sh"
+# shellcheck source=lib/state.sh
+. "$SCRIPT_DIR/lib/state.sh"
+# shellcheck source=lib/release.sh
+. "$SCRIPT_DIR/lib/release.sh"
+
+if [ "$ACTION" = "status" ]; then
+  f="$(state_dir)/status.json"
+  if [ -f "$f" ]; then cat "$f"; else echo "No update has been run on this box yet."; fi
   exit 0
 fi
 
@@ -59,7 +90,7 @@ if ! docker info >/dev/null 2>&1; then
   exit 1
 fi
 
-# Pull mode uses prebuilt GHCR images via the production compose file.
+# Pull mode — and every release path — uses the production compose file.
 if [ "$PULL" -eq 1 ]; then
   COMPOSE="$COMPOSE -f docker-compose.prod.yml"
 fi
@@ -69,6 +100,10 @@ if [ "$ACTION" = "down" ]; then
   exec $COMPOSE down
 fi
 if [ "$ACTION" = "destroy" ]; then
+  # The confirmation lives in one place so the Makefile and this script cannot drift. It
+  # names the backups, because `down -v` removes the db_backups volume as well as the
+  # data, and that is the thing people do not expect.
+  "$SCRIPT_DIR/confirm-destroy.sh" || exit 1
   echo "Stopping Saiva and wiping the database volume…"
   exec $COMPOSE down -v
 fi
@@ -91,37 +126,37 @@ detect_lan_ip() {
   printf '%s' "$lan_ip"
 }
 
-set_env_var() { # key value — update in place or append to .env
-  local key="$1" value="$2"
-  if grep -q "^${key}=" .env; then
-    sed -i.bak "s|^${key}=.*|${key}=${value}|" .env && rm -f .env.bak
-  else
-    printf '%s=%s\n' "$key" "$value" >> .env
-  fi
-}
+# --- The release paths. Everything below this point is the install/dev path. ---------
+
+if [ "$ACTION" = "rollback" ]; then
+  rollback_last
+  exit 0
+fi
+if [ "$ACTION" = "apply-release" ]; then
+  apply_release
+  exit 0
+fi
 
 # 1. Bootstrap .env — never overwrite an existing one's secrets.
+FIRST_INSTALL=0
 if [ ! -f .env ]; then
+  FIRST_INSTALL=1
   echo "Creating .env from .env.example with generated secrets…"
   cp .env.example .env
-  set_env_var SECRET_KEY "$(gen_secret)"
-  set_env_var POSTGRES_PASSWORD "$(gen_secret | cut -c1-24)"
+  env_set SECRET_KEY "$(gen_secret)"
+  env_set POSTGRES_PASSWORD "$(gen_secret | cut -c1-24)"
+  # Loopback only, written exactly once, on the install that creates the file. The
+  # binding is persisted state from here on: see scripts/lib/env-file.sh for why the
+  # `else` branch that used to live further down took the production site off the LAN.
+  env_set SAIVA_BIND_ADDR "127.0.0.1"
   echo "  → generated a random SECRET_KEY and POSTGRES_PASSWORD"
 else
   echo ".env already exists — leaving its secrets untouched."
 fi
 
-# Backfill a secret a newer release introduced, so upgrading an older .env needs
-# no manual edit. Only fills a key that's missing or empty — never changes a value.
-ensure_secret() {
-  local cur
-  cur="$(grep "^$1=" .env 2>/dev/null | head -1 | cut -d= -f2- || true)"
-  if [ -z "$cur" ]; then
-    set_env_var "$1" "$(gen_secret)"
-    echo "  → added a generated $1 to .env"
-  fi
-}
-ensure_secret WATCHTOWER_TOKEN
+# Backfill anything a newer release introduced, so upgrading an older .env needs no
+# manual edit. Adds keys that are missing; never changes a value that is already there.
+env_reconcile || exit 1
 
 # 2. Resolve the site address (LAN auto-detect / explicit), if requested.
 if [ "$LAN" -eq 1 ] && [ -z "$SITE" ]; then
@@ -130,30 +165,34 @@ if [ "$LAN" -eq 1 ] && [ -z "$SITE" ]; then
   SITE="https://${lan_ip}"
 fi
 if [ -n "$SITE" ]; then
-  set_env_var SAIVA_SITE_ADDRESS "$SITE"
+  env_set SAIVA_SITE_ADDRESS "$SITE"
   host="${SITE#http://}"; host="${host#https://}"; host="${host%%/*}"
-  set_env_var SAIVA_SITE_HOST "$host"
+  env_set SAIVA_SITE_HOST "$host"
   # Asking to be served at an address is asking to be reachable at it, so the published
-  # ports follow the same decision. Left alone, they stay on loopback: the default
-  # install is meant to be this machine only, and the binding now says so as well as
-  # the docs.
-  set_env_var SAIVA_BIND_ADDR "0.0.0.0"
+  # ports follow the same decision.
+  env_set SAIVA_BIND_ADDR "0.0.0.0"
   echo "  → serving at ${SITE} (published on all interfaces)"
-else
-  set_env_var SAIVA_BIND_ADDR "127.0.0.1"
 fi
+# There is deliberately no `else` here. A flag's ABSENCE must never change persisted
+# state: `make pull` with no flags used to land in one and rewrite SAIVA_BIND_ADDR to
+# 127.0.0.1, which un-published the site on a box that had been reachable on the LAN for
+# months. scripts/tests/ runs the deploy twice with no flags and asserts .env comes back
+# byte-identical, so the branch cannot come back by accident.
 
 # HSTS only where a browser can actually verify the certificate. Caddy's `internal`
 # CA is not in any trust store, and a non-zero max-age there turns the certificate
 # warning into a dead end with no way past it — on a LAN IP that may later belong to
 # a different machine entirely. An explicit 0 also clears a stale policy from a host
 # that used to serve HSTS.
-tls_mode="$(grep -E '^SAIVA_TLS=' .env | cut -d= -f2- || true)"
+#
+# This one derives persisted state from persisted state (SAIVA_TLS out of .env), which is
+# why it is self-healing and the bind address was not.
+tls_mode="$(env_get SAIVA_TLS)"
 if [ -n "$tls_mode" ] && [ "$tls_mode" != "internal" ]; then
-  set_env_var SAIVA_HSTS_MAX_AGE "31536000"
-  echo "  → HSTS enabled (publicly trusted certificate)"
+  env_set SAIVA_HSTS_MAX_AGE "31536000"
+  [ "$FIRST_INSTALL" = "1" ] && echo "  → HSTS enabled (publicly trusted certificate)"
 else
-  set_env_var SAIVA_HSTS_MAX_AGE "0"
+  env_set SAIVA_HSTS_MAX_AGE "0"
 fi
 
 # 3. Build (or pull) and start.
@@ -166,25 +205,24 @@ else
   $COMPOSE up -d --build
 fi
 
-# 4. Wait until the API reports healthy (checked inside the container, so this is
-#    independent of the configured hostname / TLS).
-echo -n "Waiting for the app to become healthy"
+# 4. Wait until the site answers at the address it is configured to serve, probed from
+#    OUTSIDE the containers. The old loop ran urlopen inside the api container, which is
+#    why it printed a tick while the site was unreachable from the LAN.
+state_init
+echo -n "Waiting for the app to answer at $(site_url)"
 healthy=0
-for _ in $(seq 1 60); do
-  if $COMPOSE exec -T api python -c \
-      "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/health')" \
-      >/dev/null 2>&1; then
-    healthy=1
-    break
-  fi
+for _ in $(seq 1 "${SAIVA_GATE_TRIES:-60}"); do
+  if probe_site "$(site_url)"; then healthy=1; break; fi
   echo -n "."
   sleep 2
 done
 echo
 
 if [ "$healthy" -ne 1 ]; then
-  echo "ERROR: the app did not become healthy in time. Recent logs:" >&2
-  $COMPOSE logs --tail 40 api caddy >&2 || true
+  echo "ERROR: the app did not answer at $(site_url). Recent logs:" >&2
+  $COMPOSE logs --tail 40 api web caddy >&2 || true
+  echo "" >&2
+  echo "If the containers are running, check SAIVA_SITE_ADDRESS and SAIVA_BIND_ADDR in .env." >&2
   exit 1
 fi
 echo "✅ Saiva is up."
@@ -196,18 +234,14 @@ if [ "$SEED" -eq 1 ]; then
 fi
 
 # 6. Where to reach it.
-site_raw="$(grep -E '^SAIVA_SITE_ADDRESS=' .env | cut -d= -f2- || true)"
-site_raw="${site_raw:-localhost}"
-case "$site_raw" in
-  http://*|https://*) url="$site_raw" ;;
-  *) url="https://$site_raw" ;;
-esac
+url="$(site_url)"
 
 cat <<EOF
 
   Open:    ${url}/
   Health:  curl -k ${url}/api/health
   Logs:    ${COMPOSE} logs -f api
+  Update:  make update                     (or press Update now in the app)
   Stop:    ./scripts/deploy.sh --down       (keep data)
            ./scripts/deploy.sh --destroy    (wipe data)
 EOF

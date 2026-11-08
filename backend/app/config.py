@@ -42,11 +42,32 @@ class Settings(BaseSettings):
     default_locale: str = "en-AU"
 
     # Software updates
-    saiva_version: str = "dev"  # baked into the image at build time (SAIVA_VERSION)
+    #
+    # Two identities, because one string could not carry both jobs and the attempt to
+    # make it do so put the update badge permanently out of action on three channels.
+    #
+    # `saiva_version` answers "which release is this?" and is compared against GitHub
+    # releases, so it must be semver-shaped or the comparison is meaningless.
+    # `parse_version` returns None for anything else, `is_newer` returns False on None,
+    # and the panel then renders "You're on the latest version" forever. CI used to bake
+    # the literal string `edge` into both the :edge AND the :sha-<short> images, which is
+    # how the README's own documented rollback target ended up unable to see an update.
+    #
+    # `saiva_build` answers "which exact build is this?" — the immutable tag
+    # (`sha-1a2b3c4`), or empty on a local build. It is never compared; it is what the
+    # panel shows when there is no release to compare against, and what the deploy
+    # records so a rollback can name what it went back to.
+    saiva_version: str = "dev"  # baked at build time (SAIVA_VERSION); semver or "dev"
+    saiva_build: str = ""  # baked at build time (SAIVA_BUILD); immutable tag, e.g. sha-1a2b3c4
     update_check_enabled: bool = True
     update_repo: str = "marioalfaro75/saiva"
-    watchtower_url: str = ""  # e.g. http://watchtower:8080 (empty = in-app apply disabled)
-    watchtower_token: str = ""
+    # SAIVA_UPDATE_DIR is deliberately NOT a setting here. It is read straight from the
+    # environment in app/services/updates.py, at call time, because it describes the
+    # container's filesystem rather than the application's behaviour: whether the
+    # directory exists and is writable is a question only the filesystem can answer, and
+    # a cached settings object would hold a stale yes. Empty or missing means in-app
+    # updates are not set up on this box, which is a normal state the panel reports
+    # plainly.
 
     # Email / SMTP for notifications & digests. An empty host disables all email.
     smtp_host: str = ""

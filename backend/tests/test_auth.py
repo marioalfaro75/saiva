@@ -5,7 +5,7 @@ from fastapi.testclient import TestClient
 
 
 def test_health(client: TestClient) -> None:
-    assert client.get("/api/health").json() == {"status": "ok"}
+    assert client.get("/api/health").json()["status"] == "ok"
 
 
 def test_security_headers(client: TestClient) -> None:

@@ -878,10 +878,41 @@ class MetaOut(BaseModel):
 
 class UpdateStatus(BaseModel):
     current_version: str
+    current_build: str | None = None  # immutable build tag, e.g. sha-1a2b3c4
     latest_version: str | None
     update_available: bool
-    apply_available: bool  # in-app "Update now" works (Watchtower configured)
+    apply_available: bool  # the host updater is installed and its directory is writable
     check_enabled: bool
+    # The two fields that stop "no update found" being rendered as reassurance:
+    # check_failed means the request to GitHub did not succeed, and comparable means the
+    # running version is semver and so can be compared at all.
+    check_failed: bool = False
+    comparable: bool = True
     release_url: str | None = None
     release_notes: str | None = None
     published_at: str | None = None
+
+
+class UpdateRun(BaseModel):
+    """The host updater's record of the last run. Every field may be absent.
+
+    Nothing here is inferred by the API. It is what scripts/lib/state.sh wrote to a file
+    on the host, read back verbatim, so that a container being replaced is a gap in the
+    transport and not a loss of the answer.
+    """
+
+    available: bool = False  # the host updater is installed at all
+    run_id: str | None = None
+    phase: str | None = None  # running | applied | failed | rolled_back | rolled_back_code_only
+    step: str | None = None
+    trigger: str | None = None  # button | cli
+    started_at: str | None = None
+    finished_at: str | None = None
+    message: str | None = None
+    exit_code: str | None = None
+    from_version: str | None = None
+    to_version: str | None = None
+    schema_before: str | None = None
+    schema_after: str | None = None
+    db_revision: str | None = None
+    log_tail: list[str] | None = None

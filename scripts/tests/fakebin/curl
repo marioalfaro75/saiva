@@ -1,0 +1,45 @@
+#!/usr/bin/env bash
+# A stand-in for curl, so the gate can be exercised without a running site.
+#
+# The gate is the part of the deploy most worth testing, because the real one printed a
+# success tick during an outage. These tests need to make the site answer, not answer,
+# and answer with a degraded body, on demand.
+#
+# Control files under $SAIVA_FAKE_DIR:
+#   site                 "up" (200 + healthy body) or anything else / absent (connection refused)
+#   health.<field>       the value that field takes in the health body
+set -uo pipefail
+
+FAKE="${SAIVA_FAKE_DIR:?SAIVA_FAKE_DIR must be set to use the fake curl}"
+mkdir -p "$FAKE"
+printf '%s\n' "curl $*" >> "$FAKE/calls"
+
+url=""; out=""
+want_out=0
+for a in "$@"; do
+  if [ "$want_out" = "1" ]; then out="$a"; want_out=0; continue; fi
+  case "$a" in
+    -o|--output) want_out=1 ;;
+    http://*|https://*) url="$a" ;;
+  esac
+done
+emit() { if [ -n "$out" ]; then printf '%s' "$1" > "$out"; else printf '%s' "$1"; fi; }
+
+state="$( [ -f "$FAKE/site" ] && cat "$FAKE/site" || echo down )"
+[ "$state" = "up" ] || exit 7   # 7 is curl's "failed to connect to host"
+
+field() { local f="$FAKE/health.$1"; if [ -f "$f" ]; then cat "$f"; else printf '%s' "$2"; fi; }
+
+case "$url" in
+  */api/health)
+    status="$(field status ok)"
+    # -f makes curl fail on >=400, which is what a degraded api must do to the gate.
+    [ "$status" = "ok" ] || exit 22
+    emit "$(printf '{"status":"%s","version":"%s","build":"%s","database":"ok","schema":"%s","db_revision":"%s","image_head":"%s"}' \
+      "$status" "$(field version v0.0.0)" "$(field build '')" \
+      "$(field schema current)" "$(field db_revision 0012)" "$(field image_head 0012)")"
+    exit 0 ;;
+  *)
+    emit '<!doctype html><title>Saiva</title>'
+    exit 0 ;;
+esac

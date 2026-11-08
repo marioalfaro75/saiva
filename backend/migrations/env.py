@@ -26,15 +26,29 @@ def run_migrations_offline() -> None:
         context.run_migrations()
 
 
+def _run_against(connection) -> None:  # noqa: ANN001 - a sqlalchemy Connection
+    context.configure(
+        connection=connection,
+        target_metadata=target_metadata,
+        compare_type=True,
+    )
+    with context.begin_transaction():
+        context.run_migrations()
+
+
 def run_migrations_online() -> None:
+    # A caller may hand us the connection to migrate on, via the documented
+    # `config.attributes` channel. app.dbinit uses it so the start-up migration runs on
+    # the database it just inspected rather than on whatever DATABASE_URL happens to say
+    # at that moment, and so the rollback tests can point a migration at a scratch
+    # Postgres without a subprocess. With nothing supplied this behaves exactly as it
+    # always did: open a connection from the app's engine.
+    supplied = context.config.attributes.get("connection")
+    if supplied is not None:
+        _run_against(supplied)
+        return
     with engine.connect() as connection:
-        context.configure(
-            connection=connection,
-            target_metadata=target_metadata,
-            compare_type=True,
-        )
-        with context.begin_transaction():
-            context.run_migrations()
+        _run_against(connection)
 
 
 if context.is_offline_mode():

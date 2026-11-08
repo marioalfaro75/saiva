@@ -545,11 +545,48 @@ export interface SetupBody {
 
 export interface UpdateStatus {
   current_version: string;
+  current_build: string | null;
   latest_version: string | null;
   update_available: boolean;
   apply_available: boolean;
   check_enabled: boolean;
+  /** The request to GitHub failed. Distinct from "no newer release exists". */
+  check_failed: boolean;
+  /** The running version is semver, so "newer" is a question that can be answered. */
+  comparable: boolean;
   release_url: string | null;
   release_notes: string | null;
   published_at: string | null;
+}
+
+/**
+ * The host updater's record of the last run. Every field is nullable on purpose: the
+ * panel renders each absent one as a specific unknown, because the failure this whole
+ * design removes was a UI that filled a gap in its knowledge with the word "applied".
+ */
+export interface UpdateRun {
+  available: boolean;
+  run_id: string | null;
+  phase:
+    | "running"
+    | "applied"
+    | "failed"
+    | "rolled_back"
+    | "rolled_back_code_only"
+    | "rollback_failed"
+    | "unreadable"
+    | string
+    | null;
+  step: string | null;
+  trigger: string | null;
+  started_at: string | null;
+  finished_at: string | null;
+  message: string | null;
+  exit_code: string | null;
+  from_version: string | null;
+  to_version: string | null;
+  schema_before: string | null;
+  schema_after: string | null;
+  db_revision: string | null;
+  log_tail: string[] | null;
 }

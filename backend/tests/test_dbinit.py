@@ -42,6 +42,7 @@ from sqlalchemy.engine import Engine, make_url
 from app import db as app_db
 from app import dbinit
 from app.dbinit import _backup_enabled, _pg_dump_cmd
+from app.schema_state import AHEAD, BEHIND, CURRENT, FRESH, SchemaState
 
 REPO = Path(__file__).resolve().parents[2]
 
@@ -103,8 +104,8 @@ def cold_start(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Engine:
     """An empty database standing in for the one a container boots against.
 
     Two names have to move, not one. `app.dbinit` does `from .db import engine`, so
-    patching `app.dbinit.engine` reaches `main()`, `_has_pending_migrations()` and
-    `_backup_database()` together — they all read that one module global. But
+    patching `app.dbinit.engine` reaches `main()` and `_backup_database()` together —
+    both read that one module global when no engine is passed in. But
     `migrations/env.py` does its own `from app.db import Base, engine`, and Alembic
     re-executes that file on every `command.upgrade` and every `command.stamp`.
     The first draft of this fixture patched only `app.dbinit.engine`, and the
@@ -336,7 +337,7 @@ def test_the_restart_path_is_a_no_op_and_stamps_nothing(
     stamped: list[str] = []
     monkeypatch.setattr(dbinit.command, "stamp", lambda cfg, revision: stamped.append(revision))
     backups: list[None] = []
-    monkeypatch.setattr(dbinit, "_backup_database", lambda: backups.append(None))
+    monkeypatch.setattr(dbinit, "_backup_database", lambda db: backups.append(None))
 
     dbinit.main()
 
@@ -361,12 +362,16 @@ def test_a_sqlite_database_is_never_pg_dumped(
     """
     _make_legacy_database(cold_start)
     monkeypatch.delenv("SAIVA_BACKUP_BEFORE_MIGRATE", raising=False)
-    assert dbinit._has_pending_migrations(Config("alembic.ini")), (
-        "nothing is pending, so this test would pass without the dialect guard it is about"
+    # main() adopts the baseline on a legacy database and then sees it as BEHIND, so
+    # the backup term is true unless the baseline happens to be head.
+    assert "households" in inspect(cold_start).get_table_names()
+    assert _head_revision() != LEGACY_BASELINE, (
+        "the baseline is head, so nothing is pending and this test would pass without "
+        "the dialect guard it is about"
     )
 
     backups: list[None] = []
-    monkeypatch.setattr(dbinit, "_backup_database", lambda: backups.append(None))
+    monkeypatch.setattr(dbinit, "_backup_database", lambda db: backups.append(None))
 
     dbinit.main()
 
@@ -375,20 +380,24 @@ def test_a_sqlite_database_is_never_pg_dumped(
 
 
 @pytest.mark.parametrize(
-    ("dialect", "existing_db", "pending", "toggle", "expect_backup"),
+    ("dialect", "existing_db", "state", "toggle", "expect_backup", "expect_upgrade"),
     [
         # The only combination worth the minutes a dump costs: a real database, on
         # Postgres, whose schema is about to change.
-        ("postgresql", True, True, None, True),
-        # Every Watchtower recreate. Dumping here would add minutes of downtime to a
+        ("postgresql", True, BEHIND, None, True, True),
+        # Every container recreate. Dumping here would add minutes of downtime to a
         # restart that changes nothing.
-        ("postgresql", True, False, None, False),
+        ("postgresql", True, CURRENT, None, False, True),
         # First install: there is no data to lose yet.
-        ("postgresql", False, True, None, False),
+        ("postgresql", False, FRESH, None, False, True),
         # The dev/test dialect, covered end to end by the test above as well.
-        ("sqlite", True, True, None, False),
+        ("sqlite", True, BEHIND, None, False, True),
         # The documented escape hatch, named in the RuntimeError's own message.
-        ("postgresql", True, True, "0", False),
+        ("postgresql", True, BEHIND, "0", False, True),
+        # An image rolled back onto a newer schema. This row is the whole reason the
+        # boolean became four states: the old code answered "different" here, took a
+        # full dump, and then crashed on the upgrade — on every restart, forever.
+        ("postgresql", True, AHEAD, None, False, False),
     ],
 )
 def test_the_pre_migration_backup_is_taken_exactly_when_it_is_worth_taking(
@@ -396,9 +405,10 @@ def test_the_pre_migration_backup_is_taken_exactly_when_it_is_worth_taking(
     monkeypatch: pytest.MonkeyPatch,
     dialect: str,
     existing_db: bool,
-    pending: bool,
+    state: str,
     toggle: str | None,
     expect_backup: bool,
+    expect_upgrade: bool,
 ) -> None:
     """All four terms of the guard, as a table, because they are an `and` of four things.
 
@@ -419,9 +429,11 @@ def test_the_pre_migration_backup_is_taken_exactly_when_it_is_worth_taking(
     else:
         monkeypatch.setenv("SAIVA_BACKUP_BEFORE_MIGRATE", toggle)
 
-    monkeypatch.setattr(dbinit, "_has_pending_migrations", lambda cfg: pending)
+    monkeypatch.setattr(
+        dbinit, "read_schema_state", lambda db, cfg=None: SchemaState(state, "0001", "0012")
+    )
     backups: list[None] = []
-    monkeypatch.setattr(dbinit, "_backup_database", lambda: backups.append(None))
+    monkeypatch.setattr(dbinit, "_backup_database", lambda db: backups.append(None))
     upgrades: list[str] = []
     monkeypatch.setattr(dbinit.command, "upgrade", lambda cfg, revision: upgrades.append(revision))
     stamps: list[str] = []
@@ -430,10 +442,12 @@ def test_the_pre_migration_backup_is_taken_exactly_when_it_is_worth_taking(
     dbinit.main()
 
     assert bool(backups) is expect_backup, (
-        f"dialect={dialect} existing_db={existing_db} pending={pending} toggle={toggle}: "
+        f"dialect={dialect} existing_db={existing_db} state={state} toggle={toggle}: "
         f"expected backup={expect_backup}, got {len(backups)} call(s)"
     )
-    assert upgrades == ["head"], "the deploy did not go on to migrate"
+    assert upgrades == (["head"] if expect_upgrade else []), (
+        f"state={state}: expected upgrade={expect_upgrade}, got {upgrades}"
+    )
     # Whatever the backup decision was, the adoption stamp has to have fired exactly on
     # the legacy shape and nowhere else — a brand-new database must not be stamped at the
     # baseline, because `upgrade head` would then skip every migration after it.
@@ -462,10 +476,12 @@ def test_a_failed_pg_dump_stops_the_deploy_instead_of_migrating_anyway(
     """
     _make_legacy_database(cold_start)
     monkeypatch.setattr(cold_start.dialect, "name", "postgresql")
-    monkeypatch.setattr(dbinit, "_has_pending_migrations", lambda cfg: True)
+    monkeypatch.setattr(
+        dbinit, "read_schema_state", lambda db, cfg=None: SchemaState(BEHIND, "0001", "0012")
+    )
     monkeypatch.setattr(dbinit.command, "stamp", lambda cfg, revision: None)
 
-    def failed_backup() -> None:
+    def failed_backup(db: Engine) -> None:
         raise RuntimeError("pg_dump failed; refusing to migrate without a backup.")
 
     monkeypatch.setattr(dbinit, "_backup_database", failed_backup)
@@ -518,7 +534,7 @@ def test_the_dump_is_gzipped_and_the_plain_sql_is_removed(
 
     monkeypatch.setattr(dbinit.subprocess, "run", fake_run)
 
-    dbinit._backup_database()
+    dbinit._backup_database(dbinit.engine)
 
     argv = recorded["argv"]
     assert isinstance(argv, list)
@@ -560,7 +576,7 @@ def test_a_failed_dump_raises_and_leaves_nothing_that_looks_like_a_backup(
     monkeypatch.setattr(dbinit.subprocess, "run", fake_run)
 
     with pytest.raises(RuntimeError) as excinfo:
-        dbinit._backup_database()
+        dbinit._backup_database(dbinit.engine)
 
     message = str(excinfo.value)
     assert "pg_dump failed" in message
@@ -595,7 +611,7 @@ def test_a_url_without_a_password_does_not_export_an_empty_pgpassword(
 
     monkeypatch.setattr(dbinit.subprocess, "run", fake_run)
 
-    dbinit._backup_database()
+    dbinit._backup_database(dbinit.engine)
 
     assert captured, "subprocess.run was never called, so nothing was asserted"
     assert "PGPASSWORD" not in captured

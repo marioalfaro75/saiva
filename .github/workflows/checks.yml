@@ -95,6 +95,87 @@ jobs:
         run: alembic upgrade head
       - name: Check migrations match models (no drift)
         run: alembic check
+      - name: An image rolled back onto a newer schema must serve, not crash-loop
+        # The job that did not exist, and the one whose absence meant the retained-image
+        # rollback was never going to work. It boots this image's start-up migration
+        # against a database at a revision the image has never heard of -- which is
+        # exactly what an image rollback is -- and asserts it serves, writes no dump and
+        # changes nothing. Before this, that path raised CommandError, uvicorn never ran
+        # because the container's CMD chains them with `&&`, and `restart:
+        # unless-stopped` looped forever while writing a full copy of the database on
+        # every attempt.
+        #
+        # It needs real Postgres: the backup branch is guarded on the dialect, and the
+        # dump amplification is the whole point. On SQLite it would prove nothing.
+        env:
+          SAIVA_TEST_PG_URL: postgresql+psycopg://saiva:saiva@localhost:5432/postgres
+        run: pytest tests/test_schema_rollback.py -v
+      - name: Migrations stay expand-only
+        # The guarantee above is only safe to promise while new migrations keep adding
+        # rather than removing. This enforces the 12-for-12 habit the repository already
+        # had, so it cannot quietly stop being true.
+        run: pytest tests/test_migrations_expand_only.py -v
+
+  deploy-scripts:
+    name: Deploy path (shell, fake docker)
+    runs-on: ubuntu-latest
+    # The restore rehearsal below needs a real Postgres: the dumps are plain SQL replayed
+    # with psql, and the whole point of the test is that the round trip actually works.
+    # An earlier version of this job ran that step with no database at all, so it failed
+    # on every run -- which is worse than not running it, because a step that is always
+    # red stops being read.
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: saiva
+          POSTGRES_PASSWORD: saiva
+          POSTGRES_DB: postgres
+        ports:
+          - "5432:5432"
+        options: >-
+          --health-cmd "pg_isready -U saiva"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.ref }}
+          # The release path does `git fetch --tags` and `git checkout --detach`, and the
+          # tests build their own origin out of this checkout, so a shallow clone with no
+          # history makes them fail for the wrong reason.
+          fetch-depth: 0
+      - name: Shell syntax
+        run: |
+          for f in scripts/*.sh scripts/lib/*.sh scripts/saiva-update-agent scripts/tests/run.sh; do
+            bash -n "$f" || exit 1
+          done
+      - name: ShellCheck
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq shellcheck
+          shellcheck -S warning scripts/*.sh scripts/lib/*.sh scripts/saiva-update-agent
+      - name: Deploy state machine (fake docker, fake curl)
+        # Gate, rollback, re-exec, .env idempotence and the downgrade refusal, none of
+        # which needs a daemon. What it cannot cover -- whether a real `compose up`
+        # produces a working stack -- is what image-smoke.yml is for.
+        run: ./scripts/tests/run.sh
+      - name: A bare deploy must not rewrite .env
+        # Spelled out as its own step because this one defect took the production site
+        # off the LAN, and a line in a 22-test summary is easy to miss.
+        run: ./scripts/tests/run.sh env_is_byte_identical
+      - name: Postgres client tools
+        # psql, pg_dump and gunzip are what restore-backup.sh --direct actually runs; the
+        # server is the service above. The client must match the server major or pg_dump
+        # refuses the version it finds.
+        run: sudo apt-get install -y -qq postgresql-client-16 || sudo apt-get install -y -qq postgresql-client
+      - name: Restore from a dump, against real Postgres
+        env:
+          PGHOST: 127.0.0.1
+          PGPORT: "5432"
+          PGUSER: saiva
+          PGPASSWORD: saiva
+        run: ./scripts/tests/test-restore-backup.sh
 
   frontend:
     name: Frontend (lint, build, tests)

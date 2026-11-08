@@ -1,5 +1,8 @@
 # Secrets / env
 .env
+
+# The deploy's own state when it cannot use /var/lib (developer checkouts only).
+.saiva-state/
 *.env.local
 
 # Python

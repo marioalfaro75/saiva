@@ -287,7 +287,14 @@ FROM_NODE = re.compile(
     r"^FROM\s+(?:--\S+\s+)*node:(?P<node>\d+)(?:\.\d+)*(?:[-:\s]|$)",
     re.MULTILINE,
 )
-POSTGRES_IMAGE = re.compile(r"^postgres:(?P<postgres>\d+)(?:\.\d+)*(?:[-:]|$)")
+# The compose file wraps every image in a `${SAIVA_<svc>_IMAGE:-...}` override so a
+# rollback can pin an exact digest, so the pin this reads is the DEFAULT inside that
+# interpolation rather than the whole value. Anchoring on `postgres:` alone would also
+# match a digest a rollback had written, which is a build nobody is choosing to run and
+# is not what this file is about.
+POSTGRES_IMAGE = re.compile(
+    r"^(?:\$\{[A-Za-z_][A-Za-z0-9_]*:-)?postgres:(?P<postgres>\d+)(?:\.\d+)*(?:[-:]|$)"
+)
 
 
 class Pin(NamedTuple):
