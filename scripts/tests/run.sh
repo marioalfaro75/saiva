@@ -639,9 +639,10 @@ test_a_second_update_does_not_overwrite_the_running_ones_status() {
 # The host agent and the privilege boundary
 # ======================================================================================
 
-agent_sandbox() { # sets AGENT_HOME, writes a conf and a stub deploy.sh
+agent_sandbox() { # sets AGENT_HOME, writes a conf and stub deploy.sh / backup.sh
   AGENT_HOME="$SANDBOX_ROOT/agent-$1"
-  mkdir -p "$AGENT_HOME/state/requests" "$AGENT_HOME/checkout/scripts" "$AGENT_HOME/etc"
+  mkdir -p "$AGENT_HOME/state/requests" "$AGENT_HOME/state/backup-requests" \
+           "$AGENT_HOME/checkout/scripts" "$AGENT_HOME/etc"
   git init -q "$AGENT_HOME/checkout"
   cat > "$AGENT_HOME/etc/agent.conf" <<EOF
 SAIVA_CHECKOUT=$AGENT_HOME/checkout
@@ -651,7 +652,11 @@ EOF
 #!/usr/bin/env bash
 case "$1" in --apply-release) exit "${STUB_RC:-0}" ;; esac
 STUB
-  chmod +x "$AGENT_HOME/checkout/scripts/deploy.sh"
+  cat > "$AGENT_HOME/checkout/scripts/backup.sh" <<'STUB'
+#!/usr/bin/env bash
+exit "${STUB_BACKUP_RC:-0}"
+STUB
+  chmod +x "$AGENT_HOME/checkout/scripts/deploy.sh" "$AGENT_HOME/checkout/scripts/backup.sh"
 }
 
 run_agent() {
@@ -660,6 +665,7 @@ run_agent() {
   # assertion that returns 1 kills the run. That bug was fixed in run_deploy and then
   # written again here, which is why run_test now checks for it after every test.
   OUT="$(SAIVA_AGENT_CONF="$AGENT_HOME/etc/agent.conf" STUB_RC="${STUB_RC:-0}" \
+    STUB_BACKUP_RC="${STUB_BACKUP_RC:-0}" \
     "$REPO/scripts/saiva-update-agent" "$@" 2>&1)" && RC=0 || RC=$?
 }
 
@@ -717,13 +723,123 @@ test_the_agent_removes_a_planted_link_without_following_it() {
   assert_not_contains "$OUT" "applying" "a link is not a request, so nothing should run"
 }
 
-test_the_agent_notices_when_its_state_directory_disagrees_with_env() {
+# ======================================================================================
+# The SECOND drop-box: "Back up now" over the same boundary
+# ======================================================================================
+
+test_a_backup_request_is_consumed_and_the_backup_runs() {
+  agent_sandbox backup-ok
+  : > "$AGENT_HOME/state/backup-requests/req-1"
+  cat > "$AGENT_HOME/checkout/scripts/backup.sh" <<'STUB'
+#!/usr/bin/env bash
+printf '{"phase":"ok","verified":"true"}\n' > "$SAIVA_STATE_DIR_FOR_STUB/backup-status.json"
+echo "trigger=$2"
+STUB
+  chmod +x "$AGENT_HOME/checkout/scripts/backup.sh"
+  OUT="$(SAIVA_AGENT_CONF="$AGENT_HOME/etc/agent.conf" \
+    SAIVA_STATE_DIR_FOR_STUB="$AGENT_HOME/state" \
+    "$REPO/scripts/saiva-update-agent" --backup 2>&1)" && RC=0 || RC=$?
+
+  assert_eq "0" "$RC" "the agent must report what the backup reported"
+  assert_eq "" "$(ls -A "$AGENT_HOME/state/backup-requests")" "the request must be consumed"
+  assert_contains "$OUT" "trigger=button" "the backup must be told who asked for it"
+  # And it must NOT have touched the UPDATE's record, which would show a backup's outcome
+  # on the update panel.
+  [ ! -f "$AGENT_HOME/state/status.json" ] \
+    || fail_test "a backup wrote the update's status file"
+}
+
+test_an_update_request_does_not_trigger_a_backup_or_the_other_way_round() {
+  # The whole security argument is that WHICH directory a file landed in is the only
+  # information root takes from the app. If either handler swept both drop-boxes, a press
+  # of one button would consume the other's request and the second press would vanish.
+  agent_sandbox backup-isolation
+  : > "$AGENT_HOME/state/requests/u-1"
+  : > "$AGENT_HOME/state/backup-requests/b-1"
+
+  run_agent --backup
+  assert_eq "u-1" "$(ls -A "$AGENT_HOME/state/requests")" \
+    "--backup consumed the UPDATE request as well"
+  assert_eq "" "$(ls -A "$AGENT_HOME/state/backup-requests")" "--backup must consume its own"
+
+  run_agent
+  assert_eq "" "$(ls -A "$AGENT_HOME/state/requests")" "the update request must be consumed"
+}
+
+test_a_backup_press_the_host_cannot_act_on_does_not_vanish() {
+  # Same rule as the update button, and it needs its own net because it writes a different
+  # file: a request consumed with nothing written leaves the panel showing YESTERDAY's
+  # verified backup while the press the owner just made has disappeared.
+  agent_sandbox backup-vanish
+  printf '{"phase":"ok","verified":"true","last_verified_at":"2026-01-01T00:00:00Z"}\n' \
+    > "$AGENT_HOME/state/backup-status.json"
+  rm -f "$AGENT_HOME/checkout/scripts/backup.sh"
+  : > "$AGENT_HOME/state/backup-requests/req-1"
+  run_agent --backup
+
+  [ "$RC" -ne 0 ] || fail_test "the agent reported success with no backup script present"
+  local phase
+  phase="$(sed -n 's/.*"phase": *"\([^"]*\)".*/\1/p' "$AGENT_HOME/state/backup-status.json")"
+  assert_eq "failed" "$phase" "the press vanished: the panel still shows the previous backup"
+  assert_contains "$(cat "$AGENT_HOME/state/backup-status.json")" "no scripts/backup.sh" \
+    "and it must say what is wrong with this checkout"
+  # A backup failure must never be written into the public file Caddy serves: there is
+  # deliberately no public backup record at all.
+  [ ! -f "$AGENT_HOME/state/status-public.json" ] \
+    || fail_test "a backup failure leaked into the publicly served status"
+}
+
+test_a_backup_that_reports_for_itself_is_left_alone() {
+  agent_sandbox backup-reports
+  cat > "$AGENT_HOME/checkout/scripts/backup.sh" <<'STUB'
+#!/usr/bin/env bash
+printf '{"phase":"failed","verify_message":"the real reason"}\n' \
+  > "$SAIVA_STATE_DIR_FOR_STUB/backup-status.json"
+exit 1
+STUB
+  chmod +x "$AGENT_HOME/checkout/scripts/backup.sh"
+  : > "$AGENT_HOME/state/backup-requests/req-1"
+  OUT="$(SAIVA_AGENT_CONF="$AGENT_HOME/etc/agent.conf" \
+    SAIVA_STATE_DIR_FOR_STUB="$AGENT_HOME/state" \
+    "$REPO/scripts/saiva-update-agent" --backup 2>&1)" && RC=0 || RC=$?
+
+  assert_contains "$(cat "$AGENT_HOME/state/backup-status.json")" "the real reason" \
+    "the agent overwrote the backup's own account of what happened"
+}
+
+test_the_agent_sweeps_a_planted_link_out_of_the_backup_drop_box_too() {
+  agent_sandbox backup-symlink
+  printf 'SECRET\n' > "$AGENT_HOME/victim"
+  ln -s "$AGENT_HOME/victim" "$AGENT_HOME/state/backup-requests/evil"
+  mkfifo "$AGENT_HOME/state/backup-requests/pipe" 2>/dev/null || true
+  run_agent --backup
+
+  assert_eq "0" "$RC" "a planted entry must not fail the agent"
+  assert_eq "" "$(ls -A "$AGENT_HOME/state/backup-requests")" "the drop-box must be swept clean"
+  assert_eq "SECRET" "$(cat "$AGENT_HOME/victim")" "the agent followed the link"
+  assert_not_contains "$OUT" "taking a backup" "a link is not a request, so nothing should run"
+}
+
+test_dot_env_decides_where_state_lives_and_a_stale_conf_is_named() {
+  # .env is what docker-compose interpolates the api and caddy bind mounts from, so it is
+  # the only answer the containers can see -- and therefore the only one worth having.
+  # The agent used to prefer /etc/saiva/agent.conf, and the first time the two disagreed it
+  # looked for a status file in the wrong place, found nothing changed, and overwrote a
+  # good "backed up and verified" with "the run failed silently". So two things have to be
+  # true at once now: .env WINS, and the stale conf is named out loud, because the systemd
+  # path units the installer wrote are watching the directory the conf named.
   agent_sandbox disagree
-  printf 'SAIVA_STATE_DIR=/somewhere/else\n' > "$AGENT_HOME/checkout/.env"
+  mkdir -p "$AGENT_HOME/from-env"
+  printf 'SAIVA_STATE_DIR=%s/from-env   # with prose after it\n' "$AGENT_HOME" \
+    > "$AGENT_HOME/checkout/.env"
   run_agent --self-check
 
-  [ "$RC" -ne 0 ] || fail_test "--self-check passed while the two halves disagree"
-  assert_contains "$OUT" "DISAGREEMENT" "it must name the problem"
+  assert_contains "$OUT" "$AGENT_HOME/from-env" \
+    "the agent must use the directory .env names, inline comment and all"
+  assert_not_contains "$(printf '%s' "$OUT" | sed -n '/^state directory/p')" \
+    "$AGENT_HOME/state" "the conf's value must not win over .env"
+  [ "$RC" -ne 0 ] || fail_test "--self-check passed while agent.conf still names another directory"
+  assert_contains "$OUT" "STALE CONFIG" "it must name the problem"
 }
 
 test_a_run_that_dies_mid_way_still_leaves_a_terminal_status() {

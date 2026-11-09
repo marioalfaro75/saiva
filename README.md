@@ -74,8 +74,11 @@ Runs in a container, HTTPS‑only.
 
 **Self‑host & operate**
 - **HTTPS‑only** via Caddy — internal CA for localhost/LAN, or Let's Encrypt for a domain.
-- **Prebuilt GHCR images** (`edge` / `latest` / pinned channels), **pre‑migration backups**,
-  and **in‑app updates** (the owner clicks *Update now*; the app never touches the Docker socket).
+- **Prebuilt GHCR images** (`edge` / `latest` / pinned channels) and **in‑app updates** (the
+  owner clicks *Update now*; the app never touches the Docker socket).
+- **Nightly backups that are proven, not assumed** — each one is restored into a throwaway
+  database and counted back before it is called a backup, copied off the box, and the age of
+  the newest verified one is on the Settings page.
 - Multi‑user household with **role‑based access**, an **audit log**, and a full **JSON export**.
 
 ## Run it in a container
@@ -117,8 +120,10 @@ make down                              # stop the stack, keep the data
 ```
 
 `make destroy` is the one to be careful with: it deletes the household's records **and
-every pre-migration backup dump**, which live in the same Docker volume set. It asks you
-to type a word first, and refuses outright when there is no terminal to ask.
+every dump** — nightly, pre-migration and pre-restore alike — because they live in the same
+Docker volume set. It asks you to type a word first, and refuses outright when there is no
+terminal to ask. The **off-box copy** of a nightly backup survives it, and is the only thing
+that does: `./scripts/backup.sh --status` says where it goes and how recent it is.
 
 Run `make help` for all targets.
 
@@ -228,15 +233,29 @@ The same status is at `https://<your address>/_saiva/update-status.json`, served
 straight off the host — so it still answers when the app itself is the thing that's
 broken.
 
-**Pre-migration backups.** Before applying any schema migration to an existing database,
-the API writes a compressed `pg_dump` into the `db_backups` volume. If that dump fails,
-it refuses to migrate.
+**Nightly backups, verified by a real restore.** A systemd timer on the host runs
+`scripts/backup.sh`: it dumps the database, **restores that dump into a throwaway database
+and compares it row for row**, copies it off the box, and writes down what happened. Only
+then is it called a backup. Settings → Backups shows the age of the newest *verified* one,
+and says so plainly when there isn't one — including the state that matters most, *a dump
+was taken but it could not be restored*.
+
+It runs on the host rather than in a container because the thing producing the safety net
+must not be the thing a bad release can break, and a backup is most wanted on the night the
+app won't start. Set it up once with `sudo ./scripts/install-updater.sh`, choose a
+destination in `/etc/saiva/agent.conf`, and read **[docs/BACKUPS.md](docs/BACKUPS.md)** —
+which also explains why `psql --single-transaction` exiting 0 is *not* evidence that a dump
+is complete, and what the regime does instead.
+
+**Pre-migration backups.** Separately, before applying any schema migration to an existing
+database, the API writes a compressed `pg_dump` into the same volume. If that dump fails, it
+refuses to migrate. These are never pruned automatically.
 
 **Restoring one** — this is the command that is worth knowing before you need it:
 
 ```bash
 ./scripts/restore-backup.sh                 # list the dumps, newest first
-./scripts/restore-backup.sh saiva-20260411-021500-premigrate.sql.gz
+./scripts/restore-backup.sh saiva-20261109-023700-nightly.sql.gz
 ```
 
 It runs from a throwaway container, because the dumps are mounted only into the `api`
@@ -290,6 +309,16 @@ Docker (or use a VM, which needs no special setup). For an LXC:
    (or *Container → Options → Features → Nesting* in the web UI), then start the container.
 3. **Install Docker Engine + the Compose plugin** inside the container.
 4. Clone the repo and run `make deploy` exactly as above.
+5. Set up the host side once — the in-app update button *and* the nightly backup:
+   ```bash
+   sudo ./scripts/install-updater.sh
+   sudo nano /etc/saiva/agent.conf   # set SAIVA_BACKUP_COPY_TO
+   sudo ./scripts/backup.sh          # take the first one now
+   sudo ./scripts/backup.sh --self-check
+   ```
+   [docs/BACKUPS.md](docs/BACKUPS.md) covers choosing a destination on Proxmox, including
+   why a mount point from the PVE host is reported as *same machine* and what you have to
+   check yourself.
 
 Notes:
 - **Storage driver:** Docker's `overlay2` works with nesting on modern kernels; on
@@ -458,6 +487,10 @@ run `make update`, with someone at the keyboard. That is deliberate: the hazard 
 holding a family's financial records is an update that cannot be undone, not an
 unsupervised rollout, and a timer would remove the one person who can tell the difference.
 
+There *is* one timer, and it does the opposite thing: `saiva-backup.timer` takes a nightly
+backup. The two are deliberately the other way round — the unattended job is the one that
+only ever adds a file, and the one that changes the box needs a person.
+
 **Images are never pruned automatically**, because the image a rollback needs is dangling
 by definition — the tag it had moved to the release that replaced it. Every applied
 update holds roughly 140 MB. `docker system df` to see, `docker image prune` once a
@@ -500,9 +533,9 @@ backend/    FastAPI API — auth, accounts, import, categorisation, transfers, d
 frontend/   React + TS SPA (Vite) — overview, insights, advisor, alerts, transactions,
             accounts, budgets, bills, forecast, net worth, goals, benchmarks, import, settings
 infra/      Caddy reverse-proxy config (auto-HTTPS)
-scripts/    deploy.sh (install, update, rollback), restore-backup.sh, the host
-            update agent and its installer, and lib/ + tests/ behind them
-docs/       Product Requirements Document, UPDATING.md
+scripts/    deploy.sh (install, update, rollback), backup.sh (nightly, verified),
+            restore-backup.sh, the host agent and its installer, lib/ + tests/ behind them
+docs/       Product Requirements Document, UPDATING.md, BACKUPS.md
 .github/    CI + release workflows (tests, image publish, Cut release)
 docker-compose.yml        local build (Postgres + API + web + Caddy)
 docker-compose.prod.yml   prebuilt GHCR images + Caddy (production; the one `make update` applies)

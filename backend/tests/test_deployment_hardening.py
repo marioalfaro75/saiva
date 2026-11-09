@@ -218,6 +218,32 @@ def test_no_container_can_reach_the_docker_daemon() -> None:
             )
 
 
+def _split_mount(spec: str) -> tuple[str, str, str]:
+    """Split a compose short-syntax volume into (host, container, mode).
+
+    By hand, because the host side interpolates a default — `${SAIVA_STATE_DIR:-/var/…}`
+    — and the `:-` in that is not a field separator. `spec.split(":")` returns five
+    fields for these mounts, which would not fail the classification below so much as
+    make it meaningless.
+    """
+    fields: list[str] = []
+    current = ""
+    depth = 0
+    for char in spec:
+        if char == "{":
+            depth += 1
+        elif char == "}":
+            depth = max(depth - 1, 0)
+        elif char == ":" and depth == 0:
+            fields.append(current)
+            current = ""
+            continue
+        current += char
+    fields.append(current)
+    host, container = fields[0], fields[1] if len(fields) > 1 else ""
+    return host, container, ":".join(fields[2:])
+
+
 def test_the_app_can_write_only_the_drop_box_and_read_the_rest() -> None:
     """The security boundary, and the one this design got wrong the first time.
 
@@ -228,29 +254,67 @@ def test_the_app_can_write_only_the_drop_box_and_read_the_rest() -> None:
     the status API, and rename records/ aside so a rollback restored its .env and pinned
     every service to an image of its choosing.
 
-    Two mounts: read-only on the directory, read-write on the drop-box inside it. The
-    obvious 'improvement' when the button needs to do something new is to widen this, so
-    it is a test rather than a comment.
+    This used to assert that there were exactly two such mounts, which was a proxy for
+    the real invariant and expired the moment "Back up now" added a second drop-box. The
+    count is not the property; the shape is. One read-only mount of the directory, and
+    any number of writable mounts each of which is a sub-directory of it, named the same
+    on both sides. A third drop-box needs no change here. Widening one does.
     """
     api = _compose(COMPOSE_PROD)["services"]["api"]
     mounts = [str(v) for v in (api.get("volumes") or [])]
-    update_mounts = [m for m in mounts if "saiva-update" in m]
-    assert len(update_mounts) == 2, f"expected two update mounts on api, got {update_mounts}"
-
-    outer = [m for m in update_mounts if m.endswith(":/run/saiva-update:ro")]
-    assert outer, (
-        f"the api container can write the whole update directory: {update_mounts}. "
-        "That is enough to make root open files of its choosing."
-    )
-    drop_box = [m for m in update_mounts if m.endswith(":/run/saiva-update/requests")]
-    assert drop_box, f"no writable drop-box mount for the button: {update_mounts}"
-    assert "/requests:" in drop_box[0], (
-        f"the writable mount is not the requests sub-directory: {drop_box[0]}"
-    )
+    # Either side, because a mount is in scope here if it touches the state directory at
+    # all. Matching only the container path would miss `$STATE/records:/run/anything`,
+    # which is both a second writable path and a window onto a directory that holds a
+    # verbatim copy of .env.
+    update_mounts = [m for m in mounts if "saiva-update" in m or "SAIVA_STATE_DIR" in m]
+    assert update_mounts, "no state-directory mounts on api at all, so this proves nothing"
 
     env = {str(k): str(v) for k, v in (api.get("environment") or {}).items()}
-    assert env.get("SAIVA_UPDATE_DIR") == "/run/saiva-update", (
-        "the api container is not told where its update directory is"
+    root = env.get("SAIVA_UPDATE_DIR")
+    assert root == "/run/saiva-update", (
+        "the api container is not told where its state directory is, so the mounts below "
+        f"cannot be classified against anything: {env.get('SAIVA_UPDATE_DIR')!r}"
+    )
+
+    outer = [m for m in update_mounts if _split_mount(m)[1] == root]
+    assert len(outer) == 1, (
+        f"expected exactly one mount of {root} itself, got {outer}. Two would mean one of "
+        "them decides, and which one is not something this file states."
+    )
+    assert _split_mount(outer[0])[2] == "ro", (
+        f"the api container can write the whole state directory: {outer[0]}. That is "
+        "enough to make root open files of its choosing — see scripts/saiva-update-agent."
+    )
+    outer_host = _split_mount(outer[0])[0]
+
+    drop_boxes = {}
+    for mount in update_mounts:
+        if mount in outer:
+            continue
+        host, container, mode = _split_mount(mount)
+        assert container.startswith(root + "/"), (
+            f"a second mount of the state directory, outside {root}: {mount}. The "
+            "read-only outer mount is what makes a drop-box a drop-box; anything beside "
+            "it is either a second writable path or a second way to read records/, which "
+            "holds a verbatim copy of .env."
+        )
+        name = container[len(root) + 1 :]
+        assert "/" not in name, (
+            f"the drop-box {name!r} is nested rather than a direct sub-directory: {mount}"
+        )
+        assert mode != "ro", (
+            f"{name} is mounted read-only, so the app cannot drop a request in it: {mount}"
+        )
+        assert host == f"{outer_host}/{name}", (
+            f"{name} is mounted from somewhere other than {outer_host}/{name}: {mount}. "
+            "The host watches the directory it owns; a request written anywhere else is "
+            "one nothing picks up, and nothing would say so."
+        )
+        drop_boxes[name] = mount
+
+    assert {"requests", "backup-requests"} <= set(drop_boxes), (
+        "one of the two drop-boxes the app writes into is not mounted, so pressing that "
+        f"button would 503 on a correctly installed box: {sorted(drop_boxes)}"
     )
 
 
@@ -260,23 +324,63 @@ def test_the_installer_never_hands_the_state_directory_to_the_container() -> Non
     `chown <api uid> $STATE` is one word away from `chown root:<api uid> $STATE/requests`
     and the difference is a privilege escalation, so it is worth a test that reads the
     installer rather than trusting the comment above it.
+
+    The skip used to be the substring "requests", which meant the backup drop-box passed
+    this test for no better reason than `"requests" in "backup-requests"` — tolerated
+    rather than checked. So each drop-box is now named, and each has to be root-owned and
+    0730 in its own right: 0730 is what stops the container listing what is in there, and
+    root ownership is what stops it renaming root's entries. Group-only access is the
+    whole mechanism, so `-g "$API_UID"` on a line is only acceptable on one of these.
     """
     installer = (REPO / "scripts" / "install-updater.sh").read_text()
+    # The directories the api container may write into, and nothing else may be handed to
+    # it. Both are relative to $STATE: see app/services/{updates,backups}.py.
+    drop_boxes = ("requests", "backup-requests")
     lines = [
         line.strip()
         for line in installer.splitlines()
         if not line.lstrip().startswith("#") and ("chown" in line or "install -d" in line)
     ]
     assert lines, "no ownership statements found in the installer, so this proves nothing"
+
+    def _targets(line: str) -> set[str]:
+        """What a line acts on, as paths under $STATE — "." being $STATE itself."""
+        return {
+            match.group(1).lstrip("/") or "."
+            for match in re.finditer(r'"\$STATE((?:/[A-Za-z0-9._-]+)*)"', line)
+        }
+
     for line in lines:
-        if "requests" in line:
+        if "API_UID" not in line:
             continue
-        assert "API_UID" not in line, (
-            f"the installer gives the api container something other than the drop-box: {line}"
+        acted_on = _targets(line)
+        assert acted_on and acted_on <= set(drop_boxes), (
+            "the installer gives the api container something other than a drop-box "
+            f"({sorted(acted_on) or 'an unrecognised path'}): {line}"
         )
-    assert any("0730" in line and "requests" in line for line in lines), (
-        "the drop-box is not 0730, so the container can list what is in it"
-    )
+
+    for name in drop_boxes:
+        created = [
+            line for line in lines if line.startswith("install -d") and _targets(line) == {name}
+        ]
+        assert created, f"the installer does not create $STATE/{name} at all"
+        for line in created:
+            assert "-o root" in line and '-g "$API_UID"' in line, (
+                f"$STATE/{name} is not root-owned with the api container as its group, so "
+                f"either root cannot trust what is in it or the app cannot write it: {line}"
+            )
+            assert "-m 0730" in line, (
+                f"$STATE/{name} is not created 0730, so the container can list what is in "
+                f"it — which is how it would learn whether root had acted yet: {line}"
+            )
+        # install -d leaves an existing directory's mode alone, so a box upgraded from the
+        # old layout only gets these modes if they are re-asserted unconditionally.
+        reasserted = [line for line in lines if "chmod" in line and _targets(line) == {name}]
+        assert any('chown "root:$API_UID"' in line and "0730" in line for line in reasserted), (
+            f"$STATE/{name}'s mode and ownership are not re-asserted, so a box upgraded "
+            f"from a layout that had this directory keeps whatever it had: {reasserted}"
+        )
+
     assert any("0700" in line and "records" in line for line in lines), (
         "records/ is not 0700, and it holds a verbatim copy of .env"
     )
@@ -370,6 +474,11 @@ def test_nothing_the_host_runs_prunes_images_behind_the_owner() -> None:
         REPO / "scripts" / "deploy.sh",
         REPO / "scripts" / "lib" / "release.sh",
         REPO / "scripts" / "saiva-update-agent",
+        # A root-run host script on a nightly timer, and the one most likely to attract a
+        # prune: it is the thing that notices the disk filling up. The dumps it writes and
+        # the rollback images share a filesystem, so "reclaim some space while we are
+        # here" would delete the rollback and call it housekeeping.
+        REPO / "scripts" / "backup.sh",
         REPO / "Makefile",
     )
     host_scripts = {path.relative_to(REPO): path.read_text() for path in paths}
@@ -398,11 +507,12 @@ def test_the_state_directory_has_one_spelling() -> None:
     """
     default = "/var/lib/saiva/update"
     compose = COMPOSE_PROD.read_text()
-    # Three now: the api's read-only mount of the directory, its read-write mount of the
-    # drop-box inside it, and caddy's read-only mount.
-    assert compose.count("${SAIVA_STATE_DIR:-" + default + "}") == 3, (
-        "the api and caddy mounts no longer all interpolate SAIVA_STATE_DIR with the "
-        f"default {default}"
+    # Four now: the api's read-only mount of the directory, its read-write mounts of the
+    # two drop-boxes inside it (requests, for an update; backup-requests, for "Back up
+    # now"), and caddy's read-only mount.
+    assert compose.count("${SAIVA_STATE_DIR:-" + default + "}") == 4, (
+        "the api's three mounts and caddy's one no longer all interpolate "
+        f"SAIVA_STATE_DIR with the default {default}"
     )
     assert default in (REPO / "scripts" / "lib" / "state.sh").read_text()
     assert default in (REPO / "scripts" / "install-updater.sh").read_text()
@@ -412,35 +522,189 @@ def test_the_state_directory_has_one_spelling() -> None:
     )
 
 
-def test_every_outcome_the_updater_can_report_is_one_the_panel_handles() -> None:
-    """A cross-language invariant, so it needs a test that reads both sides.
+# The two surfaces that work this way, each a shell script writing a phase into a status
+# file, an API module passing it through verbatim, and a panel turning it into words. They
+# are parametrized rather than copied because the invariant is identical and the failure
+# is identical, and because a copy is how one of them would end up with half the checks.
+#
+# `anchor` is the family's own non-vacuity guard: phases the family is known to report
+# today. Without it a discovery regex that silently stopped matching -- a rename, a
+# refactor into a helper -- would turn this into a test that proves nothing while staying
+# green, which is the specific way cross-language tests rot.
+_PHASE_FAMILIES = [
+    pytest.param(
+        REPO / "scripts" / "lib" / "release.sh",
+        REPO / "frontend" / "src" / "components" / "UpdatesPanel.tsx",
+        "app.services.updates",
+        {"applied", "rolled_back", "running"},
+        id="update",
+    ),
+    pytest.param(
+        REPO / "scripts" / "backup.sh",
+        REPO / "frontend" / "src" / "components" / "BackupsPanel.tsx",
+        "app.services.backups",
+        {"ok", "failed", "skipped", "running"},
+        id="backup",
+    ),
+]
+
+
+def _panel_switch_cases(panel: Path, anchor: str) -> set[str]:
+    """The case labels of the one `switch` in `panel` that handles `anchor`.
+
+    Scoped to a single switch rather than searched over the whole file, because the whole
+    file is ambiguous and quietly so. BackupsPanel.tsx has two switches — one over
+    `offsite`, one over `phase` — and `ok` and `failed` are labels in BOTH. Measured while
+    writing this: deleting `case "ok":` from the off-box switch left a plain substring
+    check green, because the phase switch still had one. The test would then have been
+    asserting that the panel contains the word somewhere, which is not the property.
+
+    `anchor` is the label that identifies the switch, and it earns its keep twice: it is a
+    label the shell never writes, so nothing else in this file requires the panel to have
+    it. `unreadable` is the API's own answer to a record it cannot parse, and a panel
+    without a branch for it would render the words "unreadable" at the owner.
+    """
+    source = panel.read_text()
+    segments = [seg for seg in source.split("switch (") if f'case "{anchor}":' in seg]
+    assert len(segments) == 1, (
+        f"{panel.name} has {len(segments)} switch statements handling {anchor!r}, so which "
+        "one is authoritative is not something this file states. One is the invariant; it "
+        "is also what makes the labels below unambiguous."
+    )
+    return set(re.findall(r'case "([a-z_-]+)":', segments[0]))
+
+
+# Two ways a phase reaches the status file, and both have to be read. `status_finish`
+# writes the terminal ones; `status_set phase` is how `running` gets there, and it was
+# missing from this test -- so nothing proved that either panel could render a run in
+# progress, which is the state an owner is most likely to be looking at.
+_PHASE_PATTERNS = (r"status_finish\s+([a-z_]+)", r"status_set\s+phase\s+([a-z_]+)")
+
+
+@pytest.mark.parametrize(("script", "panel_path", "module_name", "anchor"), _PHASE_FAMILIES)
+def test_every_outcome_the_host_can_report_is_one_the_panel_handles(
+    script: Path, panel_path: Path, module_name: str, anchor: set[str]
+) -> None:
+    """A cross-language invariant, so it needs a test that reads every side.
 
     The shell writes a phase string; the API passes it through verbatim; the panel turns
-    it into words. Nothing but this connects them. A new terminal state added to the
-    updater without a branch in the panel renders as a bare phase name on the one screen
-    the owner looks at when an update has gone wrong -- which is a quiet version of
-    exactly the failure this whole design exists to remove.
+    it into words. Nothing but this connects them. A new state added to the host script
+    without a branch in the panel renders as a bare phase name on the one screen the owner
+    looks at when something has gone wrong -- which is a quiet version of exactly the
+    failure this whole design exists to remove.
+
+    The API side matters for a second reason: a phase the service module does not know is
+    one {update,backup}_in_progress() cannot reason about, so a run in a state it has
+    never heard of either blocks the button forever or never blocks it at all.
     """
-    release_sh = (REPO / "scripts" / "lib" / "release.sh").read_text()
-    phases = set(re.findall(r"status_finish\s+([a-z_]+)", release_sh))
-    assert phases, "no phases found in release.sh, so this test is checking nothing"
-    assert "applied" in phases and "rolled_back" in phases, (
-        f"release.sh no longer reports the outcomes this test knows about: {sorted(phases)}"
+    import importlib
+
+    source = script.read_text()
+    assert source.strip(), f"read nothing from {script.name}, so this test proves nothing"
+    phases = {
+        phase for pattern in _PHASE_PATTERNS for phase in re.findall(pattern, source)
+    }
+    assert anchor <= phases, (
+        f"{script.name} no longer reports the outcomes this test knows about "
+        f"({sorted(anchor - phases)}), so the discovery regexes have stopped seeing its "
+        f"vocabulary and everything below passes for the wrong reason: {sorted(phases)}"
     )
 
-    panel = (REPO / "frontend" / "src" / "components" / "UpdatesPanel.tsx").read_text()
-    unhandled = sorted(p for p in phases if f'case "{p}":' not in panel)
+    assert panel_path.is_file(), (
+        f"{panel_path.relative_to(REPO)} does not exist, so nothing renders these states "
+        f"for the owner: {sorted(phases)}"
+    )
+    handled = _panel_switch_cases(panel_path, "unreadable")
+    unhandled = sorted(phases - handled)
     assert not unhandled, (
-        "the updater can end in states the panel has no words for, so they would render "
-        f"as a raw phase name: {unhandled}"
+        f"{script.name} can end in states {panel_path.name} has no words for, so they "
+        f"would render as a raw phase name: {unhandled}"
     )
 
-    from app.services import updates
-
-    missing = sorted(phases - updates.TERMINAL_PHASES - updates.ACTIVE_PHASES)
+    module = importlib.import_module(module_name)
+    missing = sorted(phases - module.TERMINAL_PHASES - module.ACTIVE_PHASES)
     assert not missing, (
-        f"app/services/updates.py does not know these phases, so update_in_progress() "
-        f"cannot reason about them: {missing}"
+        f"{module_name} does not know these phases, so it cannot tell a run that is "
+        f"still going from one that has finished: {missing}"
+    )
+
+
+def test_every_off_box_state_the_backup_can_report_is_one_the_panel_handles() -> None:
+    """The same shape as above, for the field that is most likely to be read as a tick.
+
+    `offsite` is not a boolean, and the reason is measured rather than theoretical: `stat
+    -c %d` reports a btrfs subvolume, a ZFS dataset, an LVM thin volume and a Proxmox
+    bind-mount as DIFFERENT devices while they live on the same physical disk -- which are
+    exactly the configurations a Proxmox box has. So a device-number comparison would have
+    called every one of those "copied off this box". The vocabulary that replaced it has
+    six words in it, only one of which is good news, and a word the panel has no branch
+    for would render as itself next to a copy that never left the machine.
+
+    Three things are checked, not one: that the shell still declares the vocabulary in one
+    place, that every literal it can actually write is in that declaration, and that the
+    panel has a branch for each. The middle one is the load-bearing step -- a state the
+    script writes but does not declare would never be compared against the panel at all,
+    so without it the other two could both pass over a silent gap.
+    """
+    source = (REPO / "scripts" / "backup.sh").read_text()
+    assert source.strip(), "read nothing from backup.sh, so this test proves nothing"
+
+    declared = re.search(r"SAIVA_OFFSITE_STATES=\(([^)]*)\)", source)
+    assert declared, (
+        "scripts/backup.sh no longer declares SAIVA_OFFSITE_STATES. That list is the "
+        "whole vocabulary, in one place, precisely so that the API can pass it through "
+        "and the panel can have a sentence for each; without it there is nothing to hold "
+        "the three languages to."
+    )
+    states = set(declared.group(1).split())
+    # The named anchor: the states whose whole purpose is to NOT read as good news, plus
+    # the one that may. If the declaration stops containing these, reading it has stopped
+    # telling us anything.
+    anchor = {"off", "failed", "same-filesystem", "same-host", "remote"}
+    assert anchor <= states, (
+        f"backup.sh no longer declares the off-box states this test knows about "
+        f"({sorted(anchor - states)}); found {sorted(states)}"
+    )
+
+    # Every literal the script can actually put in that field, however it gets there:
+    # written straight, chosen by the worsening helper, or assigned to the variable the
+    # final write reads. A literal outside the declared list would be a state nothing
+    # ever checks the panel for, which is the hole the declaration exists to close.
+    written = set(re.findall(r"status_set\s+offsite\s+([a-z][a-z-]*)\b", source))
+    written |= set(re.findall(r"_offsite_worsen\s+([a-z][a-z-]*)\b", source))
+    written |= set(re.findall(r"\bOFFSITE_STATE=([a-z][a-z-]*)\b", source))
+    assert written, "no off-box state is written anywhere, so this test is checking nothing"
+    assert written <= states, (
+        "scripts/backup.sh writes off-box states that SAIVA_OFFSITE_STATES does not "
+        f"declare, so nothing checks the panel for them: {sorted(written - states)}"
+    )
+
+    # And nothing reaches that field through a variable this test does not follow. The
+    # previous shape of this script wrote `${worst:-ok}`, i.e. it defaulted to the most
+    # reassuring answer in the union when no branch had said anything; a form this test
+    # cannot read is how that would come back unnoticed.
+    for token in re.findall(r"status_set\s+offsite\s+(\S+)", source):
+        bare = token.strip('"')
+        assert re.fullmatch(r"[a-z][a-z-]*", bare) or bare in {
+            "$OFFSITE_STATE",
+            "${OFFSITE_STATE}",
+        }, (
+            f"`status_set offsite {token}` is in a form this test cannot follow, so the "
+            "off-box vocabulary is no longer being checked against the panel"
+        )
+
+    panel_path = REPO / "frontend" / "src" / "components" / "BackupsPanel.tsx"
+    assert panel_path.is_file(), (
+        f"{panel_path.relative_to(REPO)} does not exist, so nothing tells the owner how "
+        f"far their backup actually got: {sorted(states)}"
+    )
+    # `same-filesystem` is the label that identifies the off-box switch rather than the
+    # phase switch beside it, and it is the one word in this vocabulary that must never be
+    # rendered as a tick: a copy on the same disk as the database is not a backup.
+    unhandled = sorted(states - _panel_switch_cases(panel_path, "same-filesystem"))
+    assert not unhandled, (
+        "backup.sh can report off-box states BackupsPanel.tsx has no words for, so a copy "
+        f"that never left this machine would render as a bare state name: {unhandled}"
     )
 
 

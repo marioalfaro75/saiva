@@ -33,7 +33,8 @@ COMPOSE_DEV  := $(COMPOSE) -f docker-compose.yml
 # in the environment; make does not pass its own variables to recipes otherwise.
 export SAIVA_CONFIRM_DESTROY
 
-.PHONY: help deploy pull update up down destroy restart logs ps seed dev-up dev-rebuild check
+.PHONY: help deploy pull update backup backup-status up down destroy restart logs ps seed \
+        dev-up dev-rebuild check
 
 help: ## Show available targets
 	@grep -E '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) \
@@ -64,8 +65,21 @@ down: ## Stop the prod stack, database preserved
 # `down -v` anyway. Verified: `make -i destroy </dev/null` printed "Aborted. Nothing was
 # deleted." and then ran the destructive command. With `&&` the refusal is part of the
 # same command and there is no line for make to continue past.
-destroy: ## Wipe the database AND every pre-migration backup (requires a typed word)
+destroy: ## Wipe the database AND every dump in the volume (requires a typed word)
 	@./scripts/confirm-destroy.sh && $(COMPOSE_PROD) down -v
+
+# Two operator-facing names, for the same reason `update` has one: somebody who knows
+# `make update` will try `make backup`, and a target that does the right thing beats a
+# missing one. There is only one way to take a backup, so unlike the update targets there
+# is no ambiguity here to get wrong -- these are shorthand for the script and nothing else.
+# Taking a backup needs root (it drives Docker and writes to /var/lib/saiva), hence sudo.
+backup: ## Take a backup now, verify it by restoring it, and copy it off the box
+	@sudo ./scripts/backup.sh
+
+backup-status: ## What the last backup did, and whether the regime is healthy
+	@./scripts/backup.sh --status
+	@echo ""
+	@sudo ./scripts/backup.sh --self-check
 
 check: ## Run everything CI runs, with the same invocations
 	@./scripts/check-all.sh

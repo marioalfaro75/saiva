@@ -27,6 +27,11 @@ gate      ask https://<your address>/ and /api/health, from the host, whether
           the site actually answers
 ```
 
+A backup and a release can never overlap: both take `$STATE/deploy.lock`. A nightly backup
+that lands during a release waits up to ten minutes and then records itself as *skipped*
+rather than failed — which is also the correct answer, because `--apply-release` has just
+taken a pre-migration dump of its own.
+
 The gate waits three minutes (`SAIVA_GATE_TRIES`, in 2-second steps). A failing update
 therefore takes up to **six** — three before it gives up, and three more re-gating after
 the rollback — and holds the update lock for the whole of it, so a second press is
@@ -121,12 +126,21 @@ Once per box, as root:
 sudo ./scripts/install-updater.sh
 ```
 
-That installs a small agent at `/usr/local/lib/saiva/saiva-update-agent`, a systemd path
-unit watching for a request, and the shared directory the api container writes into.
+That installs a small agent at `/usr/local/lib/saiva/saiva-update-agent`, two systemd path
+units watching for a request, the nightly backup timer, and the two directories the api
+container may write into. It is the same one command for both features, and it is
+idempotent — re-run it whenever the agent or the unit files change.
+([BACKUPS.md](BACKUPS.md) covers the backup half.)
 
-The agent **takes no parameters, and never opens the request at all.** It asks whether a
-regular file exists in one directory, deletes whatever it finds there, and resolves the
-target release itself from the tags on `origin`.
+The agent **takes no parameters, and never opens a request at all.** It asks whether a
+regular file exists in a directory, deletes whatever it finds there, and resolves what was
+asked for itself — the target release from the tags on `origin`, the backup settings from
+`/etc/saiva/agent.conf`.
+
+There are **two** such directories, and which one a file landed in is the only information
+root takes from the app. That is why *Back up now* is a second directory rather than a flag
+inside the request: the argument below rests on root never consulting a byte the container
+wrote, so the single bit the container gets to express is which drop-box it used.
 
 That second half is not belt-and-braces; it is the half the first version of this got
 wrong. Making the request's *contents* inert is not enough if the container owns the
@@ -141,15 +155,23 @@ of its choosing.
 So the boundary is a drop-box, not a shared directory:
 
 ```
-/var/lib/saiva/update            root:root 0755   status, logs, rollback records
-/var/lib/saiva/update/records    root:root 0700   holds a copy of .env
-/var/lib/saiva/update/requests   root:<api> 0730  the only thing the app may write
+/var/lib/saiva/update                  root:root 0755   status, logs, rollback records
+/var/lib/saiva/update/records          root:root 0700   holds a copy of .env
+/var/lib/saiva/update/requests         root:<api> 0730  "Update now"  -- writable
+/var/lib/saiva/update/backup-requests  root:<api> 0730  "Back up now" -- writable
 ```
 
-The app mounts the outer directory read-only and the drop-box read-write. `0730` means it
-cannot even list what is in there. Root looks with `find -type f`, which does not follow
-symlinks, and unlinks rather than reads. With that, the claim holds: the most a
-compromised api container can ask for is the update the button was going to do anyway.
+The app mounts the outer directory read-only and the two drop-boxes read-write. `0730` means
+it cannot even list what is in either. Root looks with `find -type f`, which does not follow
+symlinks, and unlinks rather than reads. With that, the claim holds: the most a compromised
+api container can ask for is the update, or the backup, the button was going to do anyway.
+
+Where that directory is comes from `SAIVA_STATE_DIR` in `.env`, and from nowhere else —
+`.env` is what docker-compose interpolates the bind mounts from, so it is the only answer
+the containers can actually see. The installer and the agent both read it from there. They
+used not to, and the cost showed up the first time it disagreed with `/etc/saiva/agent.conf`:
+the scripts wrote their record where `.env` said, the agent looked where the conf said,
+found nothing, and overwrote a perfectly good result with "the run failed silently".
 
 It is a **copy**, not a symlink into the checkout, for the same reason — otherwise every
 release could change what runs as root on your box. The cost is that it can go stale, so
@@ -183,10 +205,17 @@ On a version-pinned box this cannot happen — `v0.16.1` still means `v0.16.1`, 
 ## Where to look when something goes wrong
 
 ```bash
-./scripts/deploy.sh --status          # what the last run did, in full
-journalctl -u saiva-update.service -f # the host agent, live
-make logs                             # the API
+./scripts/deploy.sh --status           # what the last update did, in full
+./scripts/backup.sh --status           # and the last backup
+./scripts/backup.sh --self-check       # is the backup regime installed, and healthy?
+journalctl -u saiva-update.service -f  # the host agent, live
+journalctl -u saiva-backup.service -f  # the nightly backup
+make logs                              # the API
 ```
+
+The two keep separate records — `status.json` / `run.log` for updates,
+`backup-status.json` / `backup.log` for backups — so a backup's output can never turn up
+inside an update's report as "what the updater logged".
 
 The status is also at `https://<your address>/_saiva/update-status.json`, served by Caddy
 straight off the host filesystem. That route exists for one reason: it still answers when
@@ -208,15 +237,20 @@ migration ran, you get the same honest half-answer described above.
 To go back further, or to recover a box where the update never completed:
 
 ```bash
-./scripts/restore-backup.sh              # list the pre-migration dumps
+./scripts/restore-backup.sh              # list every dump: nightly, premigrate, prerestore
 ./scripts/restore-backup.sh <dump>       # restore one (destroys newer data)
 ```
+
+After this release most of that list is nightly dumps, and the newest one is usually what
+you want. [BACKUPS.md](BACKUPS.md) covers restoring from the off-box copy.
 
 ---
 
 ## What stays manual, on purpose
 
 - **Restoring a database dump.** It destroys everything written since. Not automatic.
+  *Taking* one is: a nightly timer does that, and verifies it by restoring it into a
+  throwaway database. See [BACKUPS.md](BACKUPS.md).
 - **A new setting with no safe default.** The reconcile step adds settings that have one
   and refuses the update, before anything is pulled, on one that does not.
 - **Changing the host agent.** It runs as root; a release must not be able to change it.

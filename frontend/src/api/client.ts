@@ -4,6 +4,7 @@ import type {
   AccountScanRow,
   AiModel,
   AiSettings,
+  BackupStatus,
   Benchmark,
   Budget,
   Category,
@@ -397,4 +398,12 @@ export const api = {
   runUpdate: () =>
     request<{ status: string; request_id: string }>("/admin/update", { method: "POST" }),
   updateRun: () => request<UpdateRun>("/admin/update-status"),
+  backupStatus: () => request<BackupStatus>("/admin/backup-status"),
+  // Asks the host to take one; it does not take one. The api container cannot reach the
+  // database's volume or run pg_dump, so this writes a file into the second drop-box and
+  // a root-owned agent picks it up -- the same shape as runUpdate, and for the same
+  // reason. The request_id is what distinguishes the run that follows from the one whose
+  // result is on screen when the button is pressed.
+  runBackup: () =>
+    request<{ status: string; request_id: string }>("/admin/backup", { method: "POST" }),
 };

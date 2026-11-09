@@ -79,8 +79,15 @@ services:
       # Now it reads status.json and writes one uniquely-named file into requests/. Root
       # never opens anything in there -- the agent asks `find -type f`, which does not
       # follow symlinks, and unlinks what it finds.
+      #
+      # THE SECOND DROP-BOX is how "Back up now" is told apart from "Update now" without
+      # root ever reading a byte the container wrote. The DIRECTORY carries the one bit of
+      # information, and each has its own systemd path unit. Encoding it in the request's
+      # name or contents instead would hand that bit to a process on the network, and the
+      # whole argument above rests on root never consulting one.
       - ${SAIVA_STATE_DIR:-/var/lib/saiva/update}:/run/saiva-update:ro
       - ${SAIVA_STATE_DIR:-/var/lib/saiva/update}/requests:/run/saiva-update/requests
+      - ${SAIVA_STATE_DIR:-/var/lib/saiva/update}/backup-requests:/run/saiva-update/backup-requests
 
   web:
     image: ${SAIVA_WEB_IMAGE:-${SAIVA_REGISTRY:-ghcr.io/marioalfaro75}/saiva-web:${SAIVA_VERSION:-latest}}

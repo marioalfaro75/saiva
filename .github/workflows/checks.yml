@@ -181,8 +181,12 @@ jobs:
           # history makes them fail for the wrong reason.
           fetch-depth: 0
       - name: Shell syntax
+        # scripts/tests/*.sh rather than just run.sh, which is what scripts/check-all.sh has
+        # always used: this job runs three of those suites, so a syntax error in one of them
+        # already fails it -- but it fails it forty seconds into a Postgres run with the
+        # error buried in the middle of a test log, instead of here with the filename.
         run: |
-          for f in scripts/*.sh scripts/lib/*.sh scripts/saiva-update-agent scripts/tests/run.sh; do
+          for f in scripts/*.sh scripts/lib/*.sh scripts/saiva-update-agent scripts/tests/*.sh; do
             bash -n "$f" || exit 1
           done
       - name: ShellCheck
@@ -239,6 +243,28 @@ jobs:
           PGUSER: saiva
           PGPASSWORD: saiva
         run: ./scripts/tests/test-restore-backup.sh
+      - name: Take a backup and prove it by restoring it, against real Postgres
+        # In this job rather than a new one because it needs exactly what this job already
+        # has: a real Postgres 16 server and the PGDG client step above. It cannot run
+        # without a server -- the whole suite is about what happens when a dump is replayed
+        # into a throwaway database -- and it needs the pinned 16 client for the reason that
+        # step's own comment gives: the runner's default pg_dump is newer than this server,
+        # and the dump it writes carries `SET transaction_timeout = 0`, which a 16 server
+        # rejects. Verifying a dump here IS restoring it, so every case in this suite would
+        # go red for a reason that has nothing to do with the backup.
+        #
+        # What it adds over the restore rehearsal above: that one proves a dump can be put
+        # back, this one proves the nightly path can tell a dump that can be put back from
+        # one that cannot. A --schema-only dump, a dump truncated inside a COPY block and a
+        # truncated gzip stream all have to come back red -- and the first two are measured
+        # here, not assumed, because `psql --single-transaction -v ON_ERROR_STOP=1` exits 0
+        # on both of them.
+        env:
+          PGHOST: 127.0.0.1
+          PGPORT: "5432"
+          PGUSER: saiva
+          PGPASSWORD: saiva
+        run: ./scripts/tests/test-backup.sh
 
   frontend:
     name: Frontend (lint, build, tests)

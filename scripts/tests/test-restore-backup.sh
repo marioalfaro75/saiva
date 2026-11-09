@@ -147,15 +147,36 @@ if grep -qE '^name: saiva$' "$COMPOSE"; then
 else
   bad "docker-compose.prod.yml no longer pins 'name: saiva'; the derived volume name may be wrong"
 fi
-if grep -q 'NETWORK="${PROJECT}_default"' "$RESTORE"; then
-  ok "restore-backup.sh runs its container on <project>_default"
+# Those two lines now live in scripts/lib/pg.sh, because scripts/backup.sh stands on the
+# same plumbing and two copies of a `docker run` is how one of them quietly stops joining
+# the right network. So the chain is checked in three links rather than one: the library
+# derives the names, the restore script actually sources the library, and the library still
+# holds exactly TWO `docker run` command lines -- a third runner appearing unreviewed is
+# the thing its own header promises cannot happen.
+PGLIB="$ROOT/scripts/lib/pg.sh"
+if grep -q '^\. "\$ROOT/scripts/lib/pg.sh"$' "$RESTORE"; then
+  ok "restore-backup.sh sources scripts/lib/pg.sh"
 else
-  bad "restore-backup.sh no longer joins <project>_default"
+  bad "restore-backup.sh no longer sources scripts/lib/pg.sh; the checks below read a file nothing loads"
 fi
-if grep -q 'VOLUME="${PROJECT}_db_backups"' "$RESTORE"; then
+if grep -q 'NETWORK="${PROJECT}_default"' "$PGLIB"; then
+  ok "the shared plumbing runs its container on <project>_default"
+else
+  bad "scripts/lib/pg.sh no longer joins <project>_default"
+fi
+if grep -q 'VOLUME="${PROJECT}_db_backups"' "$PGLIB"; then
   ok "and mounts <project>_db_backups, where the dumps are"
 else
-  bad "restore-backup.sh no longer mounts <project>_db_backups"
+  bad "scripts/lib/pg.sh no longer mounts <project>_db_backups"
+fi
+RUNS="$(grep -cE '^[[:space:]]*docker run ' "$PGLIB" || true)"
+if [ "$RUNS" = "2" ]; then
+  ok "scripts/lib/pg.sh still holds exactly two 'docker run' lines = $RUNS"
+else
+  bad "scripts/lib/pg.sh holds $RUNS 'docker run' lines, not 2"
+  note "every command that touches Postgres or the dumps is supposed to go through _pg_sh or"
+  note "backups_sh, so that --direct mode exercises the same code production does. A third one"
+  note "is a path no test can reach."
 fi
 if grep -qE '^ *- db_backups:/backups$' "$COMPOSE"; then
   ok "db_backups is still mounted into the api service at /backups"

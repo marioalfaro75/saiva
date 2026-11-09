@@ -11,8 +11,12 @@
 # Not covered here, and the honest limits of that:
 #   * image-smoke.yml boots the built images. That needs a Docker daemon.
 #   * The Postgres-backed suites skip when no Postgres is reachable, and say so. Point
-#     SAIVA_TEST_PG_URL / PGHOST at one to include them -- without that, the rollback and
-#     restore rehearsals are not being run, however green this looks.
+#     SAIVA_TEST_PG_URL / PGHOST at one to include them -- without that, the rollback
+#     rehearsal, the restore rehearsal and the nightly backup's verification are not
+#     being run, however green this looks. The two shell suites exit 77 when they skip,
+#     and `run` below only asks whether a command exited 0 -- so they are reported as
+#     FAILED, not skipped. Measured. That is loud rather than wrong: "I could not test
+#     the restore" belongs nearer to red than to green.
 #   * A few backend tests reach the network (the AI advisor's provider checks resolve a
 #     real host). Behind a proxy that does not resolve it they fail here and pass in CI.
 #     They are not special-cased, because a script that skips the tests it finds
@@ -51,6 +55,7 @@ else
 fi
 run "deploy path (fake docker, fake curl)" ./scripts/tests/run.sh
 run "restore round trip (needs Postgres)" ./scripts/tests/test-restore-backup.sh
+run "nightly backup and its verification (needs Postgres)" ./scripts/tests/test-backup.sh
 
 run "compose files parse" bash -c '
   SECRET_KEY=x SAIVA_SITE_ADDRESS=https://example.invalid \

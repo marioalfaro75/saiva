@@ -41,3 +41,10 @@ coverage/
 
 # TS build info
 *.tsbuildinfo
+
+# Database dumps. Nothing in this repository should ever hold one -- they are a household's
+# complete financial history, they live in the db_backups volume and in whatever off-box
+# destination is configured, and a stray `docker cp` into the checkout is how one gets
+# committed by accident.
+*.sql
+*.sql.gz

@@ -246,8 +246,13 @@ acquire_lock() {
     # Deliberately NOT `fail`: that writes a terminal status, and the run holding this
     # lock is still going. Reporting it as failed from the process that could not start
     # is the same class of mistake as the panel that reported success it could not know.
-    echo "ERROR: another update is already running on this box." >&2
-    echo "Watch it with: ./scripts/deploy.sh --status" >&2
+    #
+    # "a Saiva job", not "an update": scripts/backup.sh takes this same lock, because a
+    # nightly dump must not run while containers are being recreated and an update must
+    # not start in the middle of one. Naming only updates here would have been a small,
+    # confident falsehood on the one night both happened at once.
+    echo "ERROR: another Saiva job is already running on this box (an update, or a backup)." >&2
+    echo "Watch it with: ./scripts/deploy.sh --status  or  ./scripts/backup.sh --status" >&2
     exit 1
   fi
 }

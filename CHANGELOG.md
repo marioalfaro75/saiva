@@ -5,6 +5,49 @@ All notable changes to Saiva are documented here. The project follows
 
 ## [Unreleased]
 
+### Added
+- **Nightly backups, and they are proven rather than assumed.** A systemd timer on the host
+  dumps the database, **restores that dump into a throwaway database and compares it row for
+  row**, copies it off the box, and writes down what happened. Only a dump that came back
+  whole is called a backup. **Settings → Backups** shows the age of the newest *verified*
+  one and says so plainly when there isn't one — including the state that matters most, *a
+  dump was taken but it could not be restored*. Set it up with
+  `sudo ./scripts/install-updater.sh`, choose a destination in `/etc/saiva/agent.conf`, and
+  see `docs/BACKUPS.md`.
+
+  Why the restore rehearsal is the whole point: `psql --single-transaction -v
+  ON_ERROR_STOP=1` **exits 0** on a dump truncated inside a COPY block — it finishes the
+  COPY with whatever rows arrived and reports success. "It restored without error" is not
+  evidence that a dump is complete, so four checks run instead and a `--schema-only` dump, a
+  truncated gzip and a half-written dump are each refused.
+- **The off-box copy is measured, not assumed.** The page distinguishes *same disk*, *same
+  machine* and *off this machine*, because `stat` reports a btrfs subvolume, a ZFS dataset
+  and a Proxmox mount point as different devices while they live on the same physical disk —
+  and those are exactly the configurations a Proxmox box has. Only a network filesystem or a
+  successful push command is reported as off the machine.
+- **Back up now**, in Settings, over the same host path. It writes into a second drop-box;
+  which of the two directories a request landed in is the only information root takes from
+  the app, so the file is still never opened.
+
+### Fixed
+- **A failing update never wrote the "stopped without finishing" record it was supposed to.**
+  A bare `return` takes its status from `$?`, and bash sets `$?` to the pending exit status
+  for the duration of an EXIT trap — so `state_dir()` returned non-zero inside the trap
+  handler, `status_flush` died at its first assignment under `set -e`, and the record on
+  disk still said `running`. The panel's stale-run branch covered for it, which is why it
+  went unnoticed. Every `return` in `scripts/lib/` is now explicit.
+- **The installer and the host agent now read `SAIVA_STATE_DIR` from `.env`**, which is what
+  docker-compose interpolates the bind mounts from and therefore the only answer the
+  containers can see. They used to prefer `/etc/saiva/agent.conf`; the first time the two
+  disagreed, the agent looked for a status file where the conf said, found nothing, and
+  overwrote a good result with "the run failed silently".
+
+### Changed
+- `scripts/restore-backup.sh`'s Postgres plumbing moved to `scripts/lib/pg.sh` so the backup
+  and the restore share one set of container runners rather than two that can drift apart.
+- `make destroy` and its confirmation now say that nightly dumps go too, and that an off-box
+  copy is the only thing that survives.
+
 
 ## [0.16.0] — 2026-10-31
 

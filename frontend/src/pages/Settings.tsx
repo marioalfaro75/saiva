@@ -3,6 +3,7 @@ import { type FormEvent, useEffect, useId, useState } from "react";
 
 import { api } from "../api/client";
 import type { AiSettings } from "../api/types";
+import { BackupsPanel } from "../components/BackupsPanel";
 import { UpdatesPanel } from "../components/UpdatesPanel";
 import { PageHead } from "../components/PageHead";
 
@@ -381,6 +382,7 @@ export function Settings() {
         </div>
 
         <UpdatesPanel />
+        <BackupsPanel />
       </div>
     </div>
   );

@@ -3,6 +3,7 @@
 from functools import lru_cache
 from typing import Literal
 
+from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -68,6 +69,28 @@ class Settings(BaseSettings):
     # a cached settings object would hold a stale yes. Empty or missing means in-app
     # updates are not set up on this box, which is a normal state the panel reports
     # plainly.
+
+    # Nightly backups
+    #
+    # How old the newest VERIFIED backup may be before Settings stops calling it current.
+    # It is a setting rather than a constant because the page must not hold a second copy
+    # of the number: the regime that enforces it runs on the host, out of .env, and a UI
+    # with its own threshold would call a backup current for a window the host does not
+    # agree with. The API hands this to the page instead.
+    #
+    # The alias is not decoration. Every knob the host shell and compose share is
+    # SAIVA_-prefixed in .env (SAIVA_STATE_DIR, SAIVA_BACKUP_DIR, SAIVA_VERSION), and the
+    # field name here has no prefix to match, so without the alias pydantic-settings would
+    # look up BACKUP_STALE_HOURS -- a variable nothing sets -- and silently use 36 on a box
+    # whose .env had chosen 12. The other SAIVA_-prefixed settings carry the prefix in
+    # their field names instead (saiva_version); either way the string in .env is the one
+    # thing that must not drift.
+    #
+    # The rest of the backup configuration is deliberately NOT here. The destination path
+    # and the copy command live in /etc/saiva/agent.conf, because scripts/backup.sh runs
+    # them as root: a path read from .env would let anyone who can write the checkout have
+    # root create files where they chose, and a command read from it would simply be root.
+    backup_stale_hours: int = Field(36, validation_alias="SAIVA_BACKUP_STALE_HOURS")
 
     # Email / SMTP for notifications & digests. An empty host disables all email.
     smtp_host: str = ""

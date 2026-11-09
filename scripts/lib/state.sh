@@ -47,13 +47,29 @@
 # and that interpolation can disagree, the deploy writes its status somewhere nothing
 # mounts and the panel reports "no update has ever run" after every successful update.
 # Reading .env second is what keeps the two in step, because .env is what compose reads.
+#
+# Every `return` below says `return 0` explicitly, and that is not style. A BARE `return`
+# takes its status from $?, and bash sets $? to the PENDING EXIT STATUS for the duration
+# of an EXIT trap -- so inside a trap handler a bare `return` hands back the status of
+# whatever killed the script, however well the function itself did. Measured: with the
+# shell exiting 1, `[ -n "$SAIVA_STATE_DIR" ]` returns 0, the `printf` returns 0, and the
+# function still returns 1.
+#
+# That is enough to break the thing the trap exists for. `status_flush` begins
+# `dir="$(state_dir)"`, a bare assignment takes the substitution's status, and under
+# `set -e` the handler dies there -- after updating the .kv and before re-rendering the
+# JSON. The record on disk then still says `running`, which is precisely the "a run that
+# stops without saying so leaves yesterday's answer standing" failure both
+# _finalise_on_exit functions were written to prevent. It was invisible because
+# status_get/status_set reach state_dir through a `printf`, whose own status is 0 whatever
+# its arguments did.
 state_dir() {
-  if [ -n "${SAIVA_STATE_DIR:-}" ]; then printf '%s' "$SAIVA_STATE_DIR"; return; fi
+  if [ -n "${SAIVA_STATE_DIR:-}" ]; then printf '%s' "$SAIVA_STATE_DIR"; return 0; fi
   local from_env=""
   [ -f "$(env_path)" ] && from_env="$(env_get SAIVA_STATE_DIR "$(env_path)")"
-  if [ -n "$from_env" ]; then printf '%s' "$from_env"; return; fi
+  if [ -n "$from_env" ]; then printf '%s' "$from_env"; return 0; fi
   if [ -d /var/lib/saiva/update ] || [ -w /var/lib ]; then
-    printf '%s' /var/lib/saiva/update; return
+    printf '%s' /var/lib/saiva/update; return 0
   fi
   # A developer checkout with no installer run and no write access to /var/lib. Keeps
   # everything inside the working tree; .gitignore covers it so the release path's
@@ -82,9 +98,15 @@ state_dir() {
 # a compromised api container can ask for is an update" true rather than merely intended.
 requests_dir() { printf '%s/requests' "$(state_dir)"; }
 
+# The SECOND drop-box, for "Back up now". A separate directory rather than a flag inside
+# the request, because the whole argument above rests on root never reading a byte the
+# container wrote: the DIRECTORY carries the one bit of information, each has its own
+# systemd path unit, and `find -type f` is still the only thing that ever looks inside.
+backup_requests_dir() { printf '%s/backup-requests' "$(state_dir)"; }
+
 state_init() {
   local dir; dir="$(state_dir)"
-  mkdir -p "$dir" "$dir/records" "$(requests_dir)"
+  mkdir -p "$dir" "$dir/records" "$(requests_dir)" "$(backup_requests_dir)"
   chmod 0700 "$dir/records" 2>/dev/null || true
 }
 
@@ -95,7 +117,16 @@ state_init() {
 # dependency on jq (not installed on every box) and no string surgery on JSON in bash,
 # which is where this kind of script usually acquires its first quoting bug.
 
-_status_file() { printf '%s/status.kv' "$(state_dir)"; }
+# WHICH status is being written. The update path leaves this unset and gets `status.kv` /
+# `status.json` / `status-public.json` exactly as before; scripts/backup.sh sets it to
+# `backup-status` and gets the same renderer, the same atomic rename and the same
+# json_escape -- which is the whole reason this is parameterised rather than copied. That
+# escape function is the one piece of this file that took a real failure to get right (a
+# compose error carrying an ANSI escape produced invalid JSON in BOTH status files at
+# once), and a second hand-rolled copy of it in another script is how that comes back.
+_status_kind() { printf '%s' "${SAIVA_STATUS_KIND:-status}"; }
+
+_status_file() { printf '%s/%s.kv' "$(state_dir)" "$(_status_kind)"; }
 
 status_set() { # KEY VALUE
   local key="$1" value="$2" file tmp
@@ -136,7 +167,9 @@ json_escape() { # stdin -> a JSON string body (no surrounding quotes)
 
 _json_kv() { # KEY VALUE -> "key": "value" or "key": null
   local key="$1" value="$2"
-  if [ -z "$value" ]; then printf '  "%s": null' "$key"; return; fi
+  # `return 0`, not `return`: see state_dir's comment. _json_kv is called from
+  # _render_status, which status_flush calls from inside an EXIT trap.
+  if [ -z "$value" ]; then printf '  "%s": null' "$key"; return 0; fi
   printf '  "%s": "%s"' "$key" "$(printf '%s' "$value" | json_escape)"
 }
 
@@ -152,6 +185,29 @@ SAIVA_STATUS_FIELDS=(
 SAIVA_STATUS_PUBLIC_FIELDS=(
   run_id phase step started_at finished_at message from_version to_version
 )
+# What a BACKUP run records. Three groups, and the split is the point:
+#
+#   this run        phase step trigger run_id started_at finished_at message exit_code
+#   what it made    dump_name dump_bytes dump_revision verified verify_message rows_checked
+#   carried over    last_success_at last_verified_at offsite* backup_count oldest_at kept
+#
+# The carried-over group survives a failed run on purpose. "The backup failed last night"
+# and "there is no backup" are different sentences, and a regime that forgets the second
+# one the moment the first happens cannot tell the owner which they are in. backup_begin()
+# clears the first two groups and leaves the third alone.
+#
+# There is deliberately NO public rendering of this. The update status is public because
+# reading "failed at the gate, rolled back" from a browser when the api container is down
+# is worth more than disclosing which release a box runs. Nothing about backups has that
+# property: the age of a household's last backup is reconnaissance, and it is never the
+# thing you need while the app is down.
+SAIVA_BACKUP_STATUS_FIELDS=(
+  run_id phase step trigger started_at finished_at message exit_code
+  dump_name dump_bytes dump_revision verified verify_message rows_checked
+  last_success_at last_verified_at
+  offsite offsite_target offsite_at offsite_message
+  backup_count oldest_at kept pruned
+)
 
 _render_status() { # FIELD... -> JSON on stdout
   local first=1 field
@@ -165,14 +221,19 @@ _render_status() { # FIELD... -> JSON on stdout
   printf '\n}\n'
 }
 
-status_flush() { # render both JSON files, atomically
-  local dir; dir="$(state_dir)"
+status_flush() { # render the JSON file(s) for this kind, atomically
+  local dir kind; dir="$(state_dir)"; kind="$(_status_kind)"
   mkdir -p "$dir"
-  _render_status "${SAIVA_STATUS_FIELDS[@]}" > "$dir/.status.json.$$"
+  local -a fields
+  case "$kind" in
+    backup-status) fields=("${SAIVA_BACKUP_STATUS_FIELDS[@]}") ;;
+    *)             fields=("${SAIVA_STATUS_FIELDS[@]}") ;;
+  esac
+  _render_status "${fields[@]}" > "$dir/.$kind.json.$$"
   # The log tail goes only into the private record, appended as a JSON array so the
   # panel can show it without a second request.
-  if [ -f "$dir/run.log" ]; then
-    python3 - "$dir/.status.json.$$" "$dir/run.log" <<'PY' 2>/dev/null || true
+  if [ -f "$dir/$(_log_name)" ]; then
+    python3 - "$dir/.$kind.json.$$" "$dir/$(_log_name)" <<'PY' 2>/dev/null || true
 import json, sys
 status_path, log_path = sys.argv[1], sys.argv[2]
 with open(status_path) as fh:
@@ -184,14 +245,18 @@ with open(status_path, "w") as fh:
     fh.write("\n")
 PY
   fi
-  mv -f "$dir/.status.json.$$" "$dir/status.json"
-  _render_status "${SAIVA_STATUS_PUBLIC_FIELDS[@]}" > "$dir/.status-public.json.$$"
-  mv -f "$dir/.status-public.json.$$" "$dir/status-public.json"
+  mv -f "$dir/.$kind.json.$$" "$dir/$kind.json"
   # World-readable: Caddy serves the public one, and the api container reads the private
   # one through a read-only mount. Neither contains a secret -- the private one carries
   # the deploy's log tail, which the API only ever returns to an authenticated owner.
-  chmod 0644 "$dir/status.json" "$dir/status-public.json" 2>/dev/null || true
-  chmod 0640 "$dir/run.log" 2>/dev/null || true
+  chmod 0644 "$dir/$kind.json" 2>/dev/null || true
+  chmod 0640 "$dir/$(_log_name)" 2>/dev/null || true
+  # Only the update status has a public face. See SAIVA_BACKUP_STATUS_FIELDS for why the
+  # backup status deliberately has none.
+  [ "$kind" = "status" ] || return 0
+  _render_status "${SAIVA_STATUS_PUBLIC_FIELDS[@]}" > "$dir/.status-public.json.$$"
+  mv -f "$dir/.status-public.json.$$" "$dir/status-public.json"
+  chmod 0644 "$dir/status-public.json" 2>/dev/null || true
 }
 
 status_step() { # STEP [MESSAGE] -- advance and publish in one call
@@ -211,9 +276,19 @@ status_finish() { # PHASE MESSAGE EXIT_CODE
 
 now() { date -u +%Y-%m-%dT%H:%M:%SZ; }
 
+# One log per kind of run. Without this a nightly backup would append to run.log and its
+# lines would be quoted back inside the UPDATE's status as "what the updater logged",
+# which is a small lie of exactly the kind this whole design exists to remove.
+_log_name() {
+  case "$(_status_kind)" in
+    backup-status) printf 'backup.log' ;;
+    *)             printf 'run.log' ;;
+  esac
+}
+
 log() { # to the terminal and to the run log the status file quotes
   printf '%s\n' "$*"
-  printf '%s %s\n' "$(now)" "$*" >> "$(state_dir)/run.log" 2>/dev/null || true
+  printf '%s %s\n' "$(now)" "$*" >> "$(state_dir)/$(_log_name)" 2>/dev/null || true
 }
 
 # --- the rollback record ----------------------------------------------------------

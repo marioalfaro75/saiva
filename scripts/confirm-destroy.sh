@@ -25,16 +25,20 @@ describe() {
 
     saiva_db_data      the household's ledger — accounts, transactions, budgets,
                        categories, logins, audit log. Everything.
-    saiva_db_backups   EVERY pre-migration pg_dump the API has written. Those dumps are
-                       what a restore reads FROM, and they live inside this volume, not
-                       on the host filesystem, so they go with it. Afterwards there is
-                       nothing left to roll back to.
+    saiva_db_backups   EVERY dump: the nightly ones scripts/backup.sh takes and verifies,
+                       the pre-migration ones the api writes, and the pre-restore ones.
+                       They are what a restore reads FROM, and they live inside this
+                       volume rather than on the host filesystem, so they go with it.
+                       An OFF-BOX copy, if one is configured, survives this. That is the
+                       only thing that will. Check it is current before you type the word:
+                       ./scripts/backup.sh --status names the destination and says how
+                       recent the last verified copy is.
     saiva_caddy_data   Caddy's internal CA and the certificates it issued. Devices that
                        were taught to trust the old root CA will warn again.
     saiva_caddy_config
 
-  Docker keeps no copy of a removed volume. To keep the backups, copy them out first —
-  this works whether or not the stack is running:
+  Docker keeps no copy of a removed volume. To keep the dumps, copy them out first — this
+  works whether or not the stack is running:
 
     docker run --rm -v saiva_db_backups:/b -v "$PWD":/out alpine \
       tar czf /out/saiva-backups.tar.gz -C /b .
