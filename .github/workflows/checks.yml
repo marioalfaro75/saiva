@@ -110,8 +110,26 @@ jobs:
               || { . /etc/os-release
                    echo "deb http://apt.postgresql.org/pub/repos/apt ${VERSION_CODENAME}-pgdg main" \
                      | sudo tee /etc/apt/sources.list.d/pgdg.list >/dev/null
-                   curl -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc \
-                     | sudo gpg --dearmor -o /usr/share/keyrings/pgdg.gpg
+                   # postgresql.org has handed this step a mid-TLS-read EOF often enough
+                   # to redden a build, and piping curl straight into gpg reports it two
+                   # commands later as `gpg: no valid OpenPGP data found` -- which reads
+                   # like a corrupt key rather than a download that stopped early. So
+                   # retry, keep the bytes in a file, and look at them before gpg does.
+                   key="$(mktemp)"
+                   for attempt in 1 2 3; do
+                     curl -fsSL --retry 3 --retry-all-errors --retry-delay 2 \
+                       --max-time 60 -o "$key" \
+                       https://www.postgresql.org/media/keys/ACCC4CF8.asc && break
+                     echo "PGDG key fetch failed (attempt $attempt of 3)" >&2
+                     [ "$attempt" = 3 ] || sleep $((attempt * 5))
+                   done
+                   grep -q 'BEGIN PGP PUBLIC KEY BLOCK' "$key" || {
+                     echo "could not download the PGDG signing key from postgresql.org;" \
+                          "this is their end, not the change under test" >&2
+                     exit 1
+                   }
+                   sudo gpg --batch --yes --dearmor -o /usr/share/keyrings/pgdg.gpg <"$key"
+                   rm -f "$key"
                    sudo sed -i 's|deb |deb [signed-by=/usr/share/keyrings/pgdg.gpg] |' \
                      /etc/apt/sources.list.d/pgdg.list
                    sudo apt-get update -qq
@@ -221,8 +239,26 @@ jobs:
               || { . /etc/os-release
                    echo "deb http://apt.postgresql.org/pub/repos/apt ${VERSION_CODENAME}-pgdg main" \
                      | sudo tee /etc/apt/sources.list.d/pgdg.list >/dev/null
-                   curl -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc \
-                     | sudo gpg --dearmor -o /usr/share/keyrings/pgdg.gpg
+                   # postgresql.org has handed this step a mid-TLS-read EOF often enough
+                   # to redden a build, and piping curl straight into gpg reports it two
+                   # commands later as `gpg: no valid OpenPGP data found` -- which reads
+                   # like a corrupt key rather than a download that stopped early. So
+                   # retry, keep the bytes in a file, and look at them before gpg does.
+                   key="$(mktemp)"
+                   for attempt in 1 2 3; do
+                     curl -fsSL --retry 3 --retry-all-errors --retry-delay 2 \
+                       --max-time 60 -o "$key" \
+                       https://www.postgresql.org/media/keys/ACCC4CF8.asc && break
+                     echo "PGDG key fetch failed (attempt $attempt of 3)" >&2
+                     [ "$attempt" = 3 ] || sleep $((attempt * 5))
+                   done
+                   grep -q 'BEGIN PGP PUBLIC KEY BLOCK' "$key" || {
+                     echo "could not download the PGDG signing key from postgresql.org;" \
+                          "this is their end, not the change under test" >&2
+                     exit 1
+                   }
+                   sudo gpg --batch --yes --dearmor -o /usr/share/keyrings/pgdg.gpg <"$key"
+                   rm -f "$key"
                    sudo sed -i 's|deb |deb [signed-by=/usr/share/keyrings/pgdg.gpg] |' \
                      /etc/apt/sources.list.d/pgdg.list
                    sudo apt-get update -qq
