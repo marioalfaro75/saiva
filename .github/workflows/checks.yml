@@ -91,10 +91,216 @@ jobs:
         with:
           python-version: "3.11"
       - run: pip install -e ".[dev]"
+      - name: Use the Postgres 16 client, not whatever the runner defaults to
+        # Debian's /usr/bin/pg_dump is pg_wrapper, which picks the HIGHEST installed
+        # client version -- and the runner ships a newer one than the 16 server these
+        # jobs use. The symptoms are two different confusing failures rather than one
+        # clear one: pg_dump refuses outright on a server/client mismatch, and a dump
+        # that does get written carries `SET transaction_timeout = 0`, which a 16 server
+        # rejects at restore time, so the restore "succeeds" into an empty database.
+        #
+        # The production image pins postgresql-client-16 from PGDG for exactly this
+        # reason (see backend/Dockerfile), so matching it here also means CI exercises
+        # the same client the box runs.
+        run: |
+          set -euo pipefail
+          if [ ! -x /usr/lib/postgresql/16/bin/pg_dump ]; then
+            sudo apt-get update -qq
+            sudo apt-get install -y -qq postgresql-client-16 \
+              || { . /etc/os-release
+                   echo "deb http://apt.postgresql.org/pub/repos/apt ${VERSION_CODENAME}-pgdg main" \
+                     | sudo tee /etc/apt/sources.list.d/pgdg.list >/dev/null
+                   # postgresql.org has handed this step a mid-TLS-read EOF often enough
+                   # to redden a build, and piping curl straight into gpg reports it two
+                   # commands later as `gpg: no valid OpenPGP data found` -- which reads
+                   # like a corrupt key rather than a download that stopped early. So
+                   # retry, keep the bytes in a file, and look at them before gpg does.
+                   key="$(mktemp)"
+                   for attempt in 1 2 3; do
+                     curl -fsSL --retry 3 --retry-all-errors --retry-delay 2 \
+                       --max-time 60 -o "$key" \
+                       https://www.postgresql.org/media/keys/ACCC4CF8.asc && break
+                     echo "PGDG key fetch failed (attempt $attempt of 3)" >&2
+                     [ "$attempt" = 3 ] || sleep $((attempt * 5))
+                   done
+                   grep -q 'BEGIN PGP PUBLIC KEY BLOCK' "$key" || {
+                     echo "could not download the PGDG signing key from postgresql.org;" \
+                          "this is their end, not the change under test" >&2
+                     exit 1
+                   }
+                   sudo gpg --batch --yes --dearmor -o /usr/share/keyrings/pgdg.gpg <"$key"
+                   rm -f "$key"
+                   sudo sed -i 's|deb |deb [signed-by=/usr/share/keyrings/pgdg.gpg] |' \
+                     /etc/apt/sources.list.d/pgdg.list
+                   sudo apt-get update -qq
+                   sudo apt-get install -y -qq postgresql-client-16; }
+          fi
+          echo "/usr/lib/postgresql/16/bin" >> "$GITHUB_PATH"
+      - name: The client really is 16
+        run: |
+          pg_dump --version
+          pg_dump --version | grep -q ' 16\.' || {
+            echo "pg_dump is not 16; the dumps it writes will not restore into the 16 server" >&2
+            exit 1
+          }
       - name: Apply migrations (must succeed on Postgres)
         run: alembic upgrade head
       - name: Check migrations match models (no drift)
         run: alembic check
+      - name: An image rolled back onto a newer schema must serve, not crash-loop
+        # The job that did not exist, and the one whose absence meant the retained-image
+        # rollback was never going to work. It boots this image's start-up migration
+        # against a database at a revision the image has never heard of -- which is
+        # exactly what an image rollback is -- and asserts it serves, writes no dump and
+        # changes nothing. Before this, that path raised CommandError, uvicorn never ran
+        # because the container's CMD chains them with `&&`, and `restart:
+        # unless-stopped` looped forever while writing a full copy of the database on
+        # every attempt.
+        #
+        # It needs real Postgres: the backup branch is guarded on the dialect, and the
+        # dump amplification is the whole point. On SQLite it would prove nothing.
+        env:
+          SAIVA_TEST_PG_URL: postgresql+psycopg://saiva:saiva@localhost:5432/postgres
+        run: pytest tests/test_schema_rollback.py -v
+      - name: Migrations stay expand-only
+        # The guarantee above is only safe to promise while new migrations keep adding
+        # rather than removing. This enforces the 12-for-12 habit the repository already
+        # had, so it cannot quietly stop being true.
+        run: pytest tests/test_migrations_expand_only.py -v
+
+  deploy-scripts:
+    name: Deploy path (shell, fake docker)
+    runs-on: ubuntu-latest
+    # The restore rehearsal below needs a real Postgres: the dumps are plain SQL replayed
+    # with psql, and the whole point of the test is that the round trip actually works.
+    # An earlier version of this job ran that step with no database at all, so it failed
+    # on every run -- which is worse than not running it, because a step that is always
+    # red stops being read.
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: saiva
+          POSTGRES_PASSWORD: saiva
+          POSTGRES_DB: postgres
+        ports:
+          - "5432:5432"
+        options: >-
+          --health-cmd "pg_isready -U saiva"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.ref }}
+          # The release path does `git fetch --tags` and `git checkout --detach`, and the
+          # tests build their own origin out of this checkout, so a shallow clone with no
+          # history makes them fail for the wrong reason.
+          fetch-depth: 0
+      - name: Shell syntax
+        # scripts/tests/*.sh rather than just run.sh, which is what scripts/check-all.sh has
+        # always used: this job runs three of those suites, so a syntax error in one of them
+        # already fails it -- but it fails it forty seconds into a Postgres run with the
+        # error buried in the middle of a test log, instead of here with the filename.
+        run: |
+          for f in scripts/*.sh scripts/lib/*.sh scripts/saiva-update-agent scripts/tests/*.sh; do
+            bash -n "$f" || exit 1
+          done
+      - name: ShellCheck
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq shellcheck
+          shellcheck -S warning scripts/*.sh scripts/lib/*.sh scripts/saiva-update-agent
+      - name: Deploy state machine (fake docker, fake curl)
+        # Gate, rollback, re-exec, .env idempotence and the downgrade refusal, none of
+        # which needs a daemon. What it cannot cover -- whether a real `compose up`
+        # produces a working stack -- is what image-smoke.yml is for.
+        run: ./scripts/tests/run.sh
+      - name: A bare deploy must not rewrite .env
+        # Spelled out as its own step because this one defect took the production site
+        # off the LAN, and a line in a 22-test summary is easy to miss.
+        run: ./scripts/tests/run.sh env_is_byte_identical
+      - name: Use the Postgres 16 client, not whatever the runner defaults to
+        # Debian's /usr/bin/pg_dump is pg_wrapper, which picks the HIGHEST installed
+        # client version -- and the runner ships a newer one than the 16 server these
+        # jobs use. The symptoms are two different confusing failures rather than one
+        # clear one: pg_dump refuses outright on a server/client mismatch, and a dump
+        # that does get written carries `SET transaction_timeout = 0`, which a 16 server
+        # rejects at restore time, so the restore "succeeds" into an empty database.
+        #
+        # The production image pins postgresql-client-16 from PGDG for exactly this
+        # reason (see backend/Dockerfile), so matching it here also means CI exercises
+        # the same client the box runs.
+        run: |
+          set -euo pipefail
+          if [ ! -x /usr/lib/postgresql/16/bin/pg_dump ]; then
+            sudo apt-get update -qq
+            sudo apt-get install -y -qq postgresql-client-16 \
+              || { . /etc/os-release
+                   echo "deb http://apt.postgresql.org/pub/repos/apt ${VERSION_CODENAME}-pgdg main" \
+                     | sudo tee /etc/apt/sources.list.d/pgdg.list >/dev/null
+                   # postgresql.org has handed this step a mid-TLS-read EOF often enough
+                   # to redden a build, and piping curl straight into gpg reports it two
+                   # commands later as `gpg: no valid OpenPGP data found` -- which reads
+                   # like a corrupt key rather than a download that stopped early. So
+                   # retry, keep the bytes in a file, and look at them before gpg does.
+                   key="$(mktemp)"
+                   for attempt in 1 2 3; do
+                     curl -fsSL --retry 3 --retry-all-errors --retry-delay 2 \
+                       --max-time 60 -o "$key" \
+                       https://www.postgresql.org/media/keys/ACCC4CF8.asc && break
+                     echo "PGDG key fetch failed (attempt $attempt of 3)" >&2
+                     [ "$attempt" = 3 ] || sleep $((attempt * 5))
+                   done
+                   grep -q 'BEGIN PGP PUBLIC KEY BLOCK' "$key" || {
+                     echo "could not download the PGDG signing key from postgresql.org;" \
+                          "this is their end, not the change under test" >&2
+                     exit 1
+                   }
+                   sudo gpg --batch --yes --dearmor -o /usr/share/keyrings/pgdg.gpg <"$key"
+                   rm -f "$key"
+                   sudo sed -i 's|deb |deb [signed-by=/usr/share/keyrings/pgdg.gpg] |' \
+                     /etc/apt/sources.list.d/pgdg.list
+                   sudo apt-get update -qq
+                   sudo apt-get install -y -qq postgresql-client-16; }
+          fi
+          echo "/usr/lib/postgresql/16/bin" >> "$GITHUB_PATH"
+      - name: The client really is 16
+        run: |
+          pg_dump --version
+          pg_dump --version | grep -q ' 16\.' || {
+            echo "pg_dump is not 16; the dumps it writes will not restore into the 16 server" >&2
+            exit 1
+          }
+      - name: Restore from a dump, against real Postgres
+        env:
+          PGHOST: 127.0.0.1
+          PGPORT: "5432"
+          PGUSER: saiva
+          PGPASSWORD: saiva
+        run: ./scripts/tests/test-restore-backup.sh
+      - name: Take a backup and prove it by restoring it, against real Postgres
+        # In this job rather than a new one because it needs exactly what this job already
+        # has: a real Postgres 16 server and the PGDG client step above. It cannot run
+        # without a server -- the whole suite is about what happens when a dump is replayed
+        # into a throwaway database -- and it needs the pinned 16 client for the reason that
+        # step's own comment gives: the runner's default pg_dump is newer than this server,
+        # and the dump it writes carries `SET transaction_timeout = 0`, which a 16 server
+        # rejects. Verifying a dump here IS restoring it, so every case in this suite would
+        # go red for a reason that has nothing to do with the backup.
+        #
+        # What it adds over the restore rehearsal above: that one proves a dump can be put
+        # back, this one proves the nightly path can tell a dump that can be put back from
+        # one that cannot. A --schema-only dump, a dump truncated inside a COPY block and a
+        # truncated gzip stream all have to come back red -- and the first two are measured
+        # here, not assumed, because `psql --single-transaction -v ON_ERROR_STOP=1` exits 0
+        # on both of them.
+        env:
+          PGHOST: 127.0.0.1
+          PGPORT: "5432"
+          PGUSER: saiva
+          PGPASSWORD: saiva
+        run: ./scripts/tests/test-backup.sh
 
   frontend:
     name: Frontend (lint, build, tests)

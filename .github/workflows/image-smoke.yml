@@ -1,0 +1,395 @@
+name: Image smoke
+
+# Boot the built images and prove they work. Called by the two paths that write the
+# release channel: cut-release.yml and refresh-images.yml.
+#
+# This is the only suite in the repository that executes a built image. checks.yml runs
+# pytest on a runner via setup-python and never touches a container, and the build-time
+# `RUN python -c "import app.main, app.dbinit"` in backend/Dockerfile proves the modules
+# import and nothing beyond that. Everything asserted below — it binds, it migrates, it
+# answers, a restart is a no-op, pg_dump still works — used to live inside
+# refresh-images.yml, which runs weekly against the release *tag*. So the one suite that
+# proved an image could deploy ran on a channel production does not follow, and the path
+# that actually moves `:latest` ran none of it.
+#
+# Extracted as a workflow_call rather than copied so there is one definition of "this
+# image works". Two copies drift, and the copy that would have drifted is the one nobody
+# watches.
+#
+# What is NOT gated by this, and why. ci.yml publishes `edge` and `sha-<short>` without
+# calling this workflow. Two reasons, one practical and one deliberate. The practical
+# one: ci.yml rebuilds only the image whose directory changed, so on a backend-only push
+# there is no new web manifest to pass, and this workflow requires both — making the
+# inputs optional would mean a gate that sometimes checks one image and reports the same
+# green either way. The deliberate one: `edge` is documented as "the latest green build
+# of main (continuous)", a channel someone opts into knowing it is not a release, and it
+# is not what docker-compose.prod.yml follows by default. If `edge` ever becomes the
+# channel the house runs, this is the gate it needs, and the missing piece is resolving
+# the unchanged image's current digest so both inputs can still be filled.
+#
+# Deliberately takes images rather than building them. Both callers have already pushed
+# the manifest they are about to publish, and the value of this gate is that the bytes it
+# boots are the bytes that get promoted. A build here would be a second resolution of
+# `FROM python:3.11-slim-bookworm` — the very thing refresh-images.yml exists because it
+# moves — so the tested image and the published image could differ by a base layer.
+on:
+  workflow_call:
+    inputs:
+      api_image:
+        # A digest, not a tag, and the first step of each job refuses anything else. Tags
+        # move: `:refresh-candidate` is overwritten by every refresh run, and anything
+        # with `packages: write` can rewrite the rest. A smoke test that booted a
+        # different image from the one that gets promoted would be worse than having no
+        # smoke test at all, because it reports success.
+        description: "Digest-pinned saiva-api image, e.g. ghcr.io/owner/saiva-api@sha256:..."
+        required: true
+        type: string
+      web_image:
+        description: "Digest-pinned saiva-web image, e.g. ghcr.io/owner/saiva-web@sha256:..."
+        required: true
+        type: string
+      expect_version:
+        # What the caller passed as the SAIVA_VERSION build-arg, checked against the env
+        # actually baked into the image. A dropped or mis-wired build-arg is precisely how
+        # the `edge` and `sha-<short>` images came to report their version as the string
+        # `edge`: ci.yml passed `steps.meta.outputs.version`, which is the *primary* tag,
+        # to a build that pushed both tags. `parse_version` in
+        # backend/app/services/updates.py returns None for anything non-semver and
+        # `is_newer` returns False when either side is None, so the update badge was
+        # permanently dark on every box pinned to either tag and the panel said "You're on
+        # the latest version" while meaning "I cannot tell". Nothing failed when that
+        # happened. This is what fails now.
+        #
+        # Blank skips the check, for a caller that does not bake a version it can name.
+        description: "The semver the caller baked as SAIVA_VERSION (blank = do not check)"
+        required: false
+        type: string
+        default: ""
+
+# No checkout happens here, so nothing needs `contents`. `packages: read` is for pulling
+# the candidate back out of GHCR, which may be a private package.
+#
+# Each caller's `uses:` job has to grant at least this much explicitly. A called
+# workflow's token can only be narrower than the caller's, and both callers set
+# `permissions: contents: read` at the workflow level — which leaves every other scope at
+# none, `packages` included — so inheriting would leave this workflow unable to pull.
+# Nothing here needs `secrets: inherit`: GITHUB_TOKEN is always available to a called
+# workflow, and inheriting would hand this workflow every other secret in the repository
+# for no reason.
+permissions:
+  packages: read
+
+jobs:
+  api:
+    name: saiva-api boots, migrates, restarts and can back up
+    runs-on: ubuntu-latest
+    services:
+      # Same image and options as the `migrations` job in checks.yml. The point of this
+      # job is that the *container* boots, and this image cannot boot without a Postgres
+      # to migrate: its CMD is `python -m app.dbinit && uvicorn ...`.
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: saiva
+          POSTGRES_PASSWORD: saiva
+          POSTGRES_DB: saiva
+        ports:
+          - "5432:5432"
+        options: >-
+          --health-cmd "pg_isready -U saiva"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      IMAGE: saiva-api:candidate
+      IMAGE_REF: ${{ inputs.api_image }}
+      EXPECT_VERSION: ${{ inputs.expect_version }}
+      DB_URL: postgresql+psycopg://saiva:saiva@127.0.0.1:5432/saiva
+    steps:
+      - name: Log in to GHCR
+        uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Pull the exact image the caller is about to publish
+        run: |
+          set -euo pipefail
+          case "$IMAGE_REF" in
+            *@sha256:*) ;;
+            *)
+              echo "::error::'$IMAGE_REF' is not digest-pinned. This gate only means"
+              echo "::error::something if the image it boots cannot change between here"
+              echo "::error::and the promote. Pass name@sha256:..., not a tag."
+              exit 1
+              ;;
+          esac
+          # The pull resolves this runner's architecture out of the manifest list, so what
+          # runs below is linux/amd64. The arm64 half of the index is built but never
+          # executed anywhere; see the build jobs in the callers, which say so.
+          docker pull "$IMAGE_REF"
+          docker tag "$IMAGE_REF" "$IMAGE"
+
+      - name: The image can say which build it is
+        run: |
+          set -euo pipefail
+          # Read out of the image config rather than out of a running container, so this
+          # works on any tree that has ever had the ARG and does not depend on the shape
+          # of /api/health (which differs between releases).
+          env_of() {
+            docker inspect -f '{{range .Config.Env}}{{println .}}{{end}}' "$IMAGE" \
+              | sed -n "s/^$1=//p"
+          }
+          version="$(env_of SAIVA_VERSION)"
+          build="$(env_of SAIVA_BUILD)"
+          echo "SAIVA_VERSION=${version:-<unset>}  SAIVA_BUILD=${build:-<unset>}"
+          if [ -n "$EXPECT_VERSION" ] && [ "$version" != "$EXPECT_VERSION" ]; then
+            echo "::error::this image reports SAIVA_VERSION='$version' but the caller"
+            echo "::error::built it as '$EXPECT_VERSION'. The build-arg did not reach the"
+            echo "::error::image, so the running app cannot tell which release it is and"
+            echo "::error::the in-app update check is dark. Not publishing it."
+            exit 1
+          fi
+          if [ -z "$build" ]; then
+            # A warning and not a failure, on purpose: SAIVA_BUILD is the immutable build
+            # identity (`sha-1a2b3c4`, or `v0.16.0-patch.<date>` for a refresh) and
+            # backend/Dockerfile has to declare `ARG SAIVA_BUILD` before any caller can
+            # bake one. Until it does, the build-arg the callers pass is dropped with a
+            # warning from BuildKit and the image cannot name the exact digest it is — so
+            # `/api/health` cannot report it and a rollback cannot name what it went back
+            # to. Failing here instead would block every release on a file this workflow
+            # does not own.
+            echo "::warning::this image carries no SAIVA_BUILD, so it cannot name the"
+            echo "::warning::exact build it is. Add 'ARG SAIVA_BUILD' + 'ENV"
+            echo "::warning::SAIVA_BUILD=\$SAIVA_BUILD' to backend/Dockerfile."
+          fi
+
+      - name: It has a HEALTHCHECK to wait on
+        run: |
+          set -euo pipefail
+          # Checked before booting because the next step waits on docker's health status.
+          # Without this, an image that lost its HEALTHCHECK polls for the full three
+          # minutes and then reports "never became healthy (last status: gone)", which
+          # sends the reader looking for a crash that never happened.
+          if [ -z "$(docker inspect -f '{{if .Config.Healthcheck}}yes{{end}}' "$IMAGE")" ]; then
+            echo "::error::this image declares no HEALTHCHECK. compose's --wait and"
+            echo "::error::whatever recreates containers on the box both read it, so"
+            echo "::error::without one every deployment gate on the way to the house"
+            echo "::error::passes on 'the container started'."
+            exit 1
+          fi
+
+      - name: Cold start — boot the image and wait for its own HEALTHCHECK
+        run: |
+          set -euo pipefail
+          # Generated, not a literal: ENVIRONMENT=production makes check_production_secrets
+          # refuse any key under 32 characters, and a 48-byte base64 literal sitting in a
+          # workflow file is also exactly what the gitleaks job in checks.yml is there to
+          # shout about.
+          secret="$(head -c 48 /dev/urandom | base64 | tr -d '\n')"
+          # --network host so the container reaches the service container's published 5432
+          # on 127.0.0.1 and the runner can reach uvicorn's 8000 the same way.
+          docker run -d --name saiva-smoke --network host \
+            -e DATABASE_URL="$DB_URL" \
+            -e SECRET_KEY="$secret" \
+            -e ENVIRONMENT=production \
+            "$IMAGE"
+          # Waiting on docker's health status rather than curling ourselves, because that
+          # executes the HEALTHCHECK baked into the image — stdlib urllib, which is one of
+          # the things the pip/setuptools strip could have broken, and the only signal
+          # compose's `--wait` and the thing that recreates containers on the box have.
+          # start-period is 20s and the interval 30s, so the first verdict can be a
+          # minute out.
+          healthy=""
+          status="none"
+          for _ in $(seq 1 90); do
+            inspect() { docker inspect -f "$1" saiva-smoke 2>/dev/null || echo "$2"; }
+            status="$(inspect '{{.State.Health.Status}}' gone)"
+            if [ "$status" = "healthy" ]; then healthy=1; break; fi
+            # Stop as soon as it dies rather than polling out the full three minutes: a
+            # crash-looping container is the failure this step exists to report.
+            if [ "$(inspect '{{.State.Running}}' false)" != "true" ]; then break; fi
+            sleep 2
+          done
+          if [ -z "$healthy" ]; then
+            echo "::error::saiva-api never became healthy (last status: $status)"
+            exit 1
+          fi
+          # Parsed, not compared as a string. This was `test "$(curl ...)" =
+          # '{"status":"ok"}'`, which asserted the whole response body and so broke the
+          # moment /api/health started reporting the schema state and the running version
+          # alongside the verdict. The contract this gate cares about is `.status`; a new
+          # key is not a regression, and a gate that fails on one teaches people to edit
+          # the gate. `curl -f` already covers the status code, so a 503 from a process
+          # that cannot reach its database fails above this line.
+          # Under $RUNNER_TEMP, not the working directory: no step in this workflow
+          # checks anything out, so leaning on $GITHUB_WORKSPACE existing and being
+          # writable is a dependency this file does not need to take.
+          curl -fsS http://127.0.0.1:8000/api/health > "$RUNNER_TEMP/health.json"
+          cat "$RUNNER_TEMP/health.json"
+          jq -e '.status == "ok"' "$RUNNER_TEMP/health.json" > /dev/null
+
+      - name: The migration actually ran
+        run: |
+          set -euo pipefail
+          # psql from a throwaway container so this does not depend on the runner image
+          # shipping a Postgres client.
+          q() {
+            docker run --rm --network host -e PGPASSWORD=saiva postgres:16-alpine \
+              psql -h 127.0.0.1 -U saiva -d "${2:-saiva}" -tAqc "$1"
+          }
+          revision="$(q 'select version_num from alembic_version')"
+          if [ -z "$revision" ]; then
+            echo "::error::the container reported healthy but no migration was ever stamped"
+            exit 1
+          fi
+          echo "alembic_version = $revision"
+          test "$(q "select to_regclass('public.households') is not null")" = "t"
+
+      - name: Restart path — dbinit on a database already at head
+        run: |
+          set -euo pipefail
+          # The path that runs on every single deploy, including every container recreate.
+          # backend/tests/test_dbinit.py covers it as a unit
+          # (test_the_restart_path_is_a_no_op_and_stamps_nothing), on SQLite; this is the
+          # same assertion against real Postgres in the real image, which is where a
+          # dialect-specific regression would actually show. It must be a no-op and it must
+          # not try to take a backup.
+          secret="$(head -c 48 /dev/urandom | base64 | tr -d '\n')"
+          docker run --rm --network host \
+            -e DATABASE_URL="$DB_URL" -e SECRET_KEY="$secret" -e ENVIRONMENT=production \
+            "$IMAGE" python -m app.dbinit | tee "$RUNNER_TEMP/restart.log"
+          grep -q "database schema up to date" "$RUNNER_TEMP/restart.log"
+          if grep -q "backing up database" "$RUNNER_TEMP/restart.log"; then
+            echo "::error::dbinit took a pre-migration backup with nothing to migrate"
+            exit 1
+          fi
+
+      - name: Upgrade path — pg_dump inside the image still works
+        run: |
+          set -euo pipefail
+          # The base-image regression nothing else here would catch. pg_dump comes from the
+          # PGDG apt repo whose codename is derived from the base OS, so a base image that
+          # moves to a new Debian release pulls a different libpq5 — and dbinit raises
+          # RuntimeError and refuses to migrate if pg_dump fails, which with `python -m
+          # app.dbinit && uvicorn` means nothing ever binds :8000 and `restart:
+          # unless-stopped` crash-loops forever.
+          #
+          # A second database at the previous revision, so there is genuinely something
+          # pending. The previous revision is read out of the image's own migration history
+          # rather than hardcoded, so this keeps working as migrations are added.
+          secret="$(head -c 48 /dev/urandom | base64 | tr -d '\n')"
+          prev="$(docker run --rm "$IMAGE" python -c "
+          from alembic.config import Config
+          from alembic.script import ScriptDirectory
+          s = ScriptDirectory.from_config(Config('alembic.ini'))
+          print(s.get_revision(s.get_current_head()).down_revision)")"
+          # Two statements, not `test -n "$prev" && test ... != None`. In an AND-OR list
+          # `set -e` exempts every command but the last, so an empty $prev makes the list
+          # short-circuit with status 0 and the step sails on to upgrade to the empty
+          # revision. Measured: A="" B=anything exits 0 and keeps going.
+          test -n "$prev"
+          test "$prev" != "None"
+          docker run --rm --network host -e PGPASSWORD=saiva postgres:16-alpine \
+            psql -h 127.0.0.1 -U saiva -d postgres -c 'create database saiva_pending'
+          pending="postgresql+psycopg://saiva:saiva@127.0.0.1:5432/saiva_pending"
+          docker run --rm --network host \
+            -e DATABASE_URL="$pending" -e SECRET_KEY="$secret" -e ENVIRONMENT=production \
+            "$IMAGE" python -c "
+          from alembic import command
+          from alembic.config import Config
+          command.upgrade(Config('alembic.ini'), '$prev')"
+          # /backups is bind-mounted so the dump can be inspected from here; 1777 because
+          # the image runs as uid 10001.
+          mkdir -p "$RUNNER_TEMP/backups" && chmod 1777 "$RUNNER_TEMP/backups"
+          docker run --rm --network host -v "$RUNNER_TEMP/backups:/backups" \
+            -e DATABASE_URL="$pending" -e SECRET_KEY="$secret" -e ENVIRONMENT=production \
+            "$IMAGE" python -m app.dbinit | tee "$RUNNER_TEMP/upgrade.log"
+          grep -q "backing up database" "$RUNNER_TEMP/upgrade.log"
+          grep -q "backup complete" "$RUNNER_TEMP/upgrade.log"
+          grep -q "database schema up to date" "$RUNNER_TEMP/upgrade.log"
+          dump="$(find "$RUNNER_TEMP/backups" -name '*-premigrate.sql.gz' -print -quit)"
+          test -n "$dump"
+          gzip -t "$dump"
+          # Decompressed to a file and grepped there, NOT `zcat ... | grep -q`. `grep -q`
+          # exits on the first match, zcat takes SIGPIPE, and `pipefail` turns that into a
+          # failed step for any dump larger than the 64KiB pipe buffer. Measured: 28-byte
+          # dump exits 0, 3MB dump exits 141. This gate is the only thing in the repository
+          # covering the pg_dump/libpq base-image regression, so it must not start
+          # reporting failure the week the schema outgrows a pipe.
+          gzip -cd "$dump" > "$RUNNER_TEMP/premigrate.sql"
+          grep -q "PostgreSQL database dump" "$RUNNER_TEMP/premigrate.sql"
+
+      - name: What the container said
+        if: failure()
+        run: docker logs saiva-smoke 2>&1 | tail -n 200 || true
+
+  web:
+    name: saiva-web serves the SPA from its own Caddyfile
+    runs-on: ubuntu-latest
+    env:
+      IMAGE: saiva-web:candidate
+      IMAGE_REF: ${{ inputs.web_image }}
+    steps:
+      - name: Log in to GHCR
+        uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Pull the exact image the caller is about to publish
+        run: |
+          set -euo pipefail
+          case "$IMAGE_REF" in
+            *@sha256:*) ;;
+            *)
+              echo "::error::'$IMAGE_REF' is not digest-pinned. Pass name@sha256:...,"
+              echo "::error::not a tag, or this gate tests something other than what"
+              echo "::error::gets promoted."
+              exit 1
+              ;;
+          esac
+          docker pull "$IMAGE_REF"
+          docker tag "$IMAGE_REF" "$IMAGE"
+      # There is no SAIVA_VERSION check for this image and there cannot be one of the same
+      # kind: the frontend's version is compiled into the bundle by Vite
+      # (VITE_SAIVA_VERSION in frontend/Dockerfile), not carried as an env var on the final
+      # caddy:2-alpine stage, so there is nothing in the image config to read. What the SPA
+      # displays comes from the API's /api/update-check anyway; frontend/src/version.ts is
+      # only the fallback before that request lands.
+      - name: Cold start — Caddy parses its config and serves the SPA
+        run: |
+          set -euo pipefail
+          # This image has no HEALTHCHECK, so the wait is ours. There is more here than
+          # "did it 200": the header assertion is what proves Caddy actually loaded
+          # frontend/Caddyfile.web. A caddy:2-alpine that rejected one directive would
+          # otherwise still serve /srv from its default config and look fine.
+          docker run -d --name saiva-web-smoke -p 8080:8080 "$IMAGE"
+          up=""
+          for _ in $(seq 1 60); do
+            if curl -fsS -o /dev/null http://127.0.0.1:8080/; then up=1; break; fi
+            sleep 2
+          done
+          if [ -z "$up" ]; then
+            echo "::error::saiva-web never served a request"
+            docker logs saiva-web-smoke 2>&1 | tail -n 100 || true
+            exit 1
+          fi
+          # Fetched to files and grepped there, NOT `curl ... | grep -q`. `grep -q` exits
+          # on the first match, curl takes SIGPIPE, and `pipefail` turns that into a failed
+          # step for any response larger than the 64KiB pipe buffer. index.html is a Vite
+          # shell of about a kilobyte so the pipe form survives today; it would stop
+          # surviving the day someone inlines a critical-CSS block, and a gate that fails
+          # for a reason unrelated to what it tests is a gate people edit rather than read.
+          # The files are also what makes a failure diagnosable.
+          curl -fsS http://127.0.0.1:8080/ > "$RUNNER_TEMP/index.html"
+          curl -fsSI http://127.0.0.1:8080/ > "$RUNNER_TEMP/index.headers"
+          # Client-side routing: a deep link must fall through to index.html, not 404.
+          curl -fsS http://127.0.0.1:8080/accounts > "$RUNNER_TEMP/deep-link.html"
+          grep -q '<div id="root">' "$RUNNER_TEMP/index.html"
+          grep -qi '^content-security-policy:' "$RUNNER_TEMP/index.headers"
+          grep -q '<div id="root">' "$RUNNER_TEMP/deep-link.html"
+      - name: What the container said
+        if: failure()
+        run: docker logs saiva-web-smoke 2>&1 | tail -n 200 || true

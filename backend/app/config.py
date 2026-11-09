@@ -3,6 +3,7 @@
 from functools import lru_cache
 from typing import Literal
 
+from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -42,11 +43,54 @@ class Settings(BaseSettings):
     default_locale: str = "en-AU"
 
     # Software updates
-    saiva_version: str = "dev"  # baked into the image at build time (SAIVA_VERSION)
+    #
+    # Two identities, because one string could not carry both jobs and the attempt to
+    # make it do so put the update badge permanently out of action on three channels.
+    #
+    # `saiva_version` answers "which release is this?" and is compared against GitHub
+    # releases, so it must be semver-shaped or the comparison is meaningless.
+    # `parse_version` returns None for anything else, `is_newer` returns False on None,
+    # and the panel then renders "You're on the latest version" forever. CI used to bake
+    # the literal string `edge` into both the :edge AND the :sha-<short> images, which is
+    # how the README's own documented rollback target ended up unable to see an update.
+    #
+    # `saiva_build` answers "which exact build is this?" — the immutable tag
+    # (`sha-1a2b3c4`), or empty on a local build. It is never compared; it is what the
+    # panel shows when there is no release to compare against, and what the deploy
+    # records so a rollback can name what it went back to.
+    saiva_version: str = "dev"  # baked at build time (SAIVA_VERSION); semver or "dev"
+    saiva_build: str = ""  # baked at build time (SAIVA_BUILD); immutable tag, e.g. sha-1a2b3c4
     update_check_enabled: bool = True
     update_repo: str = "marioalfaro75/saiva"
-    watchtower_url: str = ""  # e.g. http://watchtower:8080 (empty = in-app apply disabled)
-    watchtower_token: str = ""
+    # SAIVA_UPDATE_DIR is deliberately NOT a setting here. It is read straight from the
+    # environment in app/services/updates.py, at call time, because it describes the
+    # container's filesystem rather than the application's behaviour: whether the
+    # directory exists and is writable is a question only the filesystem can answer, and
+    # a cached settings object would hold a stale yes. Empty or missing means in-app
+    # updates are not set up on this box, which is a normal state the panel reports
+    # plainly.
+
+    # Nightly backups
+    #
+    # How old the newest VERIFIED backup may be before Settings stops calling it current.
+    # It is a setting rather than a constant because the page must not hold a second copy
+    # of the number: the regime that enforces it runs on the host, out of .env, and a UI
+    # with its own threshold would call a backup current for a window the host does not
+    # agree with. The API hands this to the page instead.
+    #
+    # The alias is not decoration. Every knob the host shell and compose share is
+    # SAIVA_-prefixed in .env (SAIVA_STATE_DIR, SAIVA_BACKUP_DIR, SAIVA_VERSION), and the
+    # field name here has no prefix to match, so without the alias pydantic-settings would
+    # look up BACKUP_STALE_HOURS -- a variable nothing sets -- and silently use 36 on a box
+    # whose .env had chosen 12. The other SAIVA_-prefixed settings carry the prefix in
+    # their field names instead (saiva_version); either way the string in .env is the one
+    # thing that must not drift.
+    #
+    # The rest of the backup configuration is deliberately NOT here. The destination path
+    # and the copy command live in /etc/saiva/agent.conf, because scripts/backup.sh runs
+    # them as root: a path read from .env would let anyone who can write the checkout have
+    # root create files where they chose, and a command read from it would simply be root.
+    backup_stale_hours: int = Field(36, validation_alias="SAIVA_BACKUP_STALE_HOURS")
 
     # Email / SMTP for notifications & digests. An empty host disables all email.
     smtp_host: str = ""

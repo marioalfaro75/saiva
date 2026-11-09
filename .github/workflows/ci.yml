@@ -44,8 +44,45 @@ jobs:
 
   # On a green push to main, publish the changed image(s) to GHCR as the rolling
   # `edge` tag plus an immutable `sha-<short>` for pinning/rollback. `:latest` and
-  # semver tags stay reserved for `v*` releases (release.yml). Two jobs (not a
-  # matrix) because the matrix context isn't available in a job-level `if`.
+  # semver tags stay reserved for releases cut through cut-release.yml. Two jobs (not
+  # a matrix) because the matrix context isn't available in a job-level `if`.
+  #
+  # Two identities get baked in, and the reason they are two is a bug that took the
+  # update badge off both of the channels this workflow publishes, for as long as it
+  # existed.
+  #
+  # This build pushes TWO tags from ONE image: `edge` and `sha-<short>`. It used to pass
+  # docker/metadata-action's `version` output as SAIVA_VERSION, and that output is the
+  # *primary* tag, which here is `edge`. So the `sha-<short>` image — the one README
+  # documents as the immutable build to pin or roll back to — reported its version as
+  # the literal string `edge`. `parse_version` in
+  # backend/app/services/updates.py returns None for anything that is not semver and
+  # `is_newer` returns False when either side is None, so `update_available` was
+  # permanently false and frontend/src/components/UpdatesPanel.tsx rendered "You're on
+  # the latest version" on a box that had no way to find out. "I cannot compare" was
+  # being displayed as "you are up to date", which is the worst available translation.
+  #
+  # The fix is not a fake semver. An `edge` or `sha-` build genuinely is not a
+  # release, and inventing a version for it would make the comparison answer
+  # confidently instead of answering wrongly — no better. Instead:
+  #
+  #   SAIVA_VERSION=edge     names the channel. Deliberately not semver, so
+  #                          `parse_version` refuses it and the app knows it cannot
+  #                          compare rather than concluding it is current.
+  #   SAIVA_BUILD=sha-<short>  names the exact build, immutably. It is never compared;
+  #                          it is what /api/health reports, what the panel shows when
+  #                          there is nothing to compare against, and what a rollback
+  #                          names when it says where it went back to.
+  #
+  # Both callers of that second value come from one shell variable (see the step
+  # below), so the tag that gets pushed and the identity baked inside the image cannot
+  # drift apart — which is the whole of what went wrong the first time.
+  #
+  # The backend side of this contract is `saiva_version` + `saiva_build` in
+  # backend/app/config.py. backend/Dockerfile still has to declare `ARG SAIVA_BUILD`
+  # before the second build-arg lands anywhere; until it does BuildKit drops it with a
+  # warning, which is why image-smoke.yml warns rather than fails on an image that
+  # carries no build identity.
   publish-api:
     name: Publish saiva-api (edge)
     needs: [checks, changes]
@@ -64,6 +101,18 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
+      - name: The immutable build identity
+        id: build
+        env:
+          SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          # Computed once and used twice — as the tag that gets pushed, and as the
+          # SAIVA_BUILD baked into the image — so the image cannot report an identity
+          # that nobody can pull. This replaces `type=sha,format=short`, which produced
+          # the same seven characters but as a value this job could not read back
+          # without re-deriving metadata-action's formatting rules.
+          echo "tag=sha-${SHA:0:7}" >> "$GITHUB_OUTPUT"
       - name: Image metadata (tags + labels)
         id: meta
         uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
@@ -71,13 +120,14 @@ jobs:
           images: ghcr.io/${{ github.repository_owner }}/saiva-api
           tags: |
             type=raw,value=edge,enable={{is_default_branch}}
-            type=sha,format=short
+            type=raw,value=${{ steps.build.outputs.tag }}
       - name: Build and push
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: ./backend
           build-args: |
-            SAIVA_VERSION=${{ steps.meta.outputs.version }}
+            SAIVA_VERSION=edge
+            SAIVA_BUILD=${{ steps.build.outputs.tag }}
           push: true
           platforms: linux/amd64,linux/arm64
           tags: ${{ steps.meta.outputs.tags }}
@@ -103,6 +153,18 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
+      - name: The immutable build identity
+        id: build
+        env:
+          SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          # Computed once and used twice — as the tag that gets pushed, and as the
+          # SAIVA_BUILD baked into the image — so the image cannot report an identity
+          # that nobody can pull. This replaces `type=sha,format=short`, which produced
+          # the same seven characters but as a value this job could not read back
+          # without re-deriving metadata-action's formatting rules.
+          echo "tag=sha-${SHA:0:7}" >> "$GITHUB_OUTPUT"
       - name: Image metadata (tags + labels)
         id: meta
         uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
@@ -110,13 +172,14 @@ jobs:
           images: ghcr.io/${{ github.repository_owner }}/saiva-web
           tags: |
             type=raw,value=edge,enable={{is_default_branch}}
-            type=sha,format=short
+            type=raw,value=${{ steps.build.outputs.tag }}
       - name: Build and push
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: ./frontend
           build-args: |
-            SAIVA_VERSION=${{ steps.meta.outputs.version }}
+            SAIVA_VERSION=edge
+            SAIVA_BUILD=${{ steps.build.outputs.tag }}
           push: true
           platforms: linux/amd64,linux/arm64
           tags: ${{ steps.meta.outputs.tags }}

@@ -17,6 +17,30 @@
 	encode gzip
 	tls {$SAIVA_TLS:internal}
 
+	# The updater's status, served straight off the host filesystem.
+	#
+	# This is deliberately NOT proxied to the api container, and that is the whole point
+	# of it. An update replaces the api container; the old design had that container
+	# report on its own replacement, so the process that would say what happened was the
+	# process being killed, and the panel rendered "Update applied." whatever had
+	# actually occurred. Here the state lives in a file the host's updater writes, so a
+	# container dying is a gap in the transport and not a loss of the answer — and this
+	# route still answers while api is down, which is exactly when somebody needs it.
+	#
+	# It is unauthenticated, so it carries only the redacted record: phase, step,
+	# timestamps, release versions and one sentence. No digests, no git revisions, no log
+	# output, nothing from .env — scripts/lib/state.sh fixes that list, and the deploy
+	# tests assert on it. Every version that exists is already public on GitHub, so the
+	# only thing disclosed is which one this box runs; being able to read "failed at the
+	# gate, rolled back" from a browser when nothing else answers is worth more than that.
+	handle /_saiva/update-status.json {
+		root * /srv/saiva-update
+		rewrite * /status-public.json
+		file_server
+		header Cache-Control "no-store"
+		header Content-Type "application/json"
+	}
+
 	# API
 	handle /api/* {
 		reverse_proxy api:8000

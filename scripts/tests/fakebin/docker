@@ -1,0 +1,85 @@
+#!/usr/bin/env bash
+# A stand-in for the docker CLI, so the deploy state machine can be exercised end to end
+# without a daemon.
+#
+# It is not a simulator. It answers the handful of questions scripts/lib/release.sh
+# actually asks, records every invocation so a test can assert on the ORDER things
+# happened in, and lets a test make any one step fail. The order is the point: "pulled
+# before it recreated", "recreated before it gated", "put the old .env back before it
+# brought the stack up again".
+#
+# Control files, all under $SAIVA_FAKE_DIR:
+#   calls            append-only log of every argv, one per line
+#   rc.<step>        exit code for that step (pull | up | tag | exec), default 0
+#   image.<service>  the image id `inspect` reports for that service's container
+#   digest.<id>      the repo digest `image inspect` reports for an image id
+set -uo pipefail
+
+FAKE="${SAIVA_FAKE_DIR:?SAIVA_FAKE_DIR must be set to use the fake docker}"
+mkdir -p "$FAKE"
+printf '%s\n' "docker $*" >> "$FAKE/calls"
+
+rc_for() { local f="$FAKE/rc.$1"; [ -f "$f" ] && cat "$f" || echo 0; }
+
+# `docker info` / `docker version` — the daemon is "up".
+case "${1:-}" in
+  info|version) exit 0 ;;
+  tag) exit "$(rc_for tag)" ;;
+esac
+
+if [ "${1:-}" = "inspect" ] || [ "${1:-}" = "image" ]; then
+  # docker inspect --format '<fmt>' <ref>   /   docker image inspect --format '<fmt>' <ref>
+  [ "${1:-}" = "image" ] && shift
+  fmt=""; ref=""
+  shift
+  while [ $# -gt 0 ]; do
+    case "$1" in --format) shift; fmt="${1:-}" ;; --format=*) fmt="${1#*=}" ;; *) ref="$1" ;; esac
+    shift
+  done
+  case "$fmt" in
+    *RepoDigests*) f="$FAKE/digest.$ref"; [ -f "$f" ] && cat "$f"; exit 0 ;;
+    *.Config.Image*) f="$FAKE/configimage.$ref"; [ -f "$f" ] && cat "$f"; exit 0 ;;
+    *.Image*)
+      # ref is a container id of the form "cid-<service>"
+      svc="${ref#cid-}"; f="$FAKE/image.$svc"
+      [ -f "$f" ] && cat "$f"; exit 0 ;;
+  esac
+  exit 0
+fi
+
+if [ "${1:-}" = "compose" ]; then
+  shift
+  # Skip the -f/--file arguments so the subcommand can be found wherever it sits.
+  while [ $# -gt 0 ]; do
+    case "$1" in -f|--file) shift ;; -f*|--file=*) : ;; *) break ;; esac
+    shift
+  done
+  sub="${1:-}"; shift || true
+  case "$sub" in
+    version) echo "Docker Compose version v2.99.0-fake"; exit 0 ;;
+    pull)    exit "$(rc_for pull)" ;;
+    up)
+      # --wait support is probed via `compose up --help`.
+      for a in "$@"; do [ "$a" = "--help" ] && { echo "  --wait   Wait for services to be running|healthy"; exit 0; }; done
+      # Bringing the stack up makes the site answer -- unless a test has said what the
+      # site should look like AFTER an up, which is how "the release starts but does not
+      # serve" is expressed.
+      if [ "$(rc_for up)" = "0" ]; then
+        if [ -f "$FAKE/site.after-up" ]; then cat "$FAKE/site.after-up" > "$FAKE/site"
+        else printf '%s\n' "up" > "$FAKE/site"; fi
+      fi
+      exit "$(rc_for up)" ;;
+    ps)
+      svc=""
+      for a in "$@"; do case "$a" in -q|--quiet) : ;; *) svc="$a" ;; esac; done
+      [ -n "$svc" ] && echo "cid-$svc"
+      exit 0 ;;
+    exec)  exit "$(rc_for exec)" ;;
+    logs)  echo "(fake logs)"; exit 0 ;;
+    down)  exit 0 ;;
+    config) exit 0 ;;
+    *) exit 0 ;;
+  esac
+fi
+
+exit 0

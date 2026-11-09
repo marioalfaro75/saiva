@@ -19,7 +19,8 @@ import pytest
 import yaml
 
 REPO = Path(__file__).resolve().parents[2]
-WORKFLOWS = sorted((REPO / ".github" / "workflows").glob("*.yml"))
+WORKFLOW_DIR = REPO / ".github" / "workflows"
+WORKFLOWS = sorted(WORKFLOW_DIR.glob("*.yml"))
 DOCKERFILE = REPO / "backend" / "Dockerfile"
 RUNTIME_SOURCES = sorted((REPO / "backend" / "app").rglob("*.py")) + sorted(
     (REPO / "backend" / "migrations").rglob("*.py")
@@ -714,13 +715,13 @@ def _release_tag_writers(spec: dict) -> dict[str, list[str]]:
     return writers
 
 
-def _gated_on_checks(spec: dict, job_name: str) -> bool:
-    """Whether `job_name` cannot start until the shared checks workflow has passed.
+def _gated_on(spec: dict, job_name: str, reusable: str) -> bool:
+    """Whether `job_name` cannot start until a job calling `reusable` has passed.
 
     Walks `needs` transitively: refresh-images.yml's promote job needs [api, web],
     and those need checks, so promote is gated even though it does not say so. A
-    per-job walk is the point — the regex in the test above is a whole-file search
-    and one gated job made every other job in that file look gated too.
+    per-job walk is the point — a whole-file regex would let one gated job make every
+    other job in that file look gated too.
     """
     seen: set[str] = set()
     frontier = [job_name]
@@ -730,11 +731,19 @@ def _gated_on_checks(spec: dict, job_name: str) -> bool:
             continue
         seen.add(current)
         job = (spec.get("jobs") or {}).get(current) or {}
-        if "./.github/workflows/checks.yml" in str(job.get("uses") or ""):
+        if reusable in str(job.get("uses") or ""):
             return True
         needs = job.get("needs") or []
         frontier.extend([needs] if isinstance(needs, str) else needs)
     return False
+
+
+def _gated_on_checks(spec: dict, job_name: str) -> bool:
+    return _gated_on(spec, job_name, "./.github/workflows/checks.yml")
+
+
+def _gated_on_image_smoke(spec: dict, job_name: str) -> bool:
+    return _gated_on(spec, job_name, "./.github/workflows/image-smoke.yml")
 
 
 @pytest.mark.parametrize("workflow", WORKFLOWS, ids=lambda p: p.name)
@@ -756,6 +765,88 @@ def test_every_job_that_writes_a_release_tag_is_gated_on_the_checks(workflow: Pa
         f"{workflow.name}: these jobs can change what production pulls without the "
         "shared checks having run; add the gating job to their `needs` chain:\n"
         + "\n".join(f"  {job}: {'; '.join(reasons)}" for job, reasons in ungated.items())
+    )
+
+
+# Tags a box can follow without being told to: `:latest` is docker-compose.prod.yml's
+# default for SAIVA_VERSION, and `<major.minor>` rolls under anyone who pinned it. A job
+# writing one of these changes what an existing deployment pulls on its next update.
+#
+# Deliberately narrower than _release_tag_writers. The api/web build jobs push `v<ver>`
+# and `sha-<sha>` BEFORE the smoke gate, on purpose: the gate boots the digest they
+# produced, so it cannot also precede them. Those tags are immutable and nothing follows
+# them until `promote` moves the rolling channel and `release` publishes the GitHub
+# Release the in-app check reads — both of which are after the gate.
+ROLLING_CHANNEL_MARKERS = (":latest", "$MAJOR_MINOR", "${MAJOR_MINOR}", ":${{ steps.meta")
+
+
+def _rolling_channel_writers(spec: dict) -> dict[str, list[str]]:
+    writers: dict[str, list[str]] = {}
+    for job_name, job in (spec.get("jobs") or {}).items():
+        reasons = []
+        for step in job.get("steps") or []:
+            label = step.get("name") or str(step.get("uses") or "")
+            script = step.get("run") or ""
+            if any(command in script for command in RETAG_COMMANDS):
+                tagged = re.findall(r"--tag\s+(\S+)", script)
+                if any(marker in ref for ref in tagged for marker in (":latest", "MAJOR_MINOR")):
+                    reasons.append(f"moves the rolling channel ({label})")
+            if "docker/build-push-action" in str(step.get("uses") or ""):
+                tags = str((step.get("with") or {}).get("tags") or "")
+                if ":latest" in tags:
+                    reasons.append(f"builds straight onto :latest ({label})")
+        if reasons:
+            writers[job_name] = reasons
+    return writers
+
+
+@pytest.mark.parametrize("workflow", WORKFLOWS, ids=lambda p: p.name)
+def test_every_job_that_writes_a_release_tag_is_gated_on_an_image_that_boots(
+    workflow: Path,
+) -> None:
+    """Tests on a runner are not the same question as "does this image start".
+
+    checks.yml runs pytest via setup-python and never touches a container. The build-time
+    `RUN python -c "import app.main"` proves the modules import and nothing beyond that.
+    So a release could pass every check and still be an image that cannot migrate, cannot
+    bind :8000 or cannot find pg_dump — and `:latest` is what every box follows.
+
+    image-smoke.yml answers that question by booting the exact digest about to be
+    published. This asserts the two paths that move a release tag cannot reach the
+    promotion without it. The ordering was correct when it was written; nothing committed
+    said so, which is the same shape as every other defect in this area.
+    """
+    spec = yaml.safe_load(workflow.read_text())
+    ungated = sorted(
+        f"{job} ({'; '.join(reasons)})"
+        for job, reasons in _rolling_channel_writers(spec).items()
+        if not _gated_on_image_smoke(spec, job)
+    )
+    assert not ungated, (
+        f"{workflow.name}: these jobs can move the tag every box follows without the "
+        f"image having been booted first:\n  " + "\n  ".join(ungated)
+    )
+
+
+def test_the_image_smoke_gate_is_not_vacuously_satisfied() -> None:
+    """Guards the test above, which is empty and green if nothing writes a release tag.
+
+    Named jobs rather than a count, because the failure this catches is a workflow being
+    renamed or restructured until `_release_tag_writers` recognises nothing in it.
+    """
+    for name, expected in (("cut-release.yml", "promote"), ("refresh-images.yml", "promote")):
+        spec = yaml.safe_load((WORKFLOW_DIR / name).read_text())
+        writers = _rolling_channel_writers(spec)
+        assert expected in writers, (
+            f"{name}: {expected} is no longer recognised as writing a release tag, so "
+            f"the gate above is asserting nothing about it"
+        )
+        assert _gated_on_image_smoke(spec, expected), f"{name}: {expected} is not smoke-gated"
+    smoke = WORKFLOW_DIR / "image-smoke.yml"
+    assert smoke.is_file(), "the workflow both gates depend on does not exist"
+    assert "workflow_call" in str(yaml.safe_load(smoke.read_text()).get(True) or
+                                  yaml.safe_load(smoke.read_text()).get("on")), (
+        "image-smoke.yml is no longer callable as a reusable workflow"
     )
 
 

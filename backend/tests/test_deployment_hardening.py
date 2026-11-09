@@ -184,285 +184,303 @@ def test_a_stale_alert_is_not_emailed(auth_client: TestClient) -> None:
         assert notifications._pending_email(db, household_id, dt.date.today()) == []
 
 
-# --- The Docker socket ----------------------------------------------------------
+# --- The Docker socket is simply not here any more ------------------------------
+#
+# These used to assert that exactly one container held the socket, that it was behind a
+# filtering proxy, and that the proxy sat on an internal network. All of that was true
+# and none of it was safe: the proxy's own comment said so plainly, because updating a
+# container means creating one, and anything that can create a container can create a
+# privileged one and own the host. That access existed so a button could pull two images.
+#
+# The button now writes a file into a bind-mounted directory and a root-owned agent on
+# the host does the work, so the assertions become much simpler and much stronger: no
+# container anywhere touches the daemon.
 
 
-def test_nothing_that_serves_http_holds_the_docker_socket() -> None:
-    """Container-create access to the daemon is root on the host.
+def test_no_container_can_reach_the_docker_daemon() -> None:
+    """The strongest form of the old property: there is no socket to hold.
 
-    Watchtower listens for HTTP requests, so a bug in it reached straight through
-    to the daemon. The socket now belongs to a filtering proxy that publishes no
-    ports and sits on an internal network.
+    Checks both compose files, including the development one, because a dev-only socket
+    mount is still a socket mount on a laptop that also has the family's data on it.
     """
-    services = _compose(COMPOSE_PROD)["services"]
-    for name, service in services.items():
-        mounts = [str(v) for v in (service.get("volumes") or [])]
-        holds_socket = any("/var/run/docker.sock" in m for m in mounts)
-        if not holds_socket:
+    for path in (COMPOSE_PROD, COMPOSE_DEV):
+        services = _compose(path)["services"]
+        assert services, f"read no services from {path.name}, so this test proves nothing"
+        for name, service in services.items():
+            mounts = [str(v) for v in (service.get("volumes") or [])]
+            assert not any("docker.sock" in m for m in mounts), (
+                f"{path.name}: {name} mounts the Docker socket. Nothing in this stack "
+                f"needs it: updates are applied by scripts/deploy.sh on the host."
+            )
+            env = {str(k): str(v) for k, v in (service.get("environment") or {}).items()}
+            assert "DOCKER_HOST" not in env, (
+                f"{path.name}: {name} is pointed at a Docker API. Same reason."
+            )
+
+
+def _split_mount(spec: str) -> tuple[str, str, str]:
+    """Split a compose short-syntax volume into (host, container, mode).
+
+    By hand, because the host side interpolates a default — `${SAIVA_STATE_DIR:-/var/…}`
+    — and the `:-` in that is not a field separator. `spec.split(":")` returns five
+    fields for these mounts, which would not fail the classification below so much as
+    make it meaningless.
+    """
+    fields: list[str] = []
+    current = ""
+    depth = 0
+    for char in spec:
+        if char == "{":
+            depth += 1
+        elif char == "}":
+            depth = max(depth - 1, 0)
+        elif char == ":" and depth == 0:
+            fields.append(current)
+            current = ""
             continue
-        assert name == "docker-socket-proxy", (
-            f"{name} mounts the Docker socket directly; put it behind the proxy"
+        current += char
+    fields.append(current)
+    host, container = fields[0], fields[1] if len(fields) > 1 else ""
+    return host, container, ":".join(fields[2:])
+
+
+def test_the_app_can_write_only_the_drop_box_and_read_the_rest() -> None:
+    """The security boundary, and the one this design got wrong the first time.
+
+    Giving the container the whole directory was reviewed and broken end to end. Owning a
+    directory means being able to unlink and rename root-owned entries inside it, so the
+    container could point root's deploy.lock and run.log at any file on the host (shell
+    redirections follow symlinks), point run.log at a file it wanted to READ back through
+    the status API, and rename records/ aside so a rollback restored its .env and pinned
+    every service to an image of its choosing.
+
+    This used to assert that there were exactly two such mounts, which was a proxy for
+    the real invariant and expired the moment "Back up now" added a second drop-box. The
+    count is not the property; the shape is. One read-only mount of the directory, and
+    any number of writable mounts each of which is a sub-directory of it, named the same
+    on both sides. A third drop-box needs no change here. Widening one does.
+    """
+    api = _compose(COMPOSE_PROD)["services"]["api"]
+    mounts = [str(v) for v in (api.get("volumes") or [])]
+    # Either side, because a mount is in scope here if it touches the state directory at
+    # all. Matching only the container path would miss `$STATE/records:/run/anything`,
+    # which is both a second writable path and a window onto a directory that holds a
+    # verbatim copy of .env.
+    update_mounts = [m for m in mounts if "saiva-update" in m or "SAIVA_STATE_DIR" in m]
+    assert update_mounts, "no state-directory mounts on api at all, so this proves nothing"
+
+    env = {str(k): str(v) for k, v in (api.get("environment") or {}).items()}
+    root = env.get("SAIVA_UPDATE_DIR")
+    assert root == "/run/saiva-update", (
+        "the api container is not told where its state directory is, so the mounts below "
+        f"cannot be classified against anything: {env.get('SAIVA_UPDATE_DIR')!r}"
+    )
+
+    outer = [m for m in update_mounts if _split_mount(m)[1] == root]
+    assert len(outer) == 1, (
+        f"expected exactly one mount of {root} itself, got {outer}. Two would mean one of "
+        "them decides, and which one is not something this file states."
+    )
+    assert _split_mount(outer[0])[2] == "ro", (
+        f"the api container can write the whole state directory: {outer[0]}. That is "
+        "enough to make root open files of its choosing — see scripts/saiva-update-agent."
+    )
+    outer_host = _split_mount(outer[0])[0]
+
+    drop_boxes = {}
+    for mount in update_mounts:
+        if mount in outer:
+            continue
+        host, container, mode = _split_mount(mount)
+        assert container.startswith(root + "/"), (
+            f"a second mount of the state directory, outside {root}: {mount}. The "
+            "read-only outer mount is what makes a drop-box a drop-box; anything beside "
+            "it is either a second writable path or a second way to read records/, which "
+            "holds a verbatim copy of .env."
         )
-        assert all(m.endswith(":ro") for m in mounts if "docker.sock" in m), (
-            "the proxy should mount the socket read-only"
+        name = container[len(root) + 1 :]
+        assert "/" not in name, (
+            f"the drop-box {name!r} is nested rather than a direct sub-directory: {mount}"
         )
-        assert not service.get("ports"), "the socket proxy must not publish a port"
-        assert service.get("networks") == ["docker-api"], (
-            "the socket proxy must stay on the isolated network"
+        assert mode != "ro", (
+            f"{name} is mounted read-only, so the app cannot drop a request in it: {mount}"
+        )
+        assert host == f"{outer_host}/{name}", (
+            f"{name} is mounted from somewhere other than {outer_host}/{name}: {mount}. "
+            "The host watches the directory it owns; a request written anywhere else is "
+            "one nothing picks up, and nothing would say so."
+        )
+        drop_boxes[name] = mount
+
+    assert {"requests", "backup-requests"} <= set(drop_boxes), (
+        "one of the two drop-boxes the app writes into is not mounted, so pressing that "
+        f"button would 503 on a correctly installed box: {sorted(drop_boxes)}"
+    )
+
+
+def test_the_installer_never_hands_the_state_directory_to_the_container() -> None:
+    """The fix for that, asserted where it is made.
+
+    `chown <api uid> $STATE` is one word away from `chown root:<api uid> $STATE/requests`
+    and the difference is a privilege escalation, so it is worth a test that reads the
+    installer rather than trusting the comment above it.
+
+    The skip used to be the substring "requests", which meant the backup drop-box passed
+    this test for no better reason than `"requests" in "backup-requests"` — tolerated
+    rather than checked. So each drop-box is now named, and each has to be root-owned and
+    0730 in its own right: 0730 is what stops the container listing what is in there, and
+    root ownership is what stops it renaming root's entries. Group-only access is the
+    whole mechanism, so `-g "$API_UID"` on a line is only acceptable on one of these.
+    """
+    installer = (REPO / "scripts" / "install-updater.sh").read_text()
+    # The directories the api container may write into, and nothing else may be handed to
+    # it. Both are relative to $STATE: see app/services/{updates,backups}.py.
+    drop_boxes = ("requests", "backup-requests")
+    lines = [
+        line.strip()
+        for line in installer.splitlines()
+        if not line.lstrip().startswith("#") and ("chown" in line or "install -d" in line)
+    ]
+    assert lines, "no ownership statements found in the installer, so this proves nothing"
+
+    def _targets(line: str) -> set[str]:
+        """What a line acts on, as paths under $STATE — "." being $STATE itself."""
+        return {
+            match.group(1).lstrip("/") or "."
+            for match in re.finditer(r'"\$STATE((?:/[A-Za-z0-9._-]+)*)"', line)
+        }
+
+    for line in lines:
+        if "API_UID" not in line:
+            continue
+        acted_on = _targets(line)
+        assert acted_on and acted_on <= set(drop_boxes), (
+            "the installer gives the api container something other than a drop-box "
+            f"({sorted(acted_on) or 'an unrecognised path'}): {line}"
         )
 
+    for name in drop_boxes:
+        created = [
+            line for line in lines if line.startswith("install -d") and _targets(line) == {name}
+        ]
+        assert created, f"the installer does not create $STATE/{name} at all"
+        for line in created:
+            assert "-o root" in line and '-g "$API_UID"' in line, (
+                f"$STATE/{name} is not root-owned with the api container as its group, so "
+                f"either root cannot trust what is in it or the app cannot write it: {line}"
+            )
+            assert "-m 0730" in line, (
+                f"$STATE/{name} is not created 0730, so the container can list what is in "
+                f"it — which is how it would learn whether root had acted yet: {line}"
+            )
+        # install -d leaves an existing directory's mode alone, so a box upgraded from the
+        # old layout only gets these modes if they are re-asserted unconditionally.
+        reasserted = [line for line in lines if "chmod" in line and _targets(line) == {name}]
+        assert any('chown "root:$API_UID"' in line and "0730" in line for line in reasserted), (
+            f"$STATE/{name}'s mode and ownership are not re-asserted, so a box upgraded "
+            f"from a layout that had this directory keeps whatever it had: {reasserted}"
+        )
 
-def test_the_socket_proxy_refuses_the_dangerous_api_sections() -> None:
-    """Blocking exec, volumes and networks is most of what the proxy is for."""
-    proxy = _compose(COMPOSE_PROD)["services"]["docker-socket-proxy"]
-    env = {k: str(v) for k, v in proxy["environment"].items()}
-    for blocked in ("EXEC", "VOLUMES", "NETWORKS", "BUILD", "SWARM", "SYSTEM"):
-        assert env.get(blocked) == "0", f"{blocked} is not disabled on the socket proxy"
+    assert any("0700" in line and "records" in line for line in lines), (
+        "records/ is not 0700, and it holds a verbatim copy of .env"
+    )
 
 
-def test_the_docker_api_network_is_internal() -> None:
-    networks = _compose(COMPOSE_PROD)["networks"]
-    assert networks["docker-api"]["internal"] is True
+def test_caddy_reads_the_status_file_and_cannot_write_it() -> None:
+    """Caddy serves the updater's public record, so it must not be able to forge one."""
+    caddy = _compose(COMPOSE_PROD)["services"]["caddy"]
+    mounts = [str(v) for v in (caddy.get("volumes") or [])]
+    status_mounts = [m for m in mounts if "saiva-update" in m]
+    assert len(status_mounts) == 1, f"expected one status mount on caddy, got {status_mounts}"
+    assert status_mounts[0].endswith(":ro"), (
+        "caddy mounts the updater's directory read-write; it only ever reads from it"
+    )
 
 
 # --- Surviving a bad update ------------------------------------------------------
 
-TRUTHY = {"true", "1", "yes", "on"}
-INTERPOLATION = re.compile(r"^\$\{(?P<name>[A-Za-z_][A-Za-z0-9_]*)(?::?-(?P<default>.*))?\}$")
 
+def test_every_service_image_can_be_pinned_to_an_exact_reference() -> None:
+    """A rollback restores digests, not tags, so every image needs an override.
 
-def _without_dotenv(value: str) -> str:
-    """What Compose substitutes for one `${VAR:-default}` when nothing sets VAR.
-
-    Every assertion below is about what the shipped file does on a host that took the
-    defaults, so a placeholder has to read as the value it becomes and not as the
-    characters it is spelled with. Leaving them unresolved is not a cosmetic
-    difference in either direction. A `${SAIVA_CLEANUP:-true}` would slip past a check
-    for the literal word "true" and switch image cleanup back on unnoticed, which is
-    the regression the next test exists to catch; and a `${SAIVA_X:-}` that resolves
-    to nothing would read as a non-empty string of literal characters, which is how an
-    earlier version of the disk-budget check in this section passed while the setting
-    it was checking configured nothing at all.
-    """
-    match = INTERPOLATION.match(value.strip())
-    if not match:
-        return value.strip()
-    return (match.group("default") or "").strip()
-
-
-def _watchtower_env() -> dict[str, str]:
-    """The updater's environment, with a loud failure if the service is gone.
-
-    Returning {} for a missing service would make every assertion below pass by
-    default, which is the one outcome worth ruling out: the hazard they describe is
-    Watchtower's, and a vacuous green here would read as "we checked". If the
-    `watchtower` service is deliberately removed — the compose file offers that as an
-    option for anyone who does not want the Docker-socket trade — these tests should
-    be removed with it rather than left to pass on an absence.
+    `latest` is not a thing you can go back to: by the time you want to, it points at the
+    release you are rolling back from. scripts/lib/release.sh records the resolved digest
+    of every service before it changes anything and writes those digests into these
+    variables if it has to put the box back. A service without an override is a service
+    the rollback cannot restore.
     """
     services = _compose(COMPOSE_PROD)["services"]
-    assert "watchtower" in services, (
-        "docker-compose.prod.yml has no watchtower service, so these tests are "
-        "asserting nothing; delete them along with the service"
-    )
-    environment = services["watchtower"].get("environment") or {}
-    return {k: _without_dotenv(str(v)) for k, v in environment.items()}
-
-
-def _watchtower_flags() -> str:
-    """The updater's `command:`/`entrypoint:` overrides, as one searchable string.
-
-    Reading only `environment:` is not enough to know how Watchtower is configured.
-    The fork resolves settings with "flag > env > default" precedence and skips the
-    environment for any flag that was explicitly set, so a `command: --cleanup` in this
-    service silently wins over `WATCHTOWER_CLEANUP: "false"` and every assertion below
-    would stay green while the behaviour flipped. The fork's own documentation puts
-    flags in `command:` in most of its compose examples, so this is the likely shape of
-    a future edit, not a contrived one.
-    """
-    service = _compose(COMPOSE_PROD)["services"]["watchtower"]
-    parts: list[str] = []
-    for key in ("command", "entrypoint"):
-        value = service.get(key)
-        if isinstance(value, str):
-            parts.append(value)
-        elif isinstance(value, list):
-            parts.extend(str(item) for item in value)
-    return " ".join(parts)
-
-
-def test_the_updater_does_not_delete_the_image_it_replaced() -> None:
-    """With cleanup on, a bad release left the box down and nothing to roll back to.
-
-    Watchtower counts a container that merely *starts* as a successful update — it
-    does not consult the HEALTHCHECK on this path — and its cleanup then removes the
-    previous image with Docker's Force flag, so an extra local tag does not protect it
-    either. The replacement meanwhile crash-loops: the API's CMD is
-    `python -m app.dbinit && uvicorn`, so a failed migration means nothing binds :8000
-    and `restart: unless-stopped` retries it forever. That left the documented recovery
-    (`SAIVA_VERSION=sha-<previous>` + `make pull`) needing working network and GHCR
-    access at the exact moment a household's records were offline. Off, the image stays
-    on the host and the rollback is local.
-    """
-    cleanup = _watchtower_env().get("WATCHTOWER_CLEANUP", "false")
-    assert cleanup.lower() not in TRUTHY, (
-        "WATCHTOWER_CLEANUP is back on, so the next bad release prunes the only image "
-        "this box could have rolled back to without the network"
-    )
-    # `--cleanup=false` is a legitimate way to spell the same decision, so match the
-    # flag and then read its value rather than treating its presence as the offence.
-    flags = _watchtower_flags()
-    flagged = re.search(r"(?:^|\s)(?:--cleanup|-c)(?:=(?P<value>\S*))?(?=$|\s)", flags)
-    assert flagged is None or (flagged.group("value") or "true").lower() not in TRUTHY, (
-        "a --cleanup flag in the updater's command outranks WATCHTOWER_CLEANUP, which "
-        f"still reads {cleanup!r}, so cleanup is on and the rollback image is pruned "
-        f"after the next update: {flags!r}"
-    )
-
-
-def test_the_updater_is_not_gated_on_a_docker_api_the_socket_proxy_refuses() -> None:
-    """A disk tripwire for the trade above is the obvious next move, and it broke it.
-
-    Turning cleanup off means nothing reclaims images, so `WATCHTOWER_DISK_SPACE_WARN`
-    reads like the companion setting — and on this deployment it disables the update
-    button outright. Watchtower skips its image-usage check only when both thresholds
-    are zero; any value arms a `GET /system/df`, the socket proxy answers 403 because
-    `SYSTEM: 0`, and the check is fail-closed, so the query failure returns from the
-    first statement of the update session, before a single container is listed.
-    Choosing warn over max does not help: the abort comes from the query, not from a
-    budget being reached.
-
-    It is the silence that makes this worth a test. Watchtower's sync handler still
-    answers 200, `trigger_watchtower` in app/services/updates.py inspects neither
-    status nor body, and `/api/admin/update` returns "update_started" regardless, so
-    the owner is told the update began while nothing happened. There is no log on the
-    box that anybody reads and no failing request to notice. The only way to find out
-    is to check whether the version changed afterwards.
-
-    The two sides are asserted together because the fix is a choice between them, not
-    a value: either no threshold, or `SYSTEM: 1` on the proxy. The second also fails
-    test_the_socket_proxy_refuses_the_dangerous_api_sections above, which is correct —
-    opening `/system` to keep a disk gauge working is a bad trade on a proxy whose
-    whole value is that everything else is off — but it should be a decision somebody
-    makes, not a combination that passes.
-    """
-    env = _watchtower_env()
-    thresholds = {
-        key: value
-        for key, value in env.items()
-        if key.startswith("WATCHTOWER_DISK_SPACE") and value
-    }
-    if not thresholds:
-        return
-    proxy = _compose(COMPOSE_PROD)["services"]["docker-socket-proxy"]
-    system = str((proxy.get("environment") or {}).get("SYSTEM", "0"))
-    assert system == "1", (
-        "the updater is configured with an image-usage threshold it cannot read: "
-        f"{thresholds} needs GET /system/df, and the socket proxy has SYSTEM={system}. "
-        'The check fails closed, so every press of "Update now" aborts before '
-        "listing a container and reports success anyway. Drop the threshold, or open "
-        "SYSTEM and say why"
-    )
-
-
-def test_the_updater_image_cannot_cross_a_major_version_on_its_own() -> None:
-    """A floating tag is how this box would acquire the unattended updates it has not got.
-
-    Watchtower carries no watchtower.enable label of its own, and
-    `WATCHTOWER_LABEL_ENABLE` means only labelled containers are monitored, so it never
-    updates itself: the image moves only when somebody runs `docker compose pull`. That
-    sounds safe and is exactly the problem, because on an untagged reference that one
-    command can cross several minors at once and eventually a major. The fork's source
-    marks the legacy HTTP-API flags "will be removed in the v2 release" and it validates
-    no WATCHTOWER_* names at all, so a v2 image would ignore
-    `WATCHTOWER_HTTP_API_UPDATE` in silence, enable no endpoint, never bind the API, and
-    fall through to the 24-hour schedule it synthesises when none is configured. The
-    result is a box that updates itself daily, with cleanup off and no health gate,
-    because a tag floated — nobody would have chosen it and nothing would have said so.
-
-    A major-version tag is enough to stop that; a digest is not required, and pinning
-    one would stop Watchtower receiving its own fixes.
-    """
-    image = str(_compose(COMPOSE_PROD)["services"]["watchtower"]["image"])
-    assert "@sha256:" in image or re.search(r":\d+(\.\d+)*$", image), (
-        f"the updater image is {image!r}, which floats. One `docker compose pull` can "
-        "carry it across a major version, and the version that removes the HTTP-API "
-        "flag turns this box into a 24-hour unattended updater. Pin at least the major"
-    )
-
-
-def test_the_updater_stays_something_a_person_has_to_ask_for() -> None:
-    """Nothing here polls, and the reason is one variable rather than the obvious one.
-
-    This was written down backwards once and acted on, so it is worth pinning. It is
-    *not* that no schedule is configured: with neither `WATCHTOWER_SCHEDULE` nor
-    `WATCHTOWER_POLL_INTERVAL` set, the fork synthesises `@every 86400s` from its
-    24-hour default interval. What suppresses that poll is the update endpoint being
-    enabled while `WATCHTOWER_HTTP_API_PERIODIC_POLLS` stays false, which puts
-    Watchtower in API-only mode: `block := EnableUpdateAPI && !UnblockHTTPAPI` keeps it
-    serving the API and it never reaches the scheduler. So removing an endpoint variable
-    does not disable updates on this box — it converts them to daily unattended ones,
-    which is the opposite of what deleting a line like that looks like it does.
-
-    Both spellings are required for the same reason. `http-api-update` is deprecated in
-    favour of `http-api-endpoints` and documented as working only until v2;
-    `http-api-endpoints` is the supported spelling but is absent from older images; and
-    an unrecognised WATCHTOWER_* name is ignored without a word. Each alone therefore
-    has a version on which it enables nothing and the poller takes over, while
-    `ResolveEndpoints` unions the two, so together they enable exactly the one `update`
-    endpoint on anything that understands either name. If a deliberate move to a version
-    that only has one of them makes this fail, change the assertion and record which
-    version — do not simply delete the line that is holding the poll off.
-    """
-    env = _watchtower_env()
-    polls = env.get("WATCHTOWER_HTTP_API_PERIODIC_POLLS", "false")
-    assert polls.lower() not in TRUTHY, (
-        "WATCHTOWER_HTTP_API_PERIODIC_POLLS is on, so the updater now pulls and "
-        "recreates api + web every 24 hours with nobody watching, on a box where "
-        "cleanup is off and a replacement that merely starts counts as a success"
-    )
-    for timer in ("WATCHTOWER_SCHEDULE", "WATCHTOWER_POLL_INTERVAL"):
-        assert timer not in env, (
-            f"{timer} is set, which asks the updater to apply releases on a timer. "
-            "Every rollback story in this file assumes somebody is at the keyboard "
-            "when a bad release lands; if that is being given up, say so here"
+    expected = {"api": "SAIVA_API_IMAGE", "web": "SAIVA_WEB_IMAGE",
+                "db": "SAIVA_DB_IMAGE", "caddy": "SAIVA_CADDY_IMAGE"}
+    for name, variable in expected.items():
+        image = str(services[name]["image"])
+        assert image.startswith("${" + variable), (
+            f"{name}'s image cannot be pinned with {variable}, so a rollback cannot "
+            f"restore it by digest: {image}"
         )
-    # The same three settings spelled as flags, which outrank the environment — see
-    # _watchtower_flags. `--http-api-periodic-polls` in `command:` is the shortest
-    # edit that turns this box into a daily unattended updater.
-    flags = _watchtower_flags()
-    timer_flags = re.findall(
-        r"(?:^|\s)(--http-api-periodic-polls|--schedule|--interval)(?=$|[\s=])", flags
+
+
+def test_the_rollback_pin_list_matches_the_services_it_claims_to_cover() -> None:
+    """The shell's list and the compose file must not drift apart silently."""
+    release_sh = (REPO / "scripts" / "lib" / "release.sh").read_text()
+    assert "SAIVA_SERVICES=(api web db caddy)" in release_sh, (
+        "scripts/lib/release.sh no longer records all four services; a rollback that "
+        "restores only some of them leaves the box on the combination that failed"
     )
-    assert not timer_flags, (
-        f"{timer_flags} in the updater's command puts it back on a timer regardless of "
-        f"the variables above: {flags!r}"
-    )
-    assert env.get("WATCHTOWER_HTTP_API_UPDATE", "").lower() in TRUTHY, (
-        "WATCHTOWER_HTTP_API_UPDATE is gone. On any version that predates "
-        "http-api-endpoints that silently enables no endpoint at all, the API never "
-        "binds, and the synthesised 24-hour poll runs instead"
-    )
-    allowlist = env.get("WATCHTOWER_HTTP_API_ENDPOINTS", "")
-    endpoints = [part for part in re.split(r"[,\s]+", allowlist) if part]
-    assert "update" in endpoints or "all" in endpoints, (
-        "WATCHTOWER_HTTP_API_ENDPOINTS no longer enables the update endpoint, so the "
-        "in-app button depends entirely on a flag the fork says it will remove in v2 — "
-        f"and whose removal starts a 24-hour poll rather than failing loudly: {endpoints}"
-    )
+    for variable in ("SAIVA_API_IMAGE", "SAIVA_WEB_IMAGE", "SAIVA_DB_IMAGE", "SAIVA_CADDY_IMAGE"):
+        assert variable in release_sh, f"{variable} is not in the rollback pin list"
+
+
+def test_the_deploy_never_derives_persisted_state_from_a_missing_flag() -> None:
+    """The defect that took the production site off the LAN, asserted structurally.
+
+    scripts/deploy.sh used to end its site-address block with an `else` that wrote
+    SAIVA_BIND_ADDR=127.0.0.1, so a bare `make pull` -- the command the README gave for
+    upgrades -- un-published an install that had been reachable on the LAN for months.
+    The flag's absence meant "the owner did not say" and was read as "the owner said
+    localhost".
+
+    scripts/tests/run.sh proves the behaviour by running the deploy twice and diffing
+    .env. This asserts the shape, so the branch cannot come back in a form that happens
+    to pass that test on the day it is written.
+    """
+    source = (REPO / "scripts" / "deploy.sh").read_text()
+    assert source.strip(), "read nothing from deploy.sh, so this test passes vacuously"
+    body = [line for line in source.splitlines() if not line.lstrip().startswith("#")]
+    in_site_block = False
+    for line in body:
+        if line.startswith('if [ -n "$SITE" ]'):
+            in_site_block = True
+            continue
+        if in_site_block:
+            if line.startswith("fi"):
+                break
+            assert not line.startswith("else"), (
+                "deploy.sh has an `else` on the site-address branch again. A flag's "
+                "absence must never change persisted state -- see scripts/lib/env-file.sh."
+            )
 
 
 def test_nothing_the_host_runs_prunes_images_behind_the_owner() -> None:
-    """A prune in the deploy would undo the fix above without touching the fix above.
+    """A prune in the deploy would delete exactly what a rollback needs.
 
-    `docker image prune` removes dangling images, and the image held for a rollback is
+    `docker image prune` removes dangling images, and an image kept for a rollback is
     dangling by definition: the tag it had moved to the release that replaced it. So
-    adding a prune to deploy.sh or the Makefile — the obvious response to noticing that
-    images accumulate now — deletes exactly the thing cleanup was turned off to keep,
-    and leaves WATCHTOWER_CLEANUP reading "false" while behaving like "true". Pruning is
-    the owner's call, made when a release has proved itself, and the README says so.
+    adding a prune to the deploy -- the obvious response to noticing that images
+    accumulate -- deletes the one thing that makes an offline rollback possible. Pruning
+    is the owner's call, made once a release has proved itself, and the README says so.
     """
-    paths = (REPO / "scripts" / "deploy.sh", REPO / "Makefile")
+    paths = (
+        REPO / "scripts" / "deploy.sh",
+        REPO / "scripts" / "lib" / "release.sh",
+        REPO / "scripts" / "saiva-update-agent",
+        # A root-run host script on a nightly timer, and the one most likely to attract a
+        # prune: it is the thing that notices the disk filling up. The dumps it writes and
+        # the rollback images share a filesystem, so "reclaim some space while we are
+        # here" would delete the rollback and call it housekeeping.
+        REPO / "scripts" / "backup.sh",
+        REPO / "Makefile",
+    )
     host_scripts = {path.relative_to(REPO): path.read_text() for path in paths}
     assert all(text.strip() for text in host_scripts.values()), (
         f"read nothing from {list(host_scripts)}, so this test passes vacuously"
@@ -475,10 +493,231 @@ def test_nothing_the_host_runs_prunes_images_behind_the_owner() -> None:
         if not line.lstrip().startswith("#") and prunes.search(line)
     ]
     assert not offenders, (
-        "the deploy prunes images, which deletes the untagged image kept for rolling "
-        "back a bad release:\n" + "\n".join(offenders)
+        "the deploy prunes images, which deletes the image kept for rolling back a bad "
+        "release:\n" + "\n".join(offenders)
     )
 
+
+def test_the_state_directory_has_one_spelling() -> None:
+    """compose, the installer and the deploy script must name the same directory.
+
+    They are three separate literals in three languages. When they drift, the symptom is
+    not an error: the deploy writes its status where no container mounts, the panel
+    reports "no update has ever run" after every successful update, and nothing says why.
+    """
+    default = "/var/lib/saiva/update"
+    compose = COMPOSE_PROD.read_text()
+    # Four now: the api's read-only mount of the directory, its read-write mounts of the
+    # two drop-boxes inside it (requests, for an update; backup-requests, for "Back up
+    # now"), and caddy's read-only mount.
+    assert compose.count("${SAIVA_STATE_DIR:-" + default + "}") == 4, (
+        "the api's three mounts and caddy's one no longer all interpolate "
+        f"SAIVA_STATE_DIR with the default {default}"
+    )
+    assert default in (REPO / "scripts" / "lib" / "state.sh").read_text()
+    assert default in (REPO / "scripts" / "install-updater.sh").read_text()
+    assert f"SAIVA_STATE_DIR={default}" in (REPO / ".env.example").read_text(), (
+        "a fresh .env does not record the state directory, so a box whose /var/lib is "
+        "not writable by the deploying user silently uses a different one"
+    )
+
+
+# The two surfaces that work this way, each a shell script writing a phase into a status
+# file, an API module passing it through verbatim, and a panel turning it into words. They
+# are parametrized rather than copied because the invariant is identical and the failure
+# is identical, and because a copy is how one of them would end up with half the checks.
+#
+# `anchor` is the family's own non-vacuity guard: phases the family is known to report
+# today. Without it a discovery regex that silently stopped matching -- a rename, a
+# refactor into a helper -- would turn this into a test that proves nothing while staying
+# green, which is the specific way cross-language tests rot.
+_PHASE_FAMILIES = [
+    pytest.param(
+        REPO / "scripts" / "lib" / "release.sh",
+        REPO / "frontend" / "src" / "components" / "UpdatesPanel.tsx",
+        "app.services.updates",
+        {"applied", "rolled_back", "running"},
+        id="update",
+    ),
+    pytest.param(
+        REPO / "scripts" / "backup.sh",
+        REPO / "frontend" / "src" / "components" / "BackupsPanel.tsx",
+        "app.services.backups",
+        {"ok", "failed", "skipped", "running"},
+        id="backup",
+    ),
+]
+
+
+def _panel_switch_cases(panel: Path, anchor: str) -> set[str]:
+    """The case labels of the one `switch` in `panel` that handles `anchor`.
+
+    Scoped to a single switch rather than searched over the whole file, because the whole
+    file is ambiguous and quietly so. BackupsPanel.tsx has two switches — one over
+    `offsite`, one over `phase` — and `ok` and `failed` are labels in BOTH. Measured while
+    writing this: deleting `case "ok":` from the off-box switch left a plain substring
+    check green, because the phase switch still had one. The test would then have been
+    asserting that the panel contains the word somewhere, which is not the property.
+
+    `anchor` is the label that identifies the switch, and it earns its keep twice: it is a
+    label the shell never writes, so nothing else in this file requires the panel to have
+    it. `unreadable` is the API's own answer to a record it cannot parse, and a panel
+    without a branch for it would render the words "unreadable" at the owner.
+    """
+    source = panel.read_text()
+    segments = [seg for seg in source.split("switch (") if f'case "{anchor}":' in seg]
+    assert len(segments) == 1, (
+        f"{panel.name} has {len(segments)} switch statements handling {anchor!r}, so which "
+        "one is authoritative is not something this file states. One is the invariant; it "
+        "is also what makes the labels below unambiguous."
+    )
+    return set(re.findall(r'case "([a-z_-]+)":', segments[0]))
+
+
+# Two ways a phase reaches the status file, and both have to be read. `status_finish`
+# writes the terminal ones; `status_set phase` is how `running` gets there, and it was
+# missing from this test -- so nothing proved that either panel could render a run in
+# progress, which is the state an owner is most likely to be looking at.
+_PHASE_PATTERNS = (r"status_finish\s+([a-z_]+)", r"status_set\s+phase\s+([a-z_]+)")
+
+
+@pytest.mark.parametrize(("script", "panel_path", "module_name", "anchor"), _PHASE_FAMILIES)
+def test_every_outcome_the_host_can_report_is_one_the_panel_handles(
+    script: Path, panel_path: Path, module_name: str, anchor: set[str]
+) -> None:
+    """A cross-language invariant, so it needs a test that reads every side.
+
+    The shell writes a phase string; the API passes it through verbatim; the panel turns
+    it into words. Nothing but this connects them. A new state added to the host script
+    without a branch in the panel renders as a bare phase name on the one screen the owner
+    looks at when something has gone wrong -- which is a quiet version of exactly the
+    failure this whole design exists to remove.
+
+    The API side matters for a second reason: a phase the service module does not know is
+    one {update,backup}_in_progress() cannot reason about, so a run in a state it has
+    never heard of either blocks the button forever or never blocks it at all.
+    """
+    import importlib
+
+    source = script.read_text()
+    assert source.strip(), f"read nothing from {script.name}, so this test proves nothing"
+    phases = {
+        phase for pattern in _PHASE_PATTERNS for phase in re.findall(pattern, source)
+    }
+    assert anchor <= phases, (
+        f"{script.name} no longer reports the outcomes this test knows about "
+        f"({sorted(anchor - phases)}), so the discovery regexes have stopped seeing its "
+        f"vocabulary and everything below passes for the wrong reason: {sorted(phases)}"
+    )
+
+    assert panel_path.is_file(), (
+        f"{panel_path.relative_to(REPO)} does not exist, so nothing renders these states "
+        f"for the owner: {sorted(phases)}"
+    )
+    handled = _panel_switch_cases(panel_path, "unreadable")
+    unhandled = sorted(phases - handled)
+    assert not unhandled, (
+        f"{script.name} can end in states {panel_path.name} has no words for, so they "
+        f"would render as a raw phase name: {unhandled}"
+    )
+
+    module = importlib.import_module(module_name)
+    missing = sorted(phases - module.TERMINAL_PHASES - module.ACTIVE_PHASES)
+    assert not missing, (
+        f"{module_name} does not know these phases, so it cannot tell a run that is "
+        f"still going from one that has finished: {missing}"
+    )
+
+
+def test_every_off_box_state_the_backup_can_report_is_one_the_panel_handles() -> None:
+    """The same shape as above, for the field that is most likely to be read as a tick.
+
+    `offsite` is not a boolean, and the reason is measured rather than theoretical: `stat
+    -c %d` reports a btrfs subvolume, a ZFS dataset, an LVM thin volume and a Proxmox
+    bind-mount as DIFFERENT devices while they live on the same physical disk -- which are
+    exactly the configurations a Proxmox box has. So a device-number comparison would have
+    called every one of those "copied off this box". The vocabulary that replaced it has
+    six words in it, only one of which is good news, and a word the panel has no branch
+    for would render as itself next to a copy that never left the machine.
+
+    Three things are checked, not one: that the shell still declares the vocabulary in one
+    place, that every literal it can actually write is in that declaration, and that the
+    panel has a branch for each. The middle one is the load-bearing step -- a state the
+    script writes but does not declare would never be compared against the panel at all,
+    so without it the other two could both pass over a silent gap.
+    """
+    source = (REPO / "scripts" / "backup.sh").read_text()
+    assert source.strip(), "read nothing from backup.sh, so this test proves nothing"
+
+    declared = re.search(r"SAIVA_OFFSITE_STATES=\(([^)]*)\)", source)
+    assert declared, (
+        "scripts/backup.sh no longer declares SAIVA_OFFSITE_STATES. That list is the "
+        "whole vocabulary, in one place, precisely so that the API can pass it through "
+        "and the panel can have a sentence for each; without it there is nothing to hold "
+        "the three languages to."
+    )
+    states = set(declared.group(1).split())
+    # The named anchor: the states whose whole purpose is to NOT read as good news, plus
+    # the one that may. If the declaration stops containing these, reading it has stopped
+    # telling us anything.
+    anchor = {"off", "failed", "same-filesystem", "same-host", "remote"}
+    assert anchor <= states, (
+        f"backup.sh no longer declares the off-box states this test knows about "
+        f"({sorted(anchor - states)}); found {sorted(states)}"
+    )
+
+    # Every literal the script can actually put in that field, however it gets there:
+    # written straight, chosen by the worsening helper, or assigned to the variable the
+    # final write reads. A literal outside the declared list would be a state nothing
+    # ever checks the panel for, which is the hole the declaration exists to close.
+    written = set(re.findall(r"status_set\s+offsite\s+([a-z][a-z-]*)\b", source))
+    written |= set(re.findall(r"_offsite_worsen\s+([a-z][a-z-]*)\b", source))
+    written |= set(re.findall(r"\bOFFSITE_STATE=([a-z][a-z-]*)\b", source))
+    assert written, "no off-box state is written anywhere, so this test is checking nothing"
+    assert written <= states, (
+        "scripts/backup.sh writes off-box states that SAIVA_OFFSITE_STATES does not "
+        f"declare, so nothing checks the panel for them: {sorted(written - states)}"
+    )
+
+    # And nothing reaches that field through a variable this test does not follow. The
+    # previous shape of this script wrote `${worst:-ok}`, i.e. it defaulted to the most
+    # reassuring answer in the union when no branch had said anything; a form this test
+    # cannot read is how that would come back unnoticed.
+    for token in re.findall(r"status_set\s+offsite\s+(\S+)", source):
+        bare = token.strip('"')
+        assert re.fullmatch(r"[a-z][a-z-]*", bare) or bare in {
+            "$OFFSITE_STATE",
+            "${OFFSITE_STATE}",
+        }, (
+            f"`status_set offsite {token}` is in a form this test cannot follow, so the "
+            "off-box vocabulary is no longer being checked against the panel"
+        )
+
+    panel_path = REPO / "frontend" / "src" / "components" / "BackupsPanel.tsx"
+    assert panel_path.is_file(), (
+        f"{panel_path.relative_to(REPO)} does not exist, so nothing tells the owner how "
+        f"far their backup actually got: {sorted(states)}"
+    )
+    # `same-filesystem` is the label that identifies the off-box switch rather than the
+    # phase switch beside it, and it is the one word in this vocabulary that must never be
+    # rendered as a tick: a copy on the same disk as the database is not a backup.
+    unhandled = sorted(states - _panel_switch_cases(panel_path, "same-filesystem"))
+    assert not unhandled, (
+        "backup.sh can report off-box states BackupsPanel.tsx has no words for, so a copy "
+        f"that never left this machine would render as a bare state name: {unhandled}"
+    )
+
+
+def test_an_update_cannot_run_twice_at_once() -> None:
+    """Two concurrent `compose up` runs against one project is a way to lose a database.
+
+    The api refuses a second request while one is in flight, but the api is not the only
+    way in -- `make update` on the host goes straight to the script. The lock has to be
+    in the script.
+    """
+    release_sh = (REPO / "scripts" / "lib" / "release.sh").read_text()
+    assert "flock" in release_sh, "scripts/lib/release.sh no longer takes a lock"
+    assert "already running" in release_sh, "and no longer says so when it cannot get one"
 
 # --- HSTS -----------------------------------------------------------------------
 

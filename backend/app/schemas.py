@@ -878,10 +878,113 @@ class MetaOut(BaseModel):
 
 class UpdateStatus(BaseModel):
     current_version: str
+    current_build: str | None = None  # immutable build tag, e.g. sha-1a2b3c4
     latest_version: str | None
     update_available: bool
-    apply_available: bool  # in-app "Update now" works (Watchtower configured)
+    apply_available: bool  # the host updater is installed and its directory is writable
     check_enabled: bool
+    # The two fields that stop "no update found" being rendered as reassurance:
+    # check_failed means the request to GitHub did not succeed, and comparable means the
+    # running version is semver and so can be compared at all.
+    # No defaults that read as reassurance. A caller that forgets to set these -- a new
+    # code path, a partially-populated object in a test -- should produce "I could not
+    # check" and "I cannot compare", not a confident all-clear.
+    check_failed: bool
+    comparable: bool
     release_url: str | None = None
     release_notes: str | None = None
     published_at: str | None = None
+
+
+class UpdateRun(BaseModel):
+    """The host updater's record of the last run. Every field may be absent.
+
+    Nothing here is inferred by the API. It is what scripts/lib/state.sh wrote to a file
+    on the host, read back verbatim, so that a container being replaced is a gap in the
+    transport and not a loss of the answer.
+    """
+
+    available: bool = False  # the host updater is installed at all
+    run_id: str | None = None
+    phase: str | None = None  # running | applied | failed | rolled_back | rolled_back_code_only
+    step: str | None = None
+    trigger: str | None = None  # button | cli
+    started_at: str | None = None
+    finished_at: str | None = None
+    message: str | None = None
+    exit_code: str | None = None
+    from_version: str | None = None
+    to_version: str | None = None
+    schema_before: str | None = None
+    schema_after: str | None = None
+    db_revision: str | None = None
+    log_tail: list[str] | None = None
+
+
+class BackupStatus(BaseModel):
+    """The host's record of the last backup run. Every field may be absent.
+
+    Nothing here is inferred by the API, for the same reason nothing is inferred in
+    UpdateRun: it is what scripts/lib/state.sh wrote to a file on the host, read back
+    verbatim. The renderer on that side has one type -- every value is a JSON string or
+    null -- so the counts arrive as strings and are passed on as strings rather than
+    coerced into numbers the shell never promised.
+
+    `verified` is the field this shape exists for. A dump that has not been restored is
+    not a backup: scripts/backup.sh proves one by replaying it into a throwaway database
+    and comparing row counts in both directions, because `psql --single-transaction -v
+    ON_ERROR_STOP=1` was measured to exit 0 on a dump truncated in the middle of a COPY
+    block. So there are three answers and not two -- proved, disproved, and not known --
+    and the default is the third. `False` would read as "we checked and it is bad" and
+    `True` would be the exact lie this regime exists to remove.
+
+    The same rule governs the rest. `last_success_at` and `last_verified_at` are carried
+    forward by the host across a failed or skipped run on purpose, so "the backup failed
+    last night" and "there is no backup" stay distinguishable; an absent one means no run
+    has ever got that far, never "recently".
+    """
+
+    available: bool = False  # the backup drop-box exists and this container may write it
+    # The policy the page reads back rather than hard-codes: how old the newest VERIFIED
+    # backup may be before Settings stops calling it current (SAIVA_BACKUP_STALE_HOURS).
+    # Required, like UpdateStatus.check_failed, so a caller that forgets it fails loudly
+    # instead of shipping a second copy of the number that quietly disagrees with .env.
+    stale_after_hours: int
+    run_id: str | None = None
+    phase: str | None = None  # running | ok | failed | skipped (+ API-only `unreadable`)
+    step: str | None = None  # preflight | dump | verify | offsite | prune | skipped | done
+    trigger: str | None = None  # timer | cli | button
+    started_at: str | None = None
+    finished_at: str | None = None
+    message: str | None = None
+    exit_code: str | None = None
+    # What this run made. dump_bytes and rows_checked are strings because the host wrote
+    # strings; the page formats them, and a missing one is a gap rather than a zero.
+    dump_name: str | None = None
+    dump_bytes: str | None = None
+    dump_revision: str | None = None  # alembic_version read out of the dump itself
+    verified: bool | None = None  # never False and never True by default -- see above
+    verify_message: str | None = None  # what the rehearsal actually proved
+    rows_checked: str | None = None
+    # Carried forward by the host across a failed or skipped run.
+    last_success_at: str | None = None
+    last_verified_at: str | None = None
+    # How far away the copy got, from SAIVA_OFFSITE_STATES in scripts/backup.sh:
+    # remote | unknown | same-host | same-filesystem | failed | off, worst last. Not a
+    # boolean, because `stat -c %d` reports a btrfs subvolume, a ZFS dataset, an LVM thin
+    # volume and a Proxmox bind-mount as different devices while they live on the same
+    # physical disk -- precisely the configurations a Proxmox box has, so "a different
+    # filesystem" is not "off this box". Only `remote` is good news. Kept as a free string
+    # rather than a Literal so a state this version has not heard of reaches the panel and
+    # renders as itself, instead of 500ing the page that is meant to report on it.
+    offsite: str | None = None
+    offsite_target: str | None = None
+    offsite_at: str | None = None
+    offsite_message: str | None = None
+    # The shape of the retained set, so a volume filling up is visible rather than
+    # silently tidied: the prune removes old nightlies and nothing else.
+    backup_count: str | None = None
+    oldest_at: str | None = None
+    kept: str | None = None
+    pruned: str | None = None
+    log_tail: list[str] | None = None

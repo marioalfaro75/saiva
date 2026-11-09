@@ -1069,10 +1069,28 @@ th.actions {
   text-transform: uppercase;
   letter-spacing: 0.04em;
 }
-.notice.warn {
+.notice.warn,
+.notice-warn {
   background: rgba(245, 158, 11, 0.12);
   border-color: var(--warning);
   color: var(--warning);
+}
+
+/* Update outcomes. Four tones rather than two, because the updater reports four kinds
+   of ending and the one that matters most -- rolled the code back but not the database
+   -- is neither a success nor a plain failure. */
+.notice-good {
+  background: rgba(45, 212, 191, 0.1);
+  border-color: var(--accent-strong);
+}
+.notice-info {
+  background: rgba(96, 165, 250, 0.12);
+  border-color: var(--info);
+}
+.notice-bad {
+  background: rgba(248, 113, 113, 0.12);
+  border-color: var(--negative);
+  color: var(--negative);
 }
 
 /* ---- Import: telling one account value from another ---- */

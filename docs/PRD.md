@@ -381,7 +381,7 @@ Trustworthy numbers are the whole product, so testing is built in from Phase 0, 
 | **Charts** | **ECharts** (or Recharts/visx) | Handles Sankey, heatmaps, large series, drill‑through. |
 | **Backend** | **Python + FastAPI** | Strong for file parsing (pandas), ML categorisation (scikit‑learn), and clean LLM orchestration; great typing/OpenAPI. |
 | **DB** | **PostgreSQL** | Reliable, great for analytical queries; mature backup tooling. |
-| **Jobs** | Lightweight scheduler/worker (APScheduler or RQ/Celery) | Recurring detection, digests, scheduled backups. |
+| **Jobs** | Lightweight scheduler/worker (APScheduler or RQ/Celery) | Recurring detection, digests. (Scheduled **backups** deliberately did NOT end up here: a systemd timer on the host runs them, because the thing producing the safety net must not be the thing a bad release can break, and a backup is most wanted on the night the app will not start. See docs/BACKUPS.md.) |
 | **Categorisation** | Rules engine + scikit‑learn classifier (incremental, learns from corrections) | Accuracy without cloud dependency. |
 | **AI orchestration** | Provider adapter (Anthropic/OpenAI/Gemini/OpenAI‑compatible/Ollama) + tool/function calling over a read‑only insights API | One interface, many models; privacy modes enforced server‑side. |
 | **Auth** | App‑native accounts, Argon2id hashing, session or JWT, optional **TOTP 2FA** | Simple, self‑contained, no external IdP required. |

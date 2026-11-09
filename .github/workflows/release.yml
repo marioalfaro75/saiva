@@ -1,78 +1,80 @@
-name: Release
+name: Hand-pushed tag (not a release path)
 
-# Publishes the api + web images to GitHub Container Registry (ghcr.io) on a
-# version tag (e.g. `git tag v0.4.0 && git push --tags`), or on manual dispatch.
+# This workflow used to build and publish `:latest` from any `v*` tag anyone pushed.
+# It no longer publishes anything. It exists to say so out loud.
+#
+# What it was, and why that was wrong. It ran docker/metadata-action with
+# `type=semver`, which in its default `auto` mode generates `:latest` as well — so this
+# workflow moved the tag production follows without the string "latest" appearing
+# anywhere in it. It created no GitHub Release, and there was never a step in it that
+# could have: the in-app update badge reads GitHub *Releases*
+# (backend/app/services/updates.py, `fetch_latest_release`), not tags. So a hand-pushed
+# tag shipped a new image to every box on `:latest` with no release notes, nothing in
+# the app to say an update had happened, and no record a human had decided to ship it.
+# cut-release.yml does the same job with the steps that make it a release: validate the
+# version, run the shared checks, publish the images, smoke-test them, promote the
+# rolling tags, then create the tag and the GitHub Release.
+#
+# Deleted outright, or kept as this? Kept, and the reason is the failure mode. Delete
+# the workflow and pushing `v0.17.0` by hand becomes a silent no-op: the tag exists,
+# no image is built, `:latest` still serves the old release, no Release record appears,
+# and the person who pushed it has every reason to believe they shipped. That is the
+# same shape as the bug this file used to be — a pipeline that looks like it worked —
+# and it is the shape that costs the most to discover later. A workflow that fails
+# loudly turns it into a red run in the Actions tab, a notification, and instructions.
+# The cost of keeping it is one near-instant failed run per hand-pushed tag.
+#
+# No `concurrency` group here, deliberately. cut-release.yml and refresh-images.yml
+# share `ghcr-release-channel` because they both write the rolling release tags and
+# must not interleave. This workflow writes nothing, so joining that group would only
+# let a stray tag push queue ahead of a real release.
 on:
   push:
     tags: ["v*"]
-  workflow_dispatch:
-    inputs:
-      tag:
-        description: "Extra tag to publish (manual runs), e.g. edge"
-        required: false
-        default: edge
 
-permissions:
-  contents: read
-  packages: write
-
-# This workflow writes `:latest` without ever naming it: docker/metadata-action
-# generates it by default in `auto` mode for `type=semver`, which the `meta` step
-# below uses. That makes this the third writer of the release channel, alongside
-# cut-release.yml and refresh-images.yml, and it was the only one not serialised —
-# so a `v*` tag pushed by hand while a refresh was promoting could interleave two
-# writers on the same tag. Same group as the other two, and never cancel: the images
-# are published before anything else happens, so a cancelled run leaves the channel
-# half-written.
-concurrency:
-  group: ghcr-release-channel
-  cancel-in-progress: false
+# Nothing is read and nothing is written. The old `packages: write` is exactly what
+# this file should no longer hold.
+permissions: {}
 
 jobs:
-  # A version tag used to publish straight to `:latest`. Anyone who could push a
-  # tag could ship an image that had never run a test — the edge channel was gated
-  # and the release channel, the one users actually pull, was not.
-  checks:
-    name: Checks
-    uses: ./.github/workflows/checks.yml
-
-  publish:
-    needs: checks
+  refuse:
+    name: Refuse to publish from a tag push
     runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        include:
-          - { image: saiva-api, context: ./backend }
-          - { image: saiva-web, context: ./frontend }
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v3       # enables linux/arm64 builds
-      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
-      - name: Log in to GHCR
-        uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-      - name: Image metadata (tags + labels)
-        id: meta
-        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
-        with:
-          images: ghcr.io/${{ github.repository_owner }}/${{ matrix.image }}
-          tags: |
-            type=semver,pattern={{version}}
-            type=semver,pattern={{major}}.{{minor}}
-            type=sha
-            type=raw,value=${{ github.event.inputs.tag }},enable=${{ github.event_name == 'workflow_dispatch' }}
-      - name: Build and push
-        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
-        with:
-          context: ${{ matrix.context }}
-          build-args: |
-            SAIVA_VERSION=${{ steps.meta.outputs.version }}
-          push: true
-          platforms: linux/amd64,linux/arm64
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+      - name: Explain what did not happen, and what to do instead
+        env:
+          TAG: ${{ github.ref_name }}
+          REPO_URL: ${{ github.server_url }}/${{ github.repository }}
+        run: |
+          set -euo pipefail
+          # Via env rather than interpolated into the script: a ref name is attacker-
+          # controllable in the general case, and an expression interpolated into a
+          # `run:` block is textual substitution into the shell, quoting and all.
+          {
+            echo "## \`$TAG\` was pushed, and nothing was published"
+            echo
+            echo "No image was built. \`:latest\` still points where it did, and no"
+            echo "GitHub Release was created — so the in-app update check, which reads"
+            echo "Releases rather than tags, has not noticed this tag and never will."
+            echo
+            echo "To release $TAG properly:"
+            echo
+            echo "1. Delete the tag, locally and on the remote:"
+            echo "   \`git tag -d $TAG && git push --delete origin $TAG\`"
+            echo "2. Run **Actions -> Cut release -> Run workflow** and enter the version"
+            echo "   without the \`v\` (for \`$TAG\`, enter \`${TAG#v}\`)."
+            echo
+            echo "Cut release validates the version, runs the full checks, publishes both"
+            echo "images, boots them to prove they work, moves \`:latest\` onto the tested"
+            echo "digests and then creates the tag and the Release — in that order, so a"
+            echo "release that cannot start never reaches the house and a Release never"
+            echo "exists without an image behind it."
+            echo
+            echo "<$REPO_URL/actions/workflows/cut-release.yml>"
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo "::error::$TAG was pushed by hand. This repository does not publish from"
+          echo "::error::tag pushes: a tag reaches every box on :latest with no release"
+          echo "::error::notes and no update badge. Delete the tag and run the Cut"
+          echo "::error::release workflow instead. See this run's summary for the exact"
+          echo "::error::commands."
+          exit 1

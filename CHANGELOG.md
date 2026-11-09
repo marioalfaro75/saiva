@@ -6,6 +6,131 @@ All notable changes to Saiva are documented here. The project follows
 ## [Unreleased]
 
 
+## [0.17.0] — 2026-11-09
+
+**This release has to be applied by hand, once.** The version on your box does not contain
+the updater that applies it. On the host:
+
+```bash
+cd /opt/saiva                      # wherever the checkout is
+git fetch --tags
+git checkout --detach v0.17.0
+sudo ./scripts/install-updater.sh  # the host agent, the drop-boxes, the backup timer
+make update                        # applies the release the new way
+sudo nano /etc/saiva/agent.conf    # set SAIVA_BACKUP_COPY_TO — see docs/BACKUPS.md
+sudo ./scripts/backup.sh           # take the first backup now, and watch it verify
+```
+
+After that, every update is **Update now** or `make update`. `make update` passes
+`--remove-orphans`, so the `watchtower` and `docker-socket-proxy` containers the old design
+ran are stopped and removed as part of it; `WATCHTOWER_TOKEN` in `.env` is simply no longer
+read.
+
+### Added
+
+- **Updates are one path now, and it delivers the whole release.** `scripts/deploy.sh
+  --apply-release` — which **Update now** and `make update` both run, because they are the
+  same script — moves the checkout to the newest release tag, reconciles `.env`, pulls every
+  service's image, applies the compose file, reloads Caddy if the Caddyfile's *contents*
+  changed, and then **asks your published address whether the site actually answers, from
+  outside the containers**. If it does not, the box is put back: your `.env`, the previous
+  checkout, and the exact image digests that were running, pinned so the rollback works
+  offline and ignores where `latest` has moved to.
+
+  The old design delivered three of the eight kinds of change a release can contain.
+  Watchtower never reads a compose file — it recreates a container from the *old*
+  container's inspect output — so no compose change, no `.env` value, no port binding and
+  no Caddyfile edit could reach the box through it, and it treated a container that merely
+  *starts* as a success. See `docs/UPDATING.md`.
+
+- **Nightly backups, and they are proven rather than assumed.** A systemd timer on the host
+  dumps the database, **restores that dump into a throwaway database and compares it row for
+  row**, copies it off the box, and writes down what happened. Only a dump that came back
+  whole is called a backup. **Settings → Backups** shows the age of the newest *verified*
+  one and says so plainly when there isn't one — including the state that matters most, *a
+  dump was taken but it could not be restored*. Set it up with
+  `sudo ./scripts/install-updater.sh`, choose a destination in `/etc/saiva/agent.conf`, and
+  see `docs/BACKUPS.md`.
+
+  Why the restore rehearsal is the whole point: `psql --single-transaction -v
+  ON_ERROR_STOP=1` **exits 0** on a dump truncated inside a COPY block — it finishes the
+  COPY with whatever rows arrived and reports success. "It restored without error" is not
+  evidence that a dump is complete, so four checks run instead and a `--schema-only` dump, a
+  truncated gzip and a half-written dump are each refused.
+- **The off-box copy is measured, not assumed.** The page distinguishes *same disk*, *same
+  machine* and *off this machine*, because `stat` reports a btrfs subvolume, a ZFS dataset
+  and a Proxmox mount point as different devices while they live on the same physical disk —
+  and those are exactly the configurations a Proxmox box has. Only a network filesystem or a
+  successful push command is reported as off the machine.
+- **Back up now**, in Settings, over the same host path. It writes into a second drop-box;
+  which of the two directories a request landed in is the only information root takes from
+  the app, so the file is still never opened.
+
+### Fixed
+
+- **The Settings page stopped claiming success it could not know about.** Pressing *Update
+  now* started a four-minute poll and then rendered "Update applied." whether the version had
+  changed or the poll had simply run out; and "You're on the latest version ✅" appeared
+  whenever the check was enabled and no newer release was found — including when the request
+  to GitHub had failed outright, so a network failure read as reassurance. Neither was
+  fixable there alone: the api container was the thing being replaced, so it could never
+  report on its own update. The record now lives in a file on the host, and the panel only
+  reads it.
+- **A failing update never wrote the "stopped without finishing" record it was supposed to.**
+  A bare `return` takes its status from `$?`, and bash sets `$?` to the pending exit status
+  for the duration of an EXIT trap — so `state_dir()` returned non-zero inside the trap
+  handler, `status_flush` died at its first assignment under `set -e`, and the record on
+  disk still said `running`. The panel's stale-run branch covered for it, which is why it
+  went unnoticed. Every `return` in `scripts/lib/` is now explicit.
+- **The installer and the host agent now read `SAIVA_STATE_DIR` from `.env`**, which is what
+  docker-compose interpolates the bind mounts from and therefore the only answer the
+  containers can see. They used to prefer `/etc/saiva/agent.conf`; the first time the two
+  disagreed, the agent looked for a status file where the conf said, found nothing, and
+  overwrote a good result with "the run failed silently".
+
+- **An older image meeting a newer schema serves, instead of crash-looping.** That is what
+  makes a rollback possible at all. It used to raise `CommandError: Can't locate revision`,
+  and because the container chains the migration to the server with `&&`, nothing ever bound
+  :8000 — and because the backup check asked whether the revision *differed* rather than
+  whether it was *behind*, every restart attempt first wrote a full copy of the database next
+  to it. The recovery attempt filled the disk. `backend/app/schema_state.py` has the whole
+  reading.
+
+- **A restore procedure that exists and has been rehearsed.** `./scripts/restore-backup.sh`
+  lists the dumps and restores one, from a throwaway container because the volume is mounted
+  only into `api` and the scenario that sends you there is `api` not starting. It takes a
+  dump of the current state first, so a mistaken restore is itself reversible, and 115
+  assertions in CI prove the round trip against real Postgres.
+
+- **`/api/health` reports the schema as data** — `fresh`, `behind`, `current`, `ahead` or
+  `unknown`, with the database's revision and the image's — and answers 200 for every one of
+  them, 503 only when the database is unreachable.
+
+### Changed
+
+- **There is no Docker socket on this box any more**, and no Watchtower. The in-app button
+  writes one uniquely-named file into a directory it can write and cannot list; a root-owned
+  systemd oneshot notices the file is there without ever opening it, and runs the one deploy
+  script with no arguments. The most a compromised api container can ask for is the update
+  the button was going to do anyway. Anything that can create a container can create a
+  privileged one, and that access existed so a button could pull two images.
+- **`make restart` is gone** rather than redefined: it rebuilt `api` and `web` from the
+  working tree, which on a pulled deployment replaced the released images with an untested
+  local build. It errors and names the three things you might have meant.
+- **`make destroy` requires a typed word** and names what goes with it — the ledger *and*
+  every dump in the volume. An off-box copy is the only thing that survives it.
+- **A bare `./scripts/deploy.sh` no longer rewrites `.env`.** A flag's absence used to change
+  persisted state: running it without `--site` reset `SAIVA_BIND_ADDR` to loopback and took a
+  LAN install off the network, with the README still promising it was reachable.
+- **CI proves the things that used to be promises.** An older image is booted against a
+  newer schema; migrations are checked to be expand-only; the restore is rehearsed; the
+  backup is taken and verified; and the image smoke suite — which boots both images — is now
+  a release gate rather than a weekly job on a channel production does not follow, so
+  nothing rolling moves until it passes.
+- `scripts/restore-backup.sh`'s Postgres plumbing moved to `scripts/lib/pg.sh` so the backup
+  and the restore share one set of container runners rather than two that can drift apart.
+
+
 ## [0.16.0] — 2026-10-31
 
 A possible duplicate now shows you the transaction it matched, and what else sits

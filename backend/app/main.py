@@ -7,9 +7,12 @@ from collections.abc import Awaitable, Callable
 from fastapi import FastAPI, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from sqlalchemy import text as sa_text
 
 from .api import api_router
 from .config import get_settings
+from .db import engine as db_engine
+from .schema_state import read_schema_state
 from .security import CSRF_COOKIE, CSRF_HEADER, csrf_valid
 
 settings = get_settings()
@@ -83,5 +86,57 @@ app.include_router(api_router, prefix="/api")
 
 
 @app.get("/api/health", tags=["meta"])
-def health() -> dict[str, str]:
-    return {"status": "ok"}
+def health(response: Response) -> dict[str, str | None]:
+    """What this process can actually see, reported as data rather than as a verdict.
+
+    This used to be `return {"status": "ok"}` — a literal, meaning only "uvicorn is
+    listening". It is the single signal consumed by the image's HEALTHCHECK, by
+    scripts/deploy.sh's wait loop and by `compose up --wait`, so every gate in the
+    deployment resolved to that unconditional 200. During the outage it printed a tick
+    while the site was unreachable from the LAN.
+
+    Two rules, both learned the hard way:
+
+    * Reach the database. A process that is listening but cannot query is not healthy,
+      and that is the failure a restart might actually fix.
+
+    * Report the schema state as DATA, and stay 200 for `ahead`. The tempting version of
+      this endpoint asserts `current == head` and returns 503 otherwise. Ship that
+      alongside the rolled-back-image handling in app/dbinit.py and a rolled-back image
+      serves correctly while reporting itself unhealthy: the deploy gate times out,
+      declares the rollback a failure and rolls back again, while `restart:
+      unless-stopped` loops underneath. A boolean cannot carry a four-valued answer.
+
+    503 is therefore reserved for the one case where this process genuinely cannot do its
+    job: the database is unreachable.
+    """
+    payload: dict[str, str | None] = {
+        "status": "ok",
+        "version": settings.saiva_version,
+        "build": settings.saiva_build or None,
+        "database": "ok",
+        "schema": None,
+        "db_revision": None,
+        "image_head": None,
+    }
+    try:
+        with db_engine.connect() as conn:
+            conn.execute(sa_text("SELECT 1"))
+            # Same connection: holding a second one from the pool on every health check
+            # is how a health check becomes the thing that exhausts the pool.
+            try:
+                payload.update(read_schema_state(db_engine, conn=conn).as_dict())
+            except Exception as exc:  # noqa: BLE001 - a readable DB with an unreadable history
+                # Deliberately NOT a 503, and deliberately not "database": "error". The
+                # database answered; it is the migration history this image cannot read.
+                # Reporting that as an unreachable database sends whoever is debugging
+                # to the wrong half of the system, and fails a gate over something a
+                # restart cannot fix.
+                payload["schema"] = "unknown"
+                payload["detail"] = type(exc).__name__
+    except Exception as exc:  # noqa: BLE001 - any failure to reach the DB is the answer
+        payload["status"] = "degraded"
+        payload["database"] = "error"
+        payload["detail"] = type(exc).__name__
+        response.status_code = 503
+    return payload

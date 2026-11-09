@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-import time
+from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
@@ -70,29 +70,31 @@ def test_update_check_reports_available(
     assert data["current_version"] == "0.1.0"
     assert data["latest_version"] == "v0.5.0"
     assert data["update_available"] is True
-    assert data["apply_available"] is False  # no Watchtower configured in tests
+    assert data["apply_available"] is False  # no host updater configured in tests
 
 
 def test_update_blocked_when_not_configured(auth_client: TestClient) -> None:
     assert auth_client.post("/api/admin/update").status_code == 503
 
 
-def test_update_triggers_watchtower_when_configured(
-    auth_client: TestClient, monkeypatch: pytest.MonkeyPatch
+def test_update_asks_the_host_when_the_updater_is_installed(
+    auth_client: TestClient, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    from app.api import admin
+    """One synchronous, verifiable thing: write the request and say whether that worked.
 
-    monkeypatch.setattr(admin.settings, "watchtower_url", "http://watchtower:8080")
-    monkeypatch.setattr(admin.settings, "watchtower_token", "tok")
-    called: dict[str, tuple[str, str]] = {}
-    monkeypatch.setattr(
-        updates, "trigger_watchtower", lambda url, token: called.setdefault("hit", (url, token))
-    )
+    This used to start a daemon thread, because Watchtower destroyed the process before
+    it could answer, and then return the literal string "update_started" whatever had
+    happened. The full set of behaviours around the new endpoint is in
+    tests/test_update_button.py; this is the one that used to live here.
+    """
+    # The layout the installer builds: the container may write only into requests/.
+    directory = tmp_path / "saiva-update"
+    (directory / "requests").mkdir(parents=True)
+    monkeypatch.setenv("SAIVA_UPDATE_DIR", str(directory))
 
     resp = auth_client.post("/api/admin/update")
+
     assert resp.status_code == 202
-    for _ in range(50):  # the trigger runs in a daemon thread
-        if "hit" in called:
-            break
-        time.sleep(0.02)
-    assert called["hit"] == ("http://watchtower:8080", "tok")
+    assert resp.json()["status"] == "requested"
+    dropped = list((directory / "requests").iterdir())
+    assert len(dropped) == 1 and dropped[0].is_file(), "the host was never actually asked"

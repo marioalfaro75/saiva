@@ -545,11 +545,134 @@ export interface SetupBody {
 
 export interface UpdateStatus {
   current_version: string;
+  current_build: string | null;
   latest_version: string | null;
   update_available: boolean;
   apply_available: boolean;
   check_enabled: boolean;
+  /** The request to GitHub failed. Distinct from "no newer release exists". */
+  check_failed: boolean;
+  /** The running version is semver, so "newer" is a question that can be answered. */
+  comparable: boolean;
   release_url: string | null;
   release_notes: string | null;
   published_at: string | null;
+}
+
+/**
+ * The host updater's record of the last run. Every field is nullable on purpose: the
+ * panel renders each absent one as a specific unknown, because the failure this whole
+ * design removes was a UI that filled a gap in its knowledge with the word "applied".
+ */
+export interface UpdateRun {
+  available: boolean;
+  run_id: string | null;
+  phase:
+    | "running"
+    | "applied"
+    | "failed"
+    | "rolled_back"
+    | "rolled_back_code_only"
+    | "rollback_incomplete"
+    | "rollback_failed"
+    | "unreadable"
+    | string
+    | null;
+  step: string | null;
+  trigger: string | null;
+  started_at: string | null;
+  finished_at: string | null;
+  message: string | null;
+  exit_code: string | null;
+  from_version: string | null;
+  to_version: string | null;
+  schema_before: string | null;
+  schema_after: string | null;
+  db_revision: string | null;
+  log_tail: string[] | null;
+}
+
+/**
+ * The host's record of the last backup run, plus the one piece of policy the panel is
+ * not allowed to decide for itself.
+ *
+ * Same rule as `UpdateRun` — every field the host might not have written is nullable and
+ * the panel renders each absent one as a specific unknown — but the stakes are sharper
+ * here, so one field deserves calling out. `verified` is `boolean | null` with no
+ * default, because "a dump was taken" and "a dump was taken and proved restorable by
+ * restoring it" are different facts. Defaulting it to `true` would hand the owner a tick
+ * over an unverified dump; defaulting it to `false` would cry wolf over a run that
+ * simply has not reached its verify step yet. Neither is known, so neither is written.
+ *
+ * `stale_after_hours` comes from the host (SAIVA_BACKUP_STALE_HOURS in `.env`) so that
+ * the age at which this panel starts shouting is the number the box was configured with
+ * and not one compiled into the SPA, which can be a release behind the host it is
+ * talking to.
+ */
+export interface BackupStatus {
+  /** The nightly regime is installed on this box at all. */
+  available: boolean;
+  /** How old the newest verified backup may get before the panel calls it stale. */
+  stale_after_hours: number;
+  run_id: string | null;
+  /**
+   * `skipped` is information, not failure: a release held the deploy lock, or the stack
+   * was deliberately down. A skipped run leaves the carried-forward timestamps alone, so
+   * the age of the newest verified backup keeps counting — which is the number that is
+   * supposed to do the shouting. `unreadable` is the API's own answer when the status
+   * file exists but would not parse.
+   */
+  phase: "running" | "ok" | "failed" | "skipped" | "unreadable" | string | null;
+  step: string | null;
+  trigger: string | null;
+  started_at: string | null;
+  finished_at: string | null;
+  message: string | null;
+  /** A string, like `UpdateRun.exit_code`: the host's renderer has one type. */
+  exit_code: string | null;
+  dump_name: string | null;
+  dump_bytes: string | null;
+  /** `alembic_version` read back out of the dump, so the schema it holds is known. */
+  dump_revision: string | null;
+  /** Proved restorable by restoring it into a throwaway database. */
+  verified: boolean | null;
+  verify_message: string | null;
+  rows_checked: string | null;
+  /** A dump was taken. Carried across a failed or skipped run on purpose. */
+  last_success_at: string | null;
+  /**
+   * A dump was taken AND restored. The headline age is derived from this and never from
+   * `last_success_at`: conflating the two is the single thing this regime exists to
+   * prevent.
+   */
+  last_verified_at: string | null;
+  /**
+   * How far the copy actually got. Six states, not two, because `stat -c %d` reports a
+   * btrfs subvolume, a ZFS dataset, an LVM thin volume and a Proxmox `mp` bind-mount as
+   * different devices while they sit on the same physical disk — exactly the
+   * configurations a Proxmox box has. So only a network filesystem, or a push command
+   * the owner configured and which succeeded, counts as having left the machine.
+   *
+   * `ok` is in the union because that is the value `scripts/backup.sh` writes today for
+   * the state the contract calls `remote`; both names are accepted so that a genuine
+   * off-box copy is not rendered as a state the panel does not recognise.
+   */
+  offsite:
+    | "off"
+    | "remote"
+    | "ok"
+    | "same-filesystem"
+    | "same-host"
+    | "unknown"
+    | "failed"
+    | string
+    | null;
+  offsite_target: string | null;
+  offsite_at: string | null;
+  offsite_message: string | null;
+  backup_count: string | null;
+  oldest_at: string | null;
+  kept: string | null;
+  pruned: string | null;
+  log_tail: string[] | null;
 }

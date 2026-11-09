@@ -7,6 +7,7 @@ is worse than none, because it reads as coverage.
 
 from __future__ import annotations
 
+from pathlib import Path
 from unittest.mock import patch
 
 import pytest
@@ -549,26 +550,26 @@ def test_the_update_check_refuses_a_repo_that_is_not_owner_slash_name() -> None:
     assert updates._safe_repo("marioalfaro75/saiva") == "marioalfaro75/saiva"
 
 
-def test_the_watchtower_trigger_refuses_a_non_http_url() -> None:
-    """It sends a bearer token, and urllib honours file:// among other things.
+def test_the_update_path_sends_no_credential_anywhere() -> None:
+    """The class of bug the old URL guard existed to prevent, now removed by design.
 
-    One wrong line in a .env either reads a local file or hands the update token to
-    somebody else's server; neither should be possible rather than merely unlikely.
+    "Update now" used to POST a bearer token to whatever WATCHTOWER_URL said, so one
+    wrong line in a .env either read a local file (urllib honours file://) or handed the
+    update token to somebody else's server. The guard that stopped that is gone because
+    the request is gone: applying an update is now a file written into a bind-mounted
+    directory, and there is no shared token in the deployment at all.
+
+    This asserts the absence, because an absence is exactly what nobody notices coming
+    back.
     """
     from app.services import updates
 
-    for bad in ("file:///etc/passwd", "gopher://x", "ftp://x/y", "", "not a url"):
-        assert updates._http_url(bad) is None, bad
-    assert updates._http_url("http://watchtower:8080") == "http://watchtower:8080"
-    assert updates._http_url("https://example.com") == "https://example.com"
-
-
-def test_a_bad_watchtower_url_sends_nothing_at_all() -> None:
-    """The guard has to stop the request, not just fail to build a good one."""
-    from unittest.mock import patch
-
-    from app.services import updates
-
-    with patch("urllib.request.urlopen") as opened:
-        updates.trigger_watchtower("file:///etc/passwd", "secret-token")
-        assert not opened.called, "a file:// URL still reached urlopen"
+    source = Path(updates.__file__).read_text()
+    assert "Authorization" not in source, (
+        "the update path sends an Authorization header again; if a credential is needed, "
+        "the URL it goes to needs a scheme-and-host guard back"
+    )
+    assert "urlopen" not in source.split("def request_update")[-1], (
+        "request_update makes a network call; it is supposed to write one local file"
+    )
+    assert not hasattr(updates, "trigger_watchtower")

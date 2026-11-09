@@ -1,0 +1,356 @@
+#!/usr/bin/env bash
+# The host side of the in-app "Update now" button.
+#
+# This is the only piece of Saiva that runs outside a container, and it is deliberately
+# the smallest thing that can do the job: notice that a request exists, delete it, and
+# run `scripts/deploy.sh --apply-release` in the checkout with no arguments.
+#
+# WHY IT TAKES NO PARAMETERS, AND WHY THAT IS NOT ENOUGH ON ITS OWN. The api container is
+# reachable from the network. The first version of this made the request file's CONTENTS
+# inert and stopped there, and an adversarial review showed that was only half the
+# argument: the container owned the directory the request sat in, and owning a directory
+# means being able to unlink and rename root-owned entries inside it. From there it could
+# point root's `deploy.lock` and `run.log` at any file on the host (shell redirections
+# follow symlinks), could point `run.log` at a file it wanted read back through the
+# status API, and could substitute its own `records/` so a rollback restored an
+# attacker's .env and pinned every service to an attacker-chosen image.
+#
+# So the boundary is now a pair of drop-boxes rather than a shared directory:
+#
+#   $STATE                   root:root 0755   everything root writes; the container reads
+#   $STATE/requests          root:<api> 0730  the two directories it may write into, and
+#   $STATE/backup-requests   root:<api> 0730  0730 so it cannot list either of them
+#
+# and root never OPENS anything in either. It asks `find -type f` (which does not follow
+# symlinks) whether a regular file is there, and unlinks whatever it finds. A symlink, a
+# FIFO or a directory planted there is removed without being touched. What is asked for is
+# resolved HERE -- the target release from the tags on `origin`, the backup settings from
+# /etc/saiva/agent.conf -- so the most a compromised api container can ask for is the
+# update or the backup the button was going to do anyway.
+#
+# WHY IT IS A COPY AND NOT A SYMLINK INTO THE CHECKOUT. Whatever applies updates cannot
+# apply its own updates the same way. If this file lived in the checkout, every release
+# could change what runs as root. scripts/install-updater.sh therefore COPIES it, and a
+# human re-runs that installer when it changes. The cost is that it can go stale, and the
+# mitigation is `--self-check`, which says so rather than leaving you to find out.
+#
+# TWO DROP-BOXES, ONE AGENT. "Back up now" is a second kind of request, and it is told
+# apart from an update by WHICH DIRECTORY the file landed in -- never by reading the file.
+# That is the whole point: the argument above rests on root never consulting a byte the
+# container wrote, so the one bit of information the container is allowed to express is
+# which of two directories it can write into, and each has its own systemd path unit.
+#
+#   $STATE/requests          -> scripts/deploy.sh --apply-release
+#   $STATE/backup-requests   -> scripts/backup.sh --trigger button
+#
+# The NIGHTLY backup does not come through here at all. saiva-backup.timer runs
+# scripts/backup.sh directly, so a stale copy of this agent cannot stop backups happening
+# -- which is the one job that must keep working while nobody is watching.
+#
+#   saiva-update-agent             apply an update if one has been requested, then exit
+#   saiva-update-agent --backup    take a backup if one has been requested, then exit
+#   saiva-update-agent --watch     both, in a poll loop (for hosts without systemd)
+#   saiva-update-agent --self-check  report config, paths, and whether this copy is stale
+set -euo pipefail
+
+AGENT_VERSION=3
+CONF="${SAIVA_AGENT_CONF:-/etc/saiva/agent.conf}"
+
+die() { printf 'saiva-update-agent: %s\n' "$*" >&2; exit 1; }
+note() { printf 'saiva-update-agent: %s\n' "$*"; }
+
+load_conf() {
+  [ -r "$CONF" ] || die "$CONF is missing or unreadable. Run scripts/install-updater.sh."
+  # Root-owned, two values, no logic: anything sourced here runs as root.
+  # shellcheck disable=SC1090
+  . "$CONF"
+  [ -n "${SAIVA_CHECKOUT:-}" ] || die "SAIVA_CHECKOUT is not set in $CONF"
+  [ -d "$SAIVA_CHECKOUT/.git" ] || die "SAIVA_CHECKOUT ($SAIVA_CHECKOUT) is not a git checkout"
+  [ -x "$SAIVA_CHECKOUT/scripts/deploy.sh" ] || die "no deploy script at $SAIVA_CHECKOUT/scripts/deploy.sh"
+  # ONE AUTHORITY FOR WHERE STATE LIVES, and it is .env -- because .env is what
+  # docker-compose interpolates the bind mounts from, so it is what the containers can
+  # actually see. agent.conf is the fallback for a checkout with no .env yet.
+  #
+  # This used to prefer agent.conf, and the cost showed up the first time the two
+  # disagreed: the scripts wrote their record where .env says, this agent looked for it
+  # where agent.conf says, found nothing changed, and concluded the run had failed
+  # silently -- so it overwrote a perfectly good "backed up and verified" with "the backup
+  # did not start". A watchdog that reports failure because it was looking in the wrong
+  # place is worse than no watchdog.
+  #
+  # Still NOT exported, and still not passed to the scripts: they resolve it themselves
+  # from the same file, and a value pushed in from here would be a second opinion rather
+  # than a shared one.
+  STATE="$(state_dir_from_env)"
+  REQUESTS="$STATE/requests"
+  BACKUP_REQUESTS="$STATE/backup-requests"
+}
+
+# The last SAIVA_STATE_DIR in the checkout's .env, with one layer of quotes and any inline
+# comment removed -- the same reading scripts/lib/env-file.sh's env_get does, because that
+# is the reading docker-compose does.
+state_dir_from_env() {
+  local v=""
+  if [ -r "${SAIVA_CHECKOUT:-}/.env" ]; then
+    v="$(sed -n 's/^[[:space:]]*SAIVA_STATE_DIR=//p' "$SAIVA_CHECKOUT/.env" | tail -n 1)"
+    v="${v%%[[:space:]]#*}"
+    v="${v%"${v##*[![:space:]]}"}"
+    v="${v%\"}"; v="${v#\"}"; v="${v%\'}"; v="${v#\'}"
+  fi
+  printf '%s' "${v:-${SAIVA_STATE_DIR:-/var/lib/saiva/update}}"
+}
+
+# Everything in requests/ is removed; only a regular file counts as a request. `find -P`
+# (the default) does not follow symlinks, so a planted link, FIFO or directory is deleted
+# without ever being opened -- and without spinning the systemd path unit, which is what
+# leaving a non-regular entry behind used to do until the start limiter killed the button.
+consume_requests() { # DIR -> 0 if a real request was there
+  local dir="$1"
+  [ -d "$dir" ] || return 1
+  local found=1
+  if find "$dir" -mindepth 1 -maxdepth 1 -type f -print -quit 2>/dev/null | grep -q .; then
+    found=0
+  fi
+  find "$dir" -mindepth 1 -maxdepth 1 -exec rm -rf -- {} + 2>/dev/null || true
+  return "$found"
+}
+
+# A press must never vanish. If the agent cannot get as far as running the deploy, it
+# writes a terminal status itself, because the only thing the owner can see is that file:
+# a request consumed with nothing written leaves the panel showing the PREVIOUS run's
+# green "applied" while the press they just made has disappeared.
+# The fields a BACKUP record carries forward across runs on purpose: what the last
+# successful run achieved. They are not about the run this failure is reporting, and a
+# document that omitted them told the owner there had never been a backup at all.
+# scripts/lib/state.sh declares the same set in SAIVA_BACKUP_STATUS_FIELDS.
+BACKUP_CARRIED_FIELDS="last_success_at last_verified_at offsite offsite_target offsite_at \
+offsite_message backup_count oldest_at"
+
+# One `"key": value` line out of an existing status document, with the quotes and the
+# trailing comma left on so it can be re-emitted verbatim. sed rather than a JSON parser
+# because this runs as root on a box where python3 is likely but not promised, and an
+# absent or malformed file simply yields nothing.
+carried_field() { # FILE KEY
+  [ -r "$1" ] || return 0
+  sed -n "s/^[[:space:]]*\"$2\"[[:space:]]*:[[:space:]]*\(.*\)[,]*[[:space:]]*$/\1/p" "$1" \
+    | head -n 1 | sed 's/,$//'
+}
+
+write_failure_status() { # KIND MESSAGE  (KIND is `status` or `backup-status`)
+  local kind="$1" msg="$2"
+  local now; now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  local tmp="$STATE/.$kind.json.$$"
+  mkdir -p "$STATE" 2>/dev/null || return 0
+  # The message is JSON-escaped here rather than interpolated raw. It is composed below
+  # from this script's own text plus an exit status, so there is nothing hostile in it --
+  # but a stray quote or backslash would produce a file the API reads as "unreadable",
+  # which is the one state that tells the owner nothing.
+  msg="$(printf '%s' "$msg" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' | tr -d '\n\r\t')"
+  {
+    printf '{\n'
+    printf '  "schema_version": 1,\n'
+    printf '  "run_id": "agent-%s",\n' "$now"
+    printf '  "phase": "failed",\n'
+    printf '  "step": "agent",\n'
+    printf '  "trigger": "button",\n'
+    printf '  "started_at": "%s",\n' "$now"
+    printf '  "finished_at": "%s",\n' "$now"
+    printf '  "message": "%s",\n' "$msg"
+    # Re-emitted from whatever is already on disk, so a failure this agent reports does not
+    # erase what the last successful BACKUP achieved. Without this, a press of "Back up
+    # now" during a release -- which backup.sh correctly declines -- made the page say
+    # there had never been a backup. A missing or unreadable value is written as null,
+    # which is what the renderer would have produced for it anyway.
+    if [ "$kind" = "backup-status" ]; then
+      local key value
+      for key in $BACKUP_CARRIED_FIELDS; do
+        value="$(carried_field "$STATE/$kind.json" "$key")"
+        printf '  "%s": %s,\n' "$key" "${value:-null}"
+      done
+    fi
+    printf '  "exit_code": "1"\n'
+    printf '}\n'
+  } > "$tmp"
+  chmod 0644 "$tmp" 2>/dev/null || true
+  mv -f "$tmp" "$STATE/$kind.json" 2>/dev/null || { rm -f "$tmp"; return 0; }
+  # Only the update record has a public face, served by Caddy so it still answers when the
+  # api container is the thing that is broken. There is deliberately no public backup
+  # record: see SAIVA_BACKUP_STATUS_FIELDS in scripts/lib/state.sh.
+  [ "$kind" = "status" ] || return 0
+  cp -f "$STATE/status.json" "$STATE/status-public.json" 2>/dev/null || true
+}
+
+status_fingerprint() { # KIND -- enough to tell "it wrote something" from "it did not"
+  # Deliberately not a content hash of the whole file: a run that fails and a run that
+  # succeeds both change it, which is all this needs to know.
+  stat -c '%Y %s' "$STATE/$1.json" 2>/dev/null || printf 'absent'
+}
+
+# Run a script in the checkout and make sure the press left a trace, whatever happened.
+#
+# Run rather than exec, so there is somebody left to notice if it exits without saying
+# anything. A press must never vanish: the request is consumed BEFORE the work (so a
+# failing run cannot become an infinite loop of failing runs), which means the status file
+# is the only record that the press happened at all -- and both scripts have exit paths
+# that run before they have any state to write to (no Docker daemon, no compose binary).
+# On those the panel would otherwise keep showing the PREVIOUS run's green result while
+# the press disappeared.
+run_and_account_for_it() { # KIND MESSAGE_IF_SILENT -- then the command and its arguments
+  local kind="$1" silent_msg="$2"; shift 2
+  local before after rc=0
+  before="$(status_fingerprint "$kind")"
+  set +e
+  "$@"
+  rc=$?
+  set -e
+  after="$(status_fingerprint "$kind")"
+  # 75 (EX_TEMPFAIL) is the script saying "I declined to run and deliberately wrote
+  # nothing" -- another Saiva job holds the deploy lock. That is not a run that died
+  # silently, and treating it as one wrote a failure document over a healthy record.
+  if [ "$rc" = "75" ]; then
+    note "declined: another job holds the lock. The record was left alone."
+    return 0
+  fi
+  if [ "$before" = "$after" ]; then
+    write_failure_status "$kind" "${silent_msg//@RC@/$rc}"
+    note "$1: exited $rc without writing a status; recorded a failure"
+  fi
+  return "$rc"
+}
+
+apply_once() {
+  consume_requests "$REQUESTS" || return 0
+  note "request consumed; applying the newest release"
+
+  cd "$SAIVA_CHECKOUT" || {
+    write_failure_status status "The update agent could not enter $SAIVA_CHECKOUT."
+    die "could not cd to $SAIVA_CHECKOUT"
+  }
+  if ! grep -q -- '--apply-release' "$SAIVA_CHECKOUT/scripts/deploy.sh" 2>/dev/null; then
+    write_failure_status status "The deploy script in $SAIVA_CHECKOUT does not support \
+--apply-release. Update the checkout by hand once, then press Update now again."
+    die "deploy.sh in the checkout predates --apply-release"
+  fi
+
+  run_and_account_for_it status "The update did not start: the deploy script exited with \
+status @RC@ before it could report anything. Run ./scripts/deploy.sh --apply-release on \
+the host to see why; the usual causes are the Docker daemon not running, or the checkout \
+having uncommitted changes." \
+    "$SAIVA_CHECKOUT/scripts/deploy.sh" --apply-release
+}
+
+backup_once() {
+  consume_requests "$BACKUP_REQUESTS" || return 0
+  note "backup request consumed; taking a backup"
+
+  cd "$SAIVA_CHECKOUT" || {
+    write_failure_status backup-status "The update agent could not enter $SAIVA_CHECKOUT."
+    die "could not cd to $SAIVA_CHECKOUT"
+  }
+  # The same staleness guard the update path has, for the same reason: this agent is a
+  # COPY and the checkout moves underneath it, so the one release where backup.sh did not
+  # exist yet has to produce a sentence rather than a silence.
+  if [ ! -x "$SAIVA_CHECKOUT/scripts/backup.sh" ]; then
+    write_failure_status backup-status "There is no scripts/backup.sh in \
+$SAIVA_CHECKOUT, so this release cannot take a backup. Update the checkout once, then \
+press Back up now again."
+    die "no backup script in the checkout"
+  fi
+
+  run_and_account_for_it backup-status "The backup did not start: the backup script \
+exited with status @RC@ before it could report anything. Run ./scripts/backup.sh on the \
+host to see why; the usual cause is the Docker daemon not running." \
+    "$SAIVA_CHECKOUT/scripts/backup.sh" --trigger button
+}
+
+watch_loop() {
+  local interval="${SAIVA_AGENT_POLL_SECONDS:-5}"
+  note "watching $REQUESTS and $BACKUP_REQUESTS every ${interval}s"
+  while true; do
+    # Subshells, because the update path re-execs: in --watch mode the loop has to survive
+    # the update it just ran. The update is served first -- if somebody has asked for both,
+    # the backup that follows it is of the database the new release migrated, which is the
+    # more useful of the two orders.
+    ( apply_once )  || note "update exited non-zero"
+    ( backup_once ) || note "backup exited non-zero"
+    sleep "$interval"
+  done
+}
+
+self_check() {
+  local problems=0
+  printf 'agent version   : %s\n' "$AGENT_VERSION"
+  printf 'config          : %s\n' "$CONF"
+  printf 'checkout        : %s\n' "${SAIVA_CHECKOUT:-<unset>}"
+  printf 'state directory : %s  [%s]\n' "$STATE" \
+    "$(stat -c '%U:%G %a' "$STATE" 2>/dev/null || echo missing)"
+  printf 'requests        : %s  [%s]\n' "$REQUESTS" \
+    "$(stat -c '%U:%G %a' "$REQUESTS" 2>/dev/null || echo missing)"
+  printf 'backup requests : %s  [%s]\n' "$BACKUP_REQUESTS" \
+    "$(stat -c '%U:%G %a' "$BACKUP_REQUESTS" 2>/dev/null || echo missing)"
+  printf 'pending request : %s update, %s backup\n' \
+    "$(find "$REQUESTS" -mindepth 1 -maxdepth 1 -type f 2>/dev/null | wc -l)" \
+    "$(find "$BACKUP_REQUESTS" -mindepth 1 -maxdepth 1 -type f 2>/dev/null | wc -l)"
+  if [ -d /run/systemd/system ]; then
+    printf 'nightly timer   : %s\n' \
+      "$(systemctl is-enabled saiva-backup.timer 2>/dev/null || echo 'NOT INSTALLED')"
+  fi
+
+  # The state directory must NOT be owned or writable by anyone but root: see the header.
+  local mode owner
+  if [ ! -d "$BACKUP_REQUESTS" ]; then
+    printf '\nNO BACKUP DROP-BOX: %s does not exist, so the in-app "Back up now" button\n' "$BACKUP_REQUESTS"
+    printf 'cannot ask for anything. Nightly backups may still be running; check the timer above.\n'
+    printf 'Fix it by re-running: sudo %s/scripts/install-updater.sh\n' "${SAIVA_CHECKOUT:-.}"
+    problems=1
+  fi
+
+  mode="$(stat -c '%a' "$STATE" 2>/dev/null || echo '')"
+  owner="$(stat -c '%U' "$STATE" 2>/dev/null || echo '')"
+  if [ "$owner" != "root" ] || [ "${mode:-777}" != "755" ]; then
+    printf '\nWRONG PERMISSIONS: %s should be root-owned and 0755, not %s %s.\n' \
+      "$STATE" "${owner:-?}" "${mode:-?}"
+    printf 'A container that can write here can make root open files of its choosing.\n'
+    printf 'Fix it by re-running: sudo %s/scripts/install-updater.sh\n' "${SAIVA_CHECKOUT:-.}"
+    problems=1
+  fi
+
+  # .env now decides, for this agent as well as for the scripts and for compose, so a
+  # disagreement is no longer a hazard -- but a stale value in agent.conf still means the
+  # installer created and permissioned a DIFFERENT directory from the one in use, and the
+  # systemd path units it wrote are watching that one. Worth saying out loud.
+  local from_conf=""
+  [ -r "$CONF" ] && from_conf="$(sed -n 's/^[[:space:]]*SAIVA_STATE_DIR=//p' "$CONF" | tail -n 1)"
+  if [ -n "$from_conf" ] && [ "$from_conf" != "$STATE" ]; then
+    printf '\nSTALE CONFIG: .env puts the state directory at %s, which is what\n' "$STATE"
+    printf 'everything now uses -- but %s still says %s, and the systemd\n' "$CONF" "$from_conf"
+    printf 'path units were written for THAT one, so the buttons are being watched in the\n'
+    printf 'wrong place. Re-run: sudo %s/scripts/install-updater.sh\n' "${SAIVA_CHECKOUT:-.}"
+    problems=1
+  fi
+
+  local in_tree="${SAIVA_CHECKOUT:-}/scripts/saiva-update-agent"
+  if [ ! -r "$in_tree" ]; then
+    printf '\nCANNOT COMPARE: no %s to compare this copy against.\n' "$in_tree"
+    problems=1
+  elif ! cmp -s "$in_tree" "$0"; then
+    printf '\nSTALE: the checkout ships a different version of this agent.\n'
+    printf 'This copy runs as root and is not updated by a release, on purpose.\n'
+    printf 'Read the difference, then re-install it:\n'
+    printf '  diff %s %s\n' "$0" "$in_tree"
+    printf '  sudo %s/scripts/install-updater.sh\n' "$SAIVA_CHECKOUT"
+    problems=1
+  fi
+
+  [ "$problems" = "0" ] && printf '\nup to date with the checkout, permissions correct\n'
+  return "$problems"
+}
+
+case "${1:-once}" in
+  once)         load_conf; apply_once ;;
+  --backup)     load_conf; backup_once ;;
+  --watch)      load_conf; watch_loop ;;
+  --self-check) load_conf; self_check ;;
+  -h|--help)    sed -n '2,52p' "$0" | sed 's/^# \{0,1\}//' ;;
+  *)            die "unknown argument: $1" ;;
+esac

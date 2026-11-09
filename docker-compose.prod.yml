@@ -5,12 +5,28 @@
 #   (or simply: make pull)
 #
 # Pin a version with SAIVA_VERSION (default: latest). Forks can repoint the images
-# with SAIVA_REGISTRY (default: ghcr.io/marioalfaro75).
+# with SAIVA_REGISTRY (default: ghcr.io/marioalfaro75). SAIVA_API_IMAGE /
+# SAIVA_WEB_IMAGE override the whole reference and are what a rollback writes: a digest,
+# because `latest` is not something you can go back to -- by the time you want to, it
+# already points at the release you are rolling back from.
+#
+# Updates are applied by scripts/deploy.sh --apply-release, which is the ONE path `make
+# update` and the in-app button both take. Nothing in this file updates anything: there
+# is no Watchtower here any more, and no Docker socket on the box at all. The button
+# writes a file; a small root-owned agent on the host (scripts/saiva-update-agent) sees
+# it and runs that one script. See docs/UPDATING.md.
 name: saiva
 
 services:
   db:
-    image: postgres:16-alpine
+    # A floating tag bounded to a major, deliberately. `postgres:16-alpine` is rebuilt
+    # by its publisher with OS patches and can never cross into 17, so the data
+    # directory stays compatible -- and now that the release path runs `compose pull`
+    # for every service rather than for two labelled ones, those patches actually reach
+    # this box. Reproducibility comes from the other direction: the deploy records the
+    # resolved digest of every service before it changes anything, and a rollback pins
+    # all four back by digest. Set SAIVA_DB_IMAGE to hold this still by hand.
+    image: ${SAIVA_DB_IMAGE:-postgres:16-alpine}
     restart: unless-stopped
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-saiva}
@@ -25,10 +41,8 @@ services:
       retries: 12
 
   api:
-    image: ${SAIVA_REGISTRY:-ghcr.io/marioalfaro75}/saiva-api:${SAIVA_VERSION:-latest}
+    image: ${SAIVA_API_IMAGE:-${SAIVA_REGISTRY:-ghcr.io/marioalfaro75}/saiva-api:${SAIVA_VERSION:-latest}}
     restart: unless-stopped
-    labels:
-      com.centurylinklabs.watchtower.enable: "true"
     environment:
       DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-saiva}:${POSTGRES_PASSWORD:-saiva}@db:5432/${POSTGRES_DB:-saiva}
       SECRET_KEY: ${SECRET_KEY:?set SECRET_KEY in .env}
@@ -40,9 +54,17 @@ services:
       # rate limiter and the audit log both see Caddy's container IP and nothing
       # else — one shared bucket for every visitor, and a useless audit trail.
       TRUSTED_PROXIES: ${TRUSTED_PROXIES:-caddy}
-      # Lets the in-app "Update now" button ask Watchtower to pull + recreate.
-      WATCHTOWER_URL: http://watchtower:8080
-      WATCHTOWER_TOKEN: ${WATCHTOWER_TOKEN:-}
+      # Where the in-app button drops its request, and where it reads the updater's
+      # status back from. A directory, not a socket and not the Docker API: the most the
+      # api container can do here is ask for the update the button was going to do
+      # anyway. See the volume below.
+      SAIVA_UPDATE_DIR: /run/saiva-update
+      # How old the newest VERIFIED backup may be before Settings stops calling it
+      # current. It has to be passed explicitly: there is no `env_file:` on any service
+      # and the image carries no .env, so a setting the owner writes in .env reaches the
+      # api container only if it is listed here. It was not, so the policy had no effect
+      # whatever and the page silently used the code default.
+      SAIVA_BACKUP_STALE_HOURS: ${SAIVA_BACKUP_STALE_HOURS:-36}
     depends_on:
       db:
         condition: service_healthy
@@ -50,17 +72,37 @@ services:
       - "8000"
     volumes:
       - db_backups:/backups
+      # The update channel, as TWO mounts, and that split is the security boundary.
+      #
+      # Read-only on the directory, read-write on the drop-box inside it. Giving the
+      # container the whole directory was reviewed and broken end to end: owning a
+      # directory means being able to unlink and rename root-owned entries inside it, so
+      # the container could point root's deploy.lock and run.log at any file on the host
+      # (shell redirections follow symlinks), point run.log at a file it wanted read back
+      # through the status API, and substitute its own records/ so a rollback restored
+      # its .env and pinned its images.
+      #
+      # Now it reads status.json and writes one uniquely-named file into requests/. Root
+      # never opens anything in there -- the agent asks `find -type f`, which does not
+      # follow symlinks, and unlinks what it finds.
+      #
+      # THE SECOND DROP-BOX is how "Back up now" is told apart from "Update now" without
+      # root ever reading a byte the container wrote. The DIRECTORY carries the one bit of
+      # information, and each has its own systemd path unit. Encoding it in the request's
+      # name or contents instead would hand that bit to a process on the network, and the
+      # whole argument above rests on root never consulting one.
+      - ${SAIVA_STATE_DIR:-/var/lib/saiva/update}:/run/saiva-update:ro
+      - ${SAIVA_STATE_DIR:-/var/lib/saiva/update}/requests:/run/saiva-update/requests
+      - ${SAIVA_STATE_DIR:-/var/lib/saiva/update}/backup-requests:/run/saiva-update/backup-requests
 
   web:
-    image: ${SAIVA_REGISTRY:-ghcr.io/marioalfaro75}/saiva-web:${SAIVA_VERSION:-latest}
+    image: ${SAIVA_WEB_IMAGE:-${SAIVA_REGISTRY:-ghcr.io/marioalfaro75}/saiva-web:${SAIVA_VERSION:-latest}}
     restart: unless-stopped
-    labels:
-      com.centurylinklabs.watchtower.enable: "true"
     expose:
       - "8080"
 
   caddy:
-    image: caddy:2-alpine
+    image: ${SAIVA_CADDY_IMAGE:-caddy:2-alpine}
     restart: unless-stopped
     depends_on:
       - api
@@ -81,176 +123,41 @@ services:
       - "${SAIVA_BIND_ADDR:-127.0.0.1}:443:443"
     volumes:
       - ./infra/Caddyfile:/etc/caddy/Caddyfile:ro
+      # Read-only, and the reason it is here is the one thing the old design could never
+      # do: say what happened when the api container is the thing that is broken. Caddy
+      # serves status-public.json straight off the host, so the panel can still report
+      # "failed at the gate, rolled back" with api down. The file is written by the
+      # updater on the host, so even Caddy being recreated is a gap in the transport,
+      # not a loss of the answer.
+      - ${SAIVA_STATE_DIR:-/var/lib/saiva/update}:/srv/saiva-update:ro
       - caddy_data:/data
       - caddy_config:/config
 
-  # In-app updater. Only watches containers labelled watchtower.enable (api + web)
-  # and only acts when something posts to its token-protected HTTP API: no public
-  # port, and no timer *as this file configures it* — read the comment above
-  # WATCHTOWER_HTTP_API_UPDATE before relying on that, because the reason is the
-  # opposite of the obvious one.
+  # There is deliberately no updater service here any more, and no Docker socket on
+  # this box at all.
   #
-  # nickfedor/watchtower is the actively-maintained, drop-in fork of the archived
-  # containrrr/watchtower — the original shipped an old Docker client (API 1.25) that
-  # modern daemons reject ("client version is too old"). This fork auto-negotiates.
-  watchtower:
-    # Pinned to the 1.x line rather than tracking :latest. Watchtower carries no
-    # watchtower.enable label of its own and WATCHTOWER_LABEL_ENABLE means "only
-    # labelled containers are monitored", so it never updates itself: this image moves
-    # only when a human runs `docker compose pull`, and on a floating tag that one
-    # command can cross several minors at once. The boundary that matters is the major.
-    # The fork's own source marks the legacy HTTP-API flags as "will be removed in the
-    # v2 release", and it validates no WATCHTOWER_* names at all, so a v2 image would
-    # ignore WATCHTOWER_HTTP_API_UPDATE in silence, enable no endpoint, never bind the
-    # API — and fall through to the 24-hour poll described below. That is genuinely
-    # unattended updates on a box holding a family's financial records, with cleanup
-    # off and no health gate, arrived at because a tag floated. `:1` cannot cross into
-    # v2 and still carries the fork's 1.x fixes. A tag also gives Dependabot something
-    # to compare — an untagged reference gave it nothing — so the day a v2 exists it
-    # arrives as a pull request somebody reads, which is the whole point. Pin the exact
-    # 1.23.2 instead if you would rather nothing moved without you, and accept that
-    # Watchtower then stops receiving its own security fixes until somebody bumps this
-    # line.
-    image: nickfedor/watchtower:1
-    restart: unless-stopped
-    depends_on:
-      - docker-socket-proxy
-    environment:
-      # Nothing on this box polls — but NOT because no schedule is configured, which is
-      # how it used to be explained here and is backwards. With neither
-      # WATCHTOWER_SCHEDULE nor WATCHTOWER_POLL_INTERVAL set, the fork *synthesizes*
-      # `@every 86400s` from its 24-hour default interval (internal/settings/flags.go,
-      # `if intervalChanged || !scheduleChanged`, against DefaultPollIntervalSeconds =
-      # 86400 in internal/settings/flags/schedule/register.go). The absence of those variables is
-      # what arms the poll; the only thing suppressing it is the update endpoint being
-      # enabled while WATCHTOWER_HTTP_API_PERIODIC_POLLS stays at its default of false.
-      # That combination is API-only mode, where `block := EnableUpdateAPI &&
-      # !UnblockHTTPAPI` keeps Watchtower serving the API and never lets it reach the
-      # scheduler at all.
-      #
-      # So say the consequence plainly, because the opposite was written down here and
-      # acted on: a bad release does not arrive on this box unattended at 3am. It
-      # arrives when the owner presses "Update now" or runs `make pull`, with somebody
-      # at the keyboard. The hazard is a one-click update that cannot be undone, not an
-      # unsupervised rollout — which is why the fix below is WATCHTOWER_CLEANUP plus a
-      # rollback path in the README that needs no network, and not a schedule.
-      #
-      # Both spellings of the same switch, deliberately. http-api-update is deprecated
-      # in favour of http-api-endpoints and documented as working only until v2;
-      # http-api-endpoints is the supported spelling but does not exist on older
-      # images, and an unrecognised WATCHTOWER_* name is ignored without a word. Each
-      # one alone therefore has a version on which it enables nothing and the 24-hour
-      # poller takes over. ResolveEndpoints unions the two, so together they enable
-      # exactly the one `update` endpoint on any version that understands either name.
-      # A WATCHTOWER_SCHEDULE override looks like a third belt and is not one: the
-      # branch above reads the schedule out of the flag set while env vars arrive
-      # through viper, and a value that reaches one path but not the other is worse
-      # than no value at all.
-      WATCHTOWER_HTTP_API_UPDATE: "true"
-      WATCHTOWER_HTTP_API_ENDPOINTS: "update"
-      WATCHTOWER_HTTP_API_TOKEN: ${WATCHTOWER_TOKEN:?set WATCHTOWER_TOKEN in .env}
-      WATCHTOWER_LABEL_ENABLE: "true"
-      # Cleanup is off deliberately, and it is the one thing standing between a bad
-      # release and a box nobody can bring back. Watchtower treats a container that
-      # merely *starts* as a successful update: it never consults the HEALTHCHECK on
-      # this path at all (the fork's only WaitForContainerHealthy call is inside the
-      # rolling-restart loop, which is off by default, and even there a timeout is
-      # logged as a warning and the update carries on), and its cleanup then deletes
-      # the old image with Docker's Force flag, so a second local tag would not have
-      # saved it either. The image you would roll back to is therefore gone seconds
-      # after the replacement is created — while the replacement crash-loops, because
-      # the API's CMD is `python -m app.dbinit && uvicorn`: a migration that fails
-      # means nothing ever binds :8000, the HEALTHCHECK has no port to probe, and
-      # `restart: unless-stopped` retries forever. Recovery then needed the network and
-      # GHCR at the exact moment a family's financial records were offline.
-      #
-      # Be precise about what is kept, because it changes the runbook: the old
-      # *container* is stopped and removed before the replacement is created, so there
-      # is nothing to `docker start`. What survives is the image, now untagged. The
-      # README's recovery path re-tags it and brings the stack up on that tag.
-      #
-      # The cost is disk, and it is a whole generation per update applied — about
-      # 140 MB compressed across api and web, not the trickle that layer sharing would
-      # suggest. Measured against the live registry: consecutive releases share 0 of
-      # saiva-api's 13 layers and 1 of saiva-web's 7, because `ENV SAIVA_VERSION` sits
-      # above the apt and pip steps in backend/Dockerfile and invalidates everything
-      # below it. Reclaim it with `docker image prune` once a release has proved
-      # itself — never from a script, because the image it would reap is the rollback.
-      WATCHTOWER_CLEANUP: "false"
-      # There is deliberately no WATCHTOWER_DISK_SPACE_WARN or _MAX here. They look
-      # like the obvious companion to cleanup being off, and on this deployment either
-      # one *disables the update button outright*. Any non-zero threshold arms a check
-      # that is skipped only when both are zero; the check calls GET /system/df, the
-      # socket proxy below answers 403 because SYSTEM is 0, and the check is
-      # fail-closed — the query failure returns from the first statement of the update
-      # session, before Watchtower has listed a single container. Choosing warn over
-      # max does not help, because the abort comes from the query and not from a
-      # budget being reached. And it fails invisibly: Watchtower's sync handler still
-      # answers 200, `trigger_watchtower` in app/services/updates.py inspects neither
-      # status nor body, and /api/admin/update returns "update_started" regardless, so
-      # the owner is told the update began while nothing happened at all. Granting
-      # SYSTEM: 1 would buy an intermittent version of the same abort and widen a proxy
-      # whose entire value is that everything else is off. Watch image usage from
-      # somewhere that can see it instead — `docker system df` on the host, which is
-      # what the README now says.
-
-      # Talks to the filtering proxy instead of the socket. See its comment below.
-      DOCKER_HOST: tcp://docker-socket-proxy:2375
-      # Optional Docker API version override; blank = auto-negotiate (the default,
-      # and correct on modern daemons). Set only if your daemon requires a fixed one.
-      DOCKER_API_VERSION: "${DOCKER_API_VERSION:-}"
-    networks:
-      - default
-      - docker-api
-
-  # A filtering front end for the Docker socket, so Watchtower — a container that
-  # accepts HTTP requests — is not the thing holding a direct line to the daemon.
+  # What used to be here: Watchtower behind a filtering socket proxy, triggered by the
+  # api container over a shared token. It worked, as far as it went, and that was the
+  # problem -- it went three-eighths of the way. Watchtower never reads a compose file;
+  # it recreates a container from the OLD container's own inspect output, so no compose
+  # change, no .env value, no port binding and no Caddyfile edit could ever reach this
+  # box through it. It also treats a container that merely STARTS as a successful
+  # update, so there was no gate and nothing to roll back to.
   #
-  # Be clear about what this does and does not buy. It blocks the parts of the API
-  # Watchtower has no use for: exec, volumes, networks, build, swarm, the system
-  # endpoints. It does NOT make the remaining access safe, because updating a
-  # container means creating one, and anything that can create a container can
-  # create a privileged one and own the host. This narrows the blast radius of a
-  # Watchtower bug; it does not contain a determined attacker who reaches the proxy.
+  # And the proxy's own comment said the quiet part: updating a container means creating
+  # one, and anything that can create a container can create a privileged one and own
+  # the host. That access existed so a button could pull two images.
   #
-  # If that trade is not one you want, drop this service and Watchtower with it and
-  # update by hand: `docker compose pull && docker compose up -d`. The app works
-  # exactly the same, minus the in-app "Update now" button.
-  docker-socket-proxy:
-    image: tecnativa/docker-socket-proxy:0.3.0
-    restart: unless-stopped
-    environment:
-      # Read: what Watchtower needs to see.
-      CONTAINERS: 1
-      IMAGES: 1
-      VERSION: 1
-      PING: 1
-      # Write: pull an image, stop the old container, start the new one.
-      POST: 1
-      # Everything else stays off. These are the ones that matter most:
-      EXEC: 0
-      VOLUMES: 0
-      NETWORKS: 0
-      BUILD: 0
-      SWARM: 0
-      SYSTEM: 0
-      SECRETS: 0
-      CONFIGS: 0
-      SERVICES: 0
-      TASKS: 0
-      NODES: 0
-      PLUGINS: 0
-      # No ports: are published, so only the docker-api network can reach it.
-    volumes:
-      - /var/run/docker.sock:/var/run/docker.sock:ro
-    networks:
-      - docker-api
-
-networks:
-  # Isolated: only Watchtower and the proxy are on it, so nothing that faces the
-  # internet shares a network with something holding the Docker socket.
-  docker-api:
-    internal: true
+  # What replaces it: scripts/deploy.sh --apply-release on the host -- images, compose
+  # file, Caddyfile, .env, every service -- gated on the published address answering
+  # from outside, rolled back if it does not. The button writes a file into the volume
+  # mounted on `api` above; a root-owned oneshot (scripts/saiva-update-agent, installed
+  # by scripts/install-updater.sh) sees it and runs that script with no arguments. The
+  # agent resolves the target release itself, so the most a compromised api container
+  # can ask for is the update the button was going to do anyway.
+  #
+  # The result is one fewer moving part, two fewer services, no shared update token, and
+  # no path from a network-facing container to the Docker daemon.
 
 volumes:
   db_data:

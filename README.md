@@ -74,8 +74,11 @@ Runs in a container, HTTPS‑only.
 
 **Self‑host & operate**
 - **HTTPS‑only** via Caddy — internal CA for localhost/LAN, or Let's Encrypt for a domain.
-- **Prebuilt GHCR images** (`edge` / `latest` / pinned channels), **pre‑migration backups**,
-  and **in‑app updates** (the owner clicks *Update now*; the app never touches the Docker socket).
+- **Prebuilt GHCR images** (`edge` / `latest` / pinned channels) and **in‑app updates** (the
+  owner clicks *Update now*; the app never touches the Docker socket).
+- **Nightly backups that are proven, not assumed** — each one is restored into a throwaway
+  database and counted back before it is called a backup, copied off the box, and the age of
+  the newest verified one is on the Settings page.
 - Multi‑user household with **role‑based access**, an **audit log**, and a full **JSON export**.
 
 ## Run it in a container
@@ -110,13 +113,19 @@ machine). On first visit you create your household and owner login; for sample d
 **3. Verify & manage.**
 
 ```bash
-docker compose ps                      # all services up; db shows "healthy"
-curl -k https://localhost/api/health   # -> {"status":"ok"}   (-k accepts the local cert)
+make ps                                # all services up; db shows "healthy"
+curl -k https://localhost/api/health   # -> {"status":"ok", "schema":"current", ...}
 make logs                              # follow API logs
-make down                              # stop, keep data   |   make destroy = stop + wipe DB
+make down                              # stop the stack, keep the data
 ```
 
-Run `make help` for all targets (`deploy seed up down destroy restart logs ps`).
+`make destroy` is the one to be careful with: it deletes the household's records **and
+every dump** — nightly, pre-migration and pre-restore alike — because they live in the same
+Docker volume set. It asks you to type a word first, and refuses outright when there is no
+terminal to ask. The **off-box copy** of a nightly backup survives it, and is the only thing
+that does: `./scripts/backup.sh --status` says where it goes and how recent it is.
+
+Run `make help` for all targets.
 
 **Reach it from other devices (LAN over HTTPS).** By default Saiva listens on
 `https://localhost` (this machine only). To expose it to your home network over HTTPS:
@@ -144,72 +153,136 @@ docker compose cp caddy:/data/caddy/pki/authorities/local/root.crt ./caddy-root.
 
 ### Deploy from prebuilt images (GHCR)
 
-Instead of building locally, you can run images published to GitHub Container Registry —
+Instead of building locally, run the images published to GitHub Container Registry —
 faster, reproducible, and easy on a low‑powered host (it doesn't compile the frontend):
 
 ```bash
-make pull                       # pull ghcr.io/marioalfaro75/saiva-{api,web}:latest and start
-make pull SAIVA_VERSION=v0.4.0  # pin a specific release;  make pull LAN=1 also works
-make pull SAIVA_VERSION=edge    # track the latest green build of main (continuous)
-make pull SAIVA_VERSION=sha-1a2b3c4   # pin / roll back to an exact build
-# (equivalently: ./scripts/deploy.sh --pull)
+make pull          # first install: pull ghcr.io/marioalfaro75/saiva-{api,web} and start
+make pull LAN=1    # ... and publish it on your LAN over HTTPS
 ```
 
-Upgrades are then `make pull` (re‑pull + restart); the API self‑migrates the database on
-start. **Cutting a release (recommended):** run **Actions → [Cut release](.github/workflows/cut-release.yml)
-→ Run workflow** and enter a version like `0.8.2` — it builds the multi‑arch
-(amd64 + arm64) `saiva-api`/`saiva-web` images and *then* creates the `v0.8.2` tag and
-GitHub Release, so the `v` prefix and `:latest` never drift. (Pushing a `v*` tag by hand
-still works via the [`Release`](.github/workflows/release.yml) workflow.) After the first
-publish, set those GHCR packages to **public** (GitHub → your profile → Packages) if you want to pull without
-`docker login`; otherwise `docker login ghcr.io` with a token first.
+After the first publish, set those GHCR packages to **public** (GitHub → your profile →
+Packages) if you want to pull without `docker login`; otherwise `docker login ghcr.io`
+with a token first.
 
-**Release channels.** `latest` follows tagged releases (`v*`); `edge` follows every green
-build of `main` — merges auto-publish the changed image(s) as `edge` + `sha-<short>` via the
-[`CI`](.github/workflows/ci.yml) workflow once tests pass; `sha-<short>` is an immutable
-build to pin or roll back to. Pick a channel with `SAIVA_VERSION` in `.env`, then `make pull`.
+**Cutting a release:** Actions → [Cut release](.github/workflows/cut-release.yml) → Run
+workflow, and enter a version like `0.8.2`. It runs the checks, builds the multi‑arch
+(amd64 + arm64) images, boots one and proves it serves, and only then creates the
+`v0.8.2` tag and GitHub Release. A release that cannot start never gets a tag.
 
-**Pre-migration backups.** On start the API writes a compressed `pg_dump` to the
-`db_backups` volume *before* applying any schema migration, so an upgrade is always
-reversible (disable with `SAIVA_BACKUP_BEFORE_MIGRATE=0`; the dump lands in
-`SAIVA_BACKUP_DIR`). If the backup fails, the container refuses to migrate.
-
-**Rolling back.** The updater keeps the image it replaced, on purpose, so the first
-thing to try needs no network and no registry — which matters, because the moment you
-need a rollback is also the moment the box is down. Find the generation you were on and
-give it a name, then start it:
+### Updating
 
 ```bash
-# The untagged images are the generations you have left behind; the newest pair is the
-# one the update replaced. Rows may read `…/saiva-api  <none>` or just `<none>  <none>`.
-docker image ls -a --filter dangling=true --format '{{.ID}}  {{.Repository}}  {{.CreatedSince}}'
-
-# Tag BOTH, even if only one of them is broken: SAIVA_VERSION applies to api and web
-# together, and compose will try to pull whichever tag is missing. A release moves both
-# tags, so both have a predecessor; on the `edge` channel only the changed image is
-# republished, so tag the current `:edge` image for the one that did not move.
-docker image tag <old-api-id> ghcr.io/marioalfaro75/saiva-api:rollback
-docker image tag <old-web-id> ghcr.io/marioalfaro75/saiva-web:rollback
-
-sed -i 's/^SAIVA_VERSION=.*/SAIVA_VERSION=rollback/' .env
-docker compose -f docker-compose.prod.yml up -d           # NOT `make pull`
+make update
 ```
 
-Use `docker compose … up -d` and not `make pull` here: `make pull` runs `docker compose
-pull` first, `rollback` is a local tag that exists in no registry, and the failed pull
-takes the whole command down with it. (Substitute your own `SAIVA_REGISTRY` for
-`ghcr.io/marioalfaro75` if you repointed the images.) If the local image is gone after
-all — you pruned, or the host was rebuilt — fall back to the registry with
-`SAIVA_VERSION=sha-<previous>` (or the previous `v*` tag) and `make pull`, which needs
-working network and GHCR access. Either way, restore the pre-migration dump from the
-`db_backups` volume if a migration had already run: an older image will refuse to start
-against a newer schema.
+…or press **Settings → Software updates → Update now**. Both run the same script, and
+that is the point: there is one code path that applies a release, so the two cannot
+deliver different things.
 
-**In‑app updates.** On a pull‑based deploy, the app checks GitHub for newer releases and
-shows the owner an **Update available** badge; **Settings → Software updates → Update now**
-pulls and restarts via a token‑protected Watchtower sidecar (the API never touches the
-Docker socket). After an update, open tabs get a one‑click **Reload** prompt. The update
-check is a public, data‑free request and can be turned off with `UPDATE_CHECK_ENABLED=false`.
+It applies **everything** a release contains — the images, `docker-compose.prod.yml`,
+`infra/Caddyfile`, new `.env` settings, every service — then asks your actual published
+address whether the site answers, from outside the containers. If it doesn't, the box is
+put back: your `.env`, the previous checkout, and the exact image digests that were
+running, pinned so the rollback works with no network at all. Then it tells you which of
+those two things happened.
+
+**[docs/UPDATING.md](docs/UPDATING.md) has the full story**, including the one case that
+cannot be made automatic — a release whose migration succeeded and whose code is then
+unhealthy, where the images can be rolled back and the schema cannot.
+
+**The first upgrade is manual**, because the version on the box does not have the new
+updater yet. Once, on the host:
+
+```bash
+cd /opt/saiva                      # wherever the checkout is
+git fetch --tags
+git checkout --detach v0.17.0      # the release carrying this change
+sudo ./scripts/install-updater.sh  # state directory + the host agent
+make update
+```
+
+That also removes the old `watchtower` and `docker-socket-proxy` containers. Every update
+after it is `make update` or the button.
+
+To enable the in-app button on a box that skipped the installer, run it any time:
+
+```bash
+sudo ./scripts/install-updater.sh
+```
+
+That installs a small root-owned agent on the host. It takes no parameters and reads
+nothing out of the request that could choose what gets deployed, so the most the app can
+ask for is "an update", never "this code". Without it everything still works; the panel
+just says in-app updates aren't set up here.
+
+**Release channels.** `latest` follows tagged releases (`v*`) and is what a box should
+normally run. `edge` follows every green build of `main`. `sha-<short>` is an immutable
+build. Set `SAIVA_VERSION` in `.env`. Note that `edge` and `sha-` builds carry no release
+number, so the app can tell you which build you're on but *cannot* tell you whether a
+newer release exists — and it says so rather than showing a tick.
+
+### If an update goes wrong
+
+```bash
+./scripts/deploy.sh --status      # what the last run did, step by step
+./scripts/deploy.sh --rollback    # undo the last applied release
+```
+
+The same status is at `https://<your address>/_saiva/update-status.json`, served by Caddy
+straight off the host — so it still answers when the app itself is the thing that's
+broken.
+
+**Nightly backups, verified by a real restore.** A systemd timer on the host runs
+`scripts/backup.sh`: it dumps the database, **restores that dump into a throwaway database
+and compares it row for row**, copies it off the box, and writes down what happened. Only
+then is it called a backup. Settings → Backups shows the age of the newest *verified* one,
+and says so plainly when there isn't one — including the state that matters most, *a dump
+was taken but it could not be restored*.
+
+It runs on the host rather than in a container because the thing producing the safety net
+must not be the thing a bad release can break, and a backup is most wanted on the night the
+app won't start. Set it up once with `sudo ./scripts/install-updater.sh`, choose a
+destination in `/etc/saiva/agent.conf`, and read **[docs/BACKUPS.md](docs/BACKUPS.md)** —
+which also explains why `psql --single-transaction` exiting 0 is *not* evidence that a dump
+is complete, and what the regime does instead.
+
+**Pre-migration backups.** Separately, before applying any schema migration to an existing
+database, the API writes a compressed `pg_dump` into the same volume. If that dump fails, it
+refuses to migrate. These are never pruned automatically.
+
+**Restoring one** — this is the command that is worth knowing before you need it:
+
+```bash
+./scripts/restore-backup.sh                 # list the dumps, newest first
+./scripts/restore-backup.sh saiva-20261109-023700-nightly.sql.gz
+```
+
+It runs from a throwaway container, because the dumps are mounted only into the `api`
+container and the whole reason you're reading this is that `api` won't start. It takes a
+dump of the current state *first*, so a mistaken restore is itself reversible, and it
+asks you to type a word, because it destroys everything written since the dump was taken.
+
+**Rolling back further.** Pin an exact build and apply it:
+
+```bash
+# Edit .env:  SAIVA_VERSION=v0.16.1    (or sha-1a2b3c4 for an exact build)
+make up
+```
+
+Set it **in `.env`**, not on the make command line: a variable passed to `make` lasts for
+that one command, and the next `make update` would read `.env` and roll straight forward
+again.
+
+An older image meeting a newer database is handled rather than fatal — it starts, serves,
+and prints a loud explanation telling you to roll forward or restore a dump. It used to
+crash-loop instead, and write a full copy of the database on every restart attempt; see
+`backend/app/schema_state.py`.
+
+**Images are never pruned automatically**, because the image a rollback needs is dangling
+by definition. `docker system df` shows where you are; `docker image prune` reclaims it
+once a release has proved itself.
+
 
 **Alerts & email digests.** The **Alerts** page always shows an in‑app feed (over‑budget
 categories, unusual spend, upcoming bills, large transactions, low projected balance).
@@ -236,6 +309,16 @@ Docker (or use a VM, which needs no special setup). For an LXC:
    (or *Container → Options → Features → Nesting* in the web UI), then start the container.
 3. **Install Docker Engine + the Compose plugin** inside the container.
 4. Clone the repo and run `make deploy` exactly as above.
+5. Set up the host side once — the in-app update button *and* the nightly backup:
+   ```bash
+   sudo ./scripts/install-updater.sh
+   sudo nano /etc/saiva/agent.conf   # set SAIVA_BACKUP_COPY_TO
+   sudo ./scripts/backup.sh          # take the first one now
+   sudo ./scripts/backup.sh --self-check
+   ```
+   [docs/BACKUPS.md](docs/BACKUPS.md) covers choosing a destination on Proxmox, including
+   why a mount point from the PVE host is reported as *same machine* and what you have to
+   check yourself.
 
 Notes:
 - **Storage driver:** Docker's `overlay2` works with nesting on modern kernels; on
@@ -363,41 +446,58 @@ bucket and every audit-log row would record the same address. `TRUSTED_PROXIES`
 Leave it empty when nothing fronts the API: an unset value means the header is
 ignored, which is the safe default, because a client can send that header itself.
 
-## Automatic updates and the Docker socket
+## How updates reach this box, and what has access to what
 
-The in-app "Update now" button asks Watchtower to pull and recreate the app
-containers. Watchtower talks to a filtering socket proxy on an internal network
-rather than holding `/var/run/docker.sock` itself, which blocks the API sections it
-has no use for — exec, volumes, networks, build, swarm.
+Nothing in the stack can reach the Docker daemon. There is no socket mounted into any
+container, and no updater service. That used to be false, and the change is the point of
+the whole design, so it is worth stating plainly.
 
-Be clear about what that buys: updating a container means creating one, and
-anything that can create a container can create a privileged one and take the host.
-The proxy narrows the blast radius of a bug in Watchtower; it does not contain an
-attacker who reaches it. If you would rather not make that trade, delete the
-`watchtower` and `docker-socket-proxy` services and update by hand — `docker compose
-pull && docker compose up -d`. Everything works the same, minus the button.
+The old arrangement was Watchtower behind a filtering socket proxy, triggered by the app
+over a shared token. It worked as far as it went, and that was the problem — it went
+three-eighths of the way. Watchtower never reads a compose file; it recreates a container
+from the *old* container's own inspect output, so no compose change, no `.env` value, no
+port binding and no Caddyfile edit could reach this box through it. It also treats a
+container that merely *starts* as a successful update, so there was no gate and nothing
+to roll back to. And the proxy's own documentation said the quiet part: updating a
+container means creating one, and anything that can create a container can create a
+privileged one and take the host. That access existed so a button could pull two images.
 
-Watchtower's image cleanup is switched off here, so the image it replaced stays on the
-host and a bad release can be rolled back offline (see **Rolling back** above). Nothing
-reclaims images automatically as a result, and it is not a trickle: every update applied
-holds onto a whole generation, roughly 140 MB across the two images, because the version
-stamp sits near the top of the API's Dockerfile and nothing below it is shared between
-releases. Run `docker system df` to see what is being held and `docker image prune`
-once a release has proved itself. Deliberately *not* configured: Watchtower's own
-image-usage thresholds, which need the Docker `/system` endpoints the socket proxy
-refuses — the check is fail-closed, so setting one would abort every update session
-before it started, and the app would still report that the update began.
+What replaces it:
 
-**Nothing on this box updates itself on a timer, and it is worth knowing why.** It is
-not that no schedule is configured: with no schedule and no interval set Watchtower
-synthesises a 24-hour one from its own default. What suppresses it is that the update
-endpoint is enabled and periodic polls are not, which puts Watchtower in an API-only
-mode where it serves the HTTP API and never reaches its scheduler. So a bad release
-never arrives here unsupervised — it arrives when you press **Update now** or run `make
-pull`. The risk this deployment actually carries is a one-click update you cannot undo,
-which is what cleanup being off and the offline **Rolling back** path above are for.
-Enabling `WATCHTOWER_HTTP_API_PERIODIC_POLLS`, or removing the two
-`WATCHTOWER_HTTP_API_*` endpoint variables, turns the 24-hour poll on instead.
+- **`scripts/deploy.sh --apply-release` on the host** applies the whole release — images,
+  compose file, Caddyfile, `.env`, every service — and gates on the published address
+  answering from outside the containers. On any failure it restores `.env`, the previous
+  checkout and the exact image digests, then re-gates.
+- **The button writes a file.** The app has one bind-mounted directory. It writes
+  `request` into it; a root-owned agent on the host (`scripts/saiva-update-agent`, put
+  there once by `scripts/install-updater.sh`) notices, deletes it, and runs that script
+  with no arguments. The agent resolves the target release itself and reads nothing out
+  of the request that could select what gets deployed, so the most a compromised app
+  container can ask for is the update the button was going to do anyway.
+- **The status is a file on the host**, served by Caddy at `/_saiva/update-status.json`.
+  That matters because the app container is the thing being replaced: the state has to
+  outlive it, or the panel can only guess. It used to guess, and it guessed "applied".
+
+The agent is a **copy**, not a symlink into the checkout, because otherwise a release
+could change what runs as root here. It therefore goes stale, and says so:
+`sudo /usr/local/lib/saiva/saiva-update-agent --self-check`.
+
+**Nothing updates itself on a timer.** A release arrives when you press **Update now** or
+run `make update`, with someone at the keyboard. That is deliberate: the hazard on a box
+holding a family's financial records is an update that cannot be undone, not an
+unsupervised rollout, and a timer would remove the one person who can tell the difference.
+
+There *is* one timer, and it does the opposite thing: `saiva-backup.timer` takes a nightly
+backup. The two are deliberately the other way round — the unattended job is the one that
+only ever adds a file, and the one that changes the box needs a person.
+
+**Images are never pruned automatically**, because the image a rollback needs is dangling
+by definition — the tag it had moved to the release that replaced it. Every applied
+update holds roughly 140 MB. `docker system df` to see, `docker image prune` once a
+release has proved itself.
+
+Full detail: **[docs/UPDATING.md](docs/UPDATING.md)**.
+
 
 ### Repository settings to set by hand
 
@@ -433,11 +533,12 @@ backend/    FastAPI API — auth, accounts, import, categorisation, transfers, d
 frontend/   React + TS SPA (Vite) — overview, insights, advisor, alerts, transactions,
             accounts, budgets, bills, forecast, net worth, goals, benchmarks, import, settings
 infra/      Caddy reverse-proxy config (auto-HTTPS)
-scripts/    deploy.sh — the one-command deploy/pull helper behind `make`
-docs/       Product Requirements Document
+scripts/    deploy.sh (install, update, rollback), backup.sh (nightly, verified),
+            restore-backup.sh, the host agent and its installer, lib/ + tests/ behind them
+docs/       Product Requirements Document, UPDATING.md, BACKUPS.md
 .github/    CI + release workflows (tests, image publish, Cut release)
 docker-compose.yml        local build (Postgres + API + web + Caddy)
-docker-compose.prod.yml   prebuilt GHCR images + Caddy + Watchtower (in-app updates)
+docker-compose.prod.yml   prebuilt GHCR images + Caddy (production; the one `make update` applies)
 ```
 
 ## 📄 Product Requirements Document
