@@ -29,6 +29,15 @@
 # Point it at a Postgres with PGHOST/PGPORT/PGUSER. The defaults are the instance this
 # repository's sandbox runs. Exits 77 if there is no Postgres to talk to, so a runner can
 # tell "cannot run here" from "the backup is broken".
+#
+# ONE COPY AT A TIME against one server. The scratch databases are named for this process,
+# but two concurrent runs still interfere: each cleanup drops every `saiva_verify_%`
+# database it finds, including the one the other run is restoring into. CI runs this once;
+# a developer running it beside another copy will see verifications fail for reasons that
+# have nothing to do with the code. (scripts/backup.sh's own orphan sweep is guarded
+# against this -- it only reclaims a scratch database whose pid is dead or whose stamp is
+# over an hour old -- but this suite's cleanup is deliberately blunter, because a suite
+# that leaves rubbish behind when it fails is harder to re-run than one that does not.)
 
 # errexit is on, with the same known cost test-restore-backup.sh states: when a section
 # fails in a way the assertions do not catch -- a bare command returning non-zero -- the
@@ -81,12 +90,25 @@ cleanup() {
   # ledger left lying about, and would also poison the next run's section-4 assertion.
   # Dropped here as well as asserted on, because a suite that leaves rubbish behind when it
   # fails is harder to re-run than one that does not.
-  local leftover
+  #
+  # But only the ones NOBODY IS USING, by the same test scripts/backup.sh's own orphan
+  # sweep applies: the trailing pid is not a live process, or the stamp is over an hour
+  # old. This used to drop every saiva_verify_% database it could see, and the cost showed
+  # up as soon as two copies of this suite ran against one Postgres server -- each one's
+  # cleanup dropped the other's scratch database mid-restore, and the failures landed in
+  # whichever section happened to coincide. They read exactly like real verification
+  # failures, which cost an hour of looking for a defect that was not there.
+  local leftover pid stamp cutoff
+  cutoff="$(date -u -d '1 hour ago' +%Y%m%d%H%M%S 2>/dev/null || printf '0')"
   while read -r leftover; do
     [ -n "$leftover" ] || continue
+    pid="${leftover##*_}"
+    stamp="${leftover#saiva_verify_}"; stamp="${stamp%_*}"
+    case "$pid" in ''|*[!0-9]*) pid=1 ;; esac
+    if kill -0 "$pid" 2>/dev/null && [ "$stamp" \> "$cutoff" ]; then continue; fi
     psql -d postgres -qc "DROP DATABASE IF EXISTS \"$leftover\" WITH (FORCE)" >/dev/null 2>&1 || true
   done < <(psql -X -At -q -d postgres \
-             -c "select datname from pg_database where datname like 'saiva_verify_%'" 2>/dev/null || true)
+             -c "select datname from pg_database where datname like 'saiva\\_verify\\_%'" 2>/dev/null || true)
   chmod -R u+rwX "$WORK" 2>/dev/null || true
   rm -rf "$WORK"
 }
@@ -94,6 +116,12 @@ trap cleanup EXIT
 
 q() { psql -X -At -q -d "$TESTDB" -c "$1"; }
 meta() { psql -X -At -q -d postgres -c "$1"; }
+meta_rows() { psql -X -At -q -d postgres -c "$1" 2>/dev/null || true; }
+
+# When this suite started, as a dump-name-shaped stamp. Used to tell a scratch
+# verification database this suite left behind from one belonging to another copy of the
+# suite running against the same server -- see verify_dbs.
+SUITE_STARTED_STAMP="$(date -u +%Y%m%d%H%M%S)"
 
 # Section 11 needs a file that only root can change, and the whole point of that section is
 # that backup.sh looks at the OWNER. On a developer box this suite is usually root already;
@@ -110,7 +138,27 @@ as_root() {
 # The throwaway databases backup.sh creates to rehearse a restore. Exactly the query the
 # task names, wildcards and all: `_` is a LIKE wildcard, so this is a superset of the real
 # family, which is the cautious direction for an assertion that something is NOT there.
-verify_dbs() { meta "select count(*) from pg_database where datname like 'saiva_verify_%'"; }
+# Scratch verification databases that COULD have been created by this suite's own runs:
+# every backup.sh this suite starts is a child of this process, and the pid is the tail of
+# the name. Counting every saiva_verify_% on the server instead made this assertion fail
+# whenever another copy of the suite had one in flight -- a failure that reads exactly like
+# a verification that did not clean up after itself.
+verify_dbs() {
+  local n=0 db pid
+  while read -r db; do
+    [ -n "$db" ] || continue
+    pid="${db##*_}"
+    case "$pid" in ''|*[!0-9]*) continue ;; esac
+    # A live process whose parent is this suite. `ps -o ppid=` is enough: the only thing
+    # starting backup.sh here is this script.
+    if [ "$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' ')" = "$$" ]; then n=$((n + 1)); continue; fi
+    # Not running any more. If its stamp is from this suite's lifetime it is ours and it
+    # was left behind; older than that, it belongs to somebody else's run.
+    local stamp="${db#saiva_verify_}"; stamp="${stamp%_*}"
+    [ "$stamp" \> "$SUITE_STARTED_STAMP" ] && n=$((n + 1))
+  done < <(meta_rows "select datname from pg_database where datname like 'saiva\\_verify\\_%'")
+  printf '%s' "$n"
+}
 live_db_exists() { meta "select count(*) from pg_database where datname = '$TESTDB'"; }
 
 # backup.sh in --direct mode, pointed at the scratch database, a scratch dumps directory
@@ -704,7 +752,12 @@ sleep 0.4
 rc=0
 run_backup --trigger=button >"$WORK/button.out" 2>&1 </dev/null || rc=$?
 read_status "button press while the lock is held"
-assert_eq "a button press waits for nothing and exits 0" "0" "$rc"
+# 75, not 0. EX_TEMPFAIL, because 0 was ambiguous in a way that destroyed the record: the
+# host agent treats "exited 0 and wrote no status" as a run that died silently, and wrote a
+# failure document of its own over backup-status.json -- which does not carry the
+# carried-forward fields, so a press during a release erased last_verified_at and the page
+# then said there had never been a backup. Reproduced by review.
+assert_eq "a button press waits for nothing and declines with EX_TEMPFAIL" "75" "$rc"
 assert_eq "it does not overwrite the holder's phase"      "$PRE_LOCK_PHASE"   "$(sf phase)"
 assert_eq "nor the holder's run id"                       "$PRE_LOCK_RUN_ID"  "$(sf run_id)"
 assert_eq "nor when the holder started"                   "$PRE_LOCK_STARTED" "$(sf started_at)"
@@ -719,7 +772,7 @@ esac
 rc=0
 SAIVA_BACKUP_LOCK_WAIT=1 run_backup >"$WORK/timer.out" 2>&1 </dev/null || rc=$?
 read_status "timer run that waited and gave up"
-assert_eq "a timer run that waits and gives up also exits 0" "0" "$rc"
+assert_eq "a timer run that waits and gives up declines the same way" "75" "$rc"
 assert_eq "and leaves the record alone too" "$PRE_LOCK_RUN_ID" "$(sf run_id)"
 assert_eq "last_verified_at is still untouched" "$SEED_VERIFIED_AT" "$(sf last_verified_at)"
 if grep -qi 'verified' "$WORK/timer.out"; then
@@ -744,8 +797,12 @@ done
 # Never pruned, however old. This script may remove what it created and may not remove what
 # the api's pre-migration dump or restore-backup.sh's safety dump created -- their count is
 # reported instead, so a volume filling up is visible rather than silently tidied.
-printf 'premigrate\n' | gzip -c >"$BACKUPS/saiva-20200101-010101-premigrate.sql.gz"
-printf 'prerestore\n' | gzip -c >"$BACKUPS/saiva-20200102-020202-prerestore.sql.gz"
+# At 0600, and owned by whoever writes dumps here, so the prune's NAME pattern is the only
+# thing standing between them and deletion. They were 0644 before, which meant the
+# candidate list's -perm filter excluded them and this section proved nothing about the
+# name: widening the pattern from `-nightly` to `-.*` kept the whole suite green.
+plant_nightly "saiva-20200101-010101-premigrate.sql.gz" "premigrate"
+plant_nightly "saiva-20200102-020202-prerestore.sql.gz" "prerestore"
 
 rc=0
 SAIVA_BACKUP_KEEP_NIGHTLY=5 run_backup >"$WORK/prune.out" 2>&1 </dev/null || rc=$?
@@ -1020,7 +1077,10 @@ fi
 # looking after it, so this is asserted once more over the whole suite and not only after
 # each case: a drop that happens on the next run rather than this one would pass every
 # per-case check above and still leave one standing overnight.
-assert_eq "no saiva_verify_% database survives the whole suite" "0" "$(verify_dbs)"
+# Scoped to databases this suite's own runs could have created -- the pid in the name is a
+# child of this process -- because another copy of the suite running against the same server
+# legitimately has its own in flight. See the cleanup function for what that cost.
+assert_eq "no saiva_verify_% database from this suite survives it" "0" "$(verify_dbs)"
 assert_eq "the live ledger is exactly as it started" "$LIVE_ROWS" "$(q 'select count(*) from transactions')"
 assert_eq "and its schema era is untouched" "0003" "$(q 'select version_num from alembic_version')"
 
@@ -1178,7 +1238,7 @@ LOCK_HOLDER=$!
 sleep 1
 rc=0
 run_backup --trigger button >"$WORK/locked.out" 2>&1 </dev/null || rc=$?
-assert_eq "18f a press while the lock is held exits 0 without taking anything" "0" "$rc"
+assert_eq "18f a press while the lock is held declines without taking anything" "75" "$rc"
 read_status "after a press that could not get the lock"
 assert_eq "18f the verdict is untouched" "false" "$(sf verified)"
 assert_eq "18f phase is untouched" "failed" "$(sf phase)"
@@ -1192,15 +1252,39 @@ wait "$LOCK_HOLDER" 2>/dev/null || true
 # beside phase failed, which reads as a contradiction.
 clear_backups
 : >"$STATE/backup-status.kv"
-run_backup >/dev/null 2>&1 </dev/null &
+# The SCRIPT is backgrounded, not run_backup -- backgrounding the shell function forks a
+# subshell, $! is that subshell, and `kill` then hit the wrapper while backup.sh ran to
+# completion as its child. All three assertions below passed against a run that was never
+# signalled and never failed. The environment is therefore inlined here rather than
+# borrowed from run_backup.
+SAIVA_BACKUP_DIRECT=1 \
+SAIVA_ENV_FILE="$WORK/no-such.env" \
+SAIVA_AGENT_CONF="$WORK/no-such.conf" \
+SAIVA_STATE_DIR="$STATE" \
+SAIVA_BACKUP_DIR="$BACKUPS" \
+POSTGRES_DB="$TESTDB" \
+POSTGRES_USER="$PGUSER" \
+SAIVA_BACKUP_COPY_TO="" \
+SAIVA_BACKUP_COPY_CMD="" \
+  "$BACKUP" >/dev/null 2>&1 </dev/null &
 KILL_ME=$!
 # Wait for the run to be doing real work, then terminate it the way systemd would.
 for _ in $(seq 1 60); do
   [ -s "$STATE/backup-status.kv" ] && grep -q '^step' "$STATE/backup-status.kv" && break
   sleep 0.2
 done
+if ! kill -0 "$KILL_ME" 2>/dev/null; then
+  bad "18g the run finished before it could be signalled; this case proves nothing"
+  note "it must still be running when the TERM arrives, or every assertion below is vacuous"
+fi
 kill -TERM "$KILL_ME" 2>/dev/null || true
-wait "$KILL_ME" 2>/dev/null || true
+SIGNALLED_RC=0
+wait "$KILL_ME" 2>/dev/null || SIGNALLED_RC=$?
+case "$SIGNALLED_RC" in
+  143|1) ok "18g the run really was terminated by the signal = $SIGNALLED_RC" ;;
+  0) bad "18g the run exited 0, so it was never signalled" ;;
+  *) ok "18g the run was terminated = $SIGNALLED_RC" ;;
+esac
 read_status "a run terminated by a signal"
 assert_eq "18g a terminated run is recorded as failed" "failed" "$(sf phase)"
 case "$(sf exit_code)" in
@@ -1395,6 +1479,126 @@ case "$OFFSITE_AFTER_COPY" in
   *) ok "19f (the preceding run had recorded offsite=${OFFSITE_AFTER_COPY})" ;;
 esac
 rm -rf "$WORK/offbox-ok"
+
+# ==========================================================================================
+# 20. Four guards that were only pinned by greps, and one that was not pinned at all
+# ==========================================================================================
+#
+# A third review mutated the implementation and ran this suite against each mutation. These
+# five survived -- the suite stayed green while the thing each of them protects was broken.
+
+# 20a. `[ "$KEEP_NIGHTLY" -ge 1 ] || KEEP_NIGHTLY=1` is what stops
+# SAIVA_BACKUP_KEEP_NIGHTLY=0 in agent.conf meaning "delete the backup you just verified".
+# The suite used 5, 3, 2 and 1 and never 0, so the only guard was a grep for the literal
+# `KEEP_NIGHTLY=1` in backend/tests/test_backup_install.py -- which a mutation that changed
+# `-ge 1` to `-ge 0` left intact.
+clear_backups
+rc=0
+SAIVA_BACKUP_KEEP_NIGHTLY=0 run_backup >/dev/null 2>&1 </dev/null || rc=$?
+read_status "retention configured as zero"
+assert_eq "20a a retention of 0 still succeeds" "0" "$rc"
+assert_eq "20a and is floored at 1, never 0" "1" "$(sf kept)"
+ZERO_DUMP="$(sf dump_name)"
+if [ -n "$ZERO_DUMP" ] && [ -f "$BACKUPS/$ZERO_DUMP" ]; then
+  ok "20a and the dump this run just verified is still on disk"
+else
+  bad "20a a retention of 0 deleted the backup the same run had just verified"
+fi
+# The same floor has to hold for a value that is not a number at all.
+clear_backups
+rc=0
+SAIVA_BACKUP_KEEP_NIGHTLY="not a number" run_backup >/dev/null 2>&1 </dev/null || rc=$?
+read_status "retention configured as nonsense"
+assert_eq "20a a nonsense retention still succeeds" "0" "$rc"
+assert_eq "20a and falls back to the default, not to zero" "14" "$(sf kept)"
+
+# 20b. conf_is_trustworthy rejects agent.conf unless root owns it AND nobody else can write
+# it, because SAIVA_BACKUP_COPY_CMD from that file runs as root under the nightly timer.
+# Section 11 varied only the MODE, so a mutation that trusted a conf owned by anybody kept
+# the suite green. The owner half needs a file owned by somebody else, which needs root.
+if [ "$(id -u)" = "0" ] && id -u nobody >/dev/null 2>&1; then
+  clear_backups
+  FOREIGN_CONF="$WORK/foreign-agent.conf"
+  FOREIGN_DEST="$WORK/foreign-dest"
+  mkdir -p "$FOREIGN_DEST"
+  printf 'SAIVA_BACKUP_COPY_TO=%s
+SAIVA_BACKUP_KEEP_NIGHTLY=3
+' "$FOREIGN_DEST" >"$FOREIGN_CONF"
+  chown nobody "$FOREIGN_CONF"
+  chmod 0644 "$FOREIGN_CONF"
+  assert_eq "20b the conf really is owned by somebody other than root" \
+    "nobody" "$(stat -c '%U' "$FOREIGN_CONF")"
+  rc=0
+  SAIVA_BACKUP_DIRECT=1 \
+  SAIVA_ENV_FILE="$WORK/no-such.env" \
+  SAIVA_AGENT_CONF="$FOREIGN_CONF" \
+  SAIVA_STATE_DIR="$STATE" \
+  SAIVA_BACKUP_DIR="$BACKUPS" \
+  POSTGRES_DB="$TESTDB" \
+  POSTGRES_USER="$PGUSER" \
+    "$BACKUP" >/dev/null 2>&1 </dev/null || rc=$?
+  read_status "an agent.conf owned by somebody other than root"
+  assert_eq "20b the run still succeeds" "0" "$rc"
+  assert_eq "20b but the conf's destination is NOT acted on" "off" "$(sf offsite)"
+  assert_eq "20b nor its retention" "14" "$(sf kept)"
+  assert_eq "20b and nothing reached the destination it named" \
+    "0" "$(find "$FOREIGN_DEST" -maxdepth 1 -name '*.sql.gz' | wc -l)"
+  rm -rf "$FOREIGN_DEST" "$FOREIGN_CONF"
+else
+  note "20b skipped: it needs root to create a conf owned by another uid"
+fi
+
+# 20c. _offsite_worsen's rule is that the record carries the LEAST protective outcome, so a
+# destination that stopped working is visible even when another one is fine. No test
+# configured both, so reversing the rank comparison kept the suite green.
+clear_backups
+BOTH_DEST="$WORK/both-dest"
+mkdir -p "$BOTH_DEST"
+rc=0
+run_backup_to "$BOTH_DEST" "exit 3" >/dev/null 2>&1 </dev/null || rc=$?
+read_status "a working directory beside a failing command"
+assert_eq "20c the backup itself still succeeds" "0" "$rc"
+assert_eq "20c and the WORST of the two outcomes is what the record carries" "failed" "$(sf offsite)"
+case "$(sf offsite_message)" in
+  *"$BOTH_DEST"*) ok "20c and the message still names the destination that did work" ;;
+  *) bad "20c the message lost the destination that worked"; note "got: $(sf offsite_message)" ;;
+esac
+# The mirror: a same-filesystem directory beside a command that succeeds. `remote` is the
+# better of the two and must NOT be the headline.
+clear_backups
+rc=0
+run_backup_to "$BOTH_DEST" "true" >/dev/null 2>&1 </dev/null || rc=$?
+read_status "a same-filesystem directory beside a working command"
+assert_eq "20c the mirror case succeeds too" "0" "$rc"
+assert_eq "20c and same-filesystem still wins over remote" "same-filesystem" "$(sf offsite)"
+rm -rf "$BOTH_DEST"
+
+# 20d. verify_dump fails a dump whose restored copy has no row in alembic_version, on the
+# stated ground that a dump which cannot say which schema it is cannot be restored with any
+# confidence. Nothing tested it: replacing the check with `if false` kept the suite green.
+psql -qc "DROP DATABASE IF EXISTS \"${TESTDB}_norev\" WITH (FORCE)" -d postgres >/dev/null
+psql -qc "CREATE DATABASE \"${TESTDB}_norev\"" -d postgres >/dev/null
+psql -q -d "${TESTDB}_norev" >/dev/null <<'SQL'
+CREATE TABLE households (id serial primary key, name text);
+CREATE TABLE accounts (id serial primary key, household_id int references households(id));
+CREATE TABLE transactions (id serial primary key, account_id int references accounts(id), cents bigint);
+CREATE TABLE alembic_version (version_num varchar(32) primary key);
+INSERT INTO households (name) VALUES ('a real household');
+INSERT INTO accounts (household_id) VALUES (1);
+INSERT INTO transactions (account_id, cents) SELECT 1, g FROM generate_series(1, 20) g;
+SQL
+clear_backups
+rc=0
+run_backup_as "${TESTDB}_norev" >/dev/null 2>&1 </dev/null || rc=$?
+read_status "a Saiva database with no schema revision"
+assert_eq "20d a dump with no schema revision fails" "1" "$rc"
+assert_eq "20d and is NOT recorded as verified" "false" "$(sf verified)"
+case "$(sf verify_message)" in
+  *alembic_version*|*"schema revision"*) ok "20d and the message names what is missing" ;;
+  *) bad "20d the message does not say the schema revision is missing"
+     note "got: $(sf verify_message)" ;;
+esac
+psql -qc "DROP DATABASE IF EXISTS \"${TESTDB}_norev\" WITH (FORCE)" -d postgres >/dev/null
 
 # --- summary -----------------------------------------------------------------------------
 

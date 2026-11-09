@@ -119,6 +119,23 @@ consume_requests() { # DIR -> 0 if a real request was there
 # writes a terminal status itself, because the only thing the owner can see is that file:
 # a request consumed with nothing written leaves the panel showing the PREVIOUS run's
 # green "applied" while the press they just made has disappeared.
+# The fields a BACKUP record carries forward across runs on purpose: what the last
+# successful run achieved. They are not about the run this failure is reporting, and a
+# document that omitted them told the owner there had never been a backup at all.
+# scripts/lib/state.sh declares the same set in SAIVA_BACKUP_STATUS_FIELDS.
+BACKUP_CARRIED_FIELDS="last_success_at last_verified_at offsite offsite_target offsite_at \
+offsite_message backup_count oldest_at"
+
+# One `"key": value` line out of an existing status document, with the quotes and the
+# trailing comma left on so it can be re-emitted verbatim. sed rather than a JSON parser
+# because this runs as root on a box where python3 is likely but not promised, and an
+# absent or malformed file simply yields nothing.
+carried_field() { # FILE KEY
+  [ -r "$1" ] || return 0
+  sed -n "s/^[[:space:]]*\"$2\"[[:space:]]*:[[:space:]]*\(.*\)[,]*[[:space:]]*$/\1/p" "$1" \
+    | head -n 1 | sed 's/,$//'
+}
+
 write_failure_status() { # KIND MESSAGE  (KIND is `status` or `backup-status`)
   local kind="$1" msg="$2"
   local now; now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
@@ -129,19 +146,31 @@ write_failure_status() { # KIND MESSAGE  (KIND is `status` or `backup-status`)
   # but a stray quote or backslash would produce a file the API reads as "unreadable",
   # which is the one state that tells the owner nothing.
   msg="$(printf '%s' "$msg" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' | tr -d '\n\r\t')"
-  cat > "$tmp" <<EOF
-{
-  "schema_version": 1,
-  "run_id": "agent-$now",
-  "phase": "failed",
-  "step": "agent",
-  "trigger": "button",
-  "started_at": "$now",
-  "finished_at": "$now",
-  "message": "$msg",
-  "exit_code": "1"
-}
-EOF
+  {
+    printf '{\n'
+    printf '  "schema_version": 1,\n'
+    printf '  "run_id": "agent-%s",\n' "$now"
+    printf '  "phase": "failed",\n'
+    printf '  "step": "agent",\n'
+    printf '  "trigger": "button",\n'
+    printf '  "started_at": "%s",\n' "$now"
+    printf '  "finished_at": "%s",\n' "$now"
+    printf '  "message": "%s",\n' "$msg"
+    # Re-emitted from whatever is already on disk, so a failure this agent reports does not
+    # erase what the last successful BACKUP achieved. Without this, a press of "Back up
+    # now" during a release -- which backup.sh correctly declines -- made the page say
+    # there had never been a backup. A missing or unreadable value is written as null,
+    # which is what the renderer would have produced for it anyway.
+    if [ "$kind" = "backup-status" ]; then
+      local key value
+      for key in $BACKUP_CARRIED_FIELDS; do
+        value="$(carried_field "$STATE/$kind.json" "$key")"
+        printf '  "%s": %s,\n' "$key" "${value:-null}"
+      done
+    fi
+    printf '  "exit_code": "1"\n'
+    printf '}\n'
+  } > "$tmp"
   chmod 0644 "$tmp" 2>/dev/null || true
   mv -f "$tmp" "$STATE/$kind.json" 2>/dev/null || { rm -f "$tmp"; return 0; }
   # Only the update record has a public face, served by Caddy so it still answers when the
@@ -175,6 +204,13 @@ run_and_account_for_it() { # KIND MESSAGE_IF_SILENT -- then the command and its 
   rc=$?
   set -e
   after="$(status_fingerprint "$kind")"
+  # 75 (EX_TEMPFAIL) is the script saying "I declined to run and deliberately wrote
+  # nothing" -- another Saiva job holds the deploy lock. That is not a run that died
+  # silently, and treating it as one wrote a failure document over a healthy record.
+  if [ "$rc" = "75" ]; then
+    note "declined: another job holds the lock. The record was left alone."
+    return 0
+  fi
   if [ "$before" = "$after" ]; then
     write_failure_status "$kind" "${silent_msg//@RC@/$rc}"
     note "$1: exited $rc without writing a status; recorded a failure"

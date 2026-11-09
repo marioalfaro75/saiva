@@ -69,6 +69,79 @@ beforeEach(() => {
   vi.restoreAllMocks();
 });
 
+/**
+ * The headline's TONE, parameterised.
+ *
+ * A third review mutated this component and ran the suite against each mutation; twelve
+ * one-line changes that turn a warning into good news all kept it green, because only one
+ * of nine tone decisions was pinned. The card's whole judgement is that tone -- it is what
+ * somebody glancing at the page actually reads -- so it is asserted directly here rather
+ * than inferred from the words beside it.
+ *
+ * `notice-good` is the claim "this household has a backup, and a copy of it is not on this
+ * machine". Nothing below may produce it.
+ */
+const HEADLINE_TITLES =
+  /^(Last verified backup:|The last verified backup|No backup has been verified|Nothing has been backed up)/;
+
+function headlineNotice(): HTMLElement {
+  // The headline is the FIRST .notice on the card, and its title is its <strong>. Matched
+  // on the title rather than on any text, because several of the notices below it quote
+  // the same words -- the off-box note says "left this machine" too, in the negative.
+  const titles = screen.getAllByText(HEADLINE_TITLES, { selector: "strong" });
+  const notice = titles[0]?.closest(".notice");
+  if (!notice) throw new Error("the headline is not a <strong> inside a .notice any more");
+  return notice as HTMLElement;
+}
+
+describe("the headline's tone, which is the whole judgement", () => {
+  it("is good only when a fresh verified backup is also off this machine", async () => {
+    show();
+    await screen.findByText(HEADLINE_TITLES, { selector: "strong" });
+    expect(headlineNotice().className).toContain("notice-good");
+  });
+
+  // Every off-box state the host can record except `remote`, plus the two it can leave
+  // unset. scripts/backup.sh declares the vocabulary as SAIVA_OFFSITE_STATES, and
+  // backend/tests/test_deployment_hardening.py keeps that declaration and this component
+  // in step -- so this list going stale is itself a test failure there.
+  it.each(["same-filesystem", "same-host", "unknown", "failed", "off", null])(
+    "is not good when the copy's state is %s",
+    async (offsite) => {
+      show({ offsite });
+      await screen.findByText(HEADLINE_TITLES, { selector: "strong" });
+      expect(headlineNotice().className).not.toContain("notice-good");
+      // The AFFIRMATIVE claim. The warning branch says "no copy of it is known to have
+      // left this machine", which contains the same words and is the correct thing to say.
+      expect(headlineNotice().textContent ?? "").not.toMatch(/a copy of it left this machine/i);
+    },
+  );
+
+  it("is not good when the dump could not be restored", async () => {
+    show({ verified: false, last_verified_at: null, phase: "failed" });
+    await screen.findByText(HEADLINE_TITLES, { selector: "strong" });
+    expect(headlineNotice().className).not.toContain("notice-good");
+  });
+
+  it("is not good once the age passes the hours the API reports", async () => {
+    show({ last_verified_at: iso(40 * HOURS), stale_after_hours: 36 });
+    await screen.findByText(HEADLINE_TITLES, { selector: "strong" });
+    expect(headlineNotice().className).not.toContain("notice-good");
+  });
+
+  it("is still good just inside that window", async () => {
+    show({ last_verified_at: iso(30 * HOURS), stale_after_hours: 36 });
+    await screen.findByText(HEADLINE_TITLES, { selector: "strong" });
+    expect(headlineNotice().className).toContain("notice-good");
+  });
+
+  it("is not good when the timestamp is in the future", async () => {
+    show({ last_verified_at: new Date(Date.now() + 4 * HOURS).toISOString() });
+    await screen.findByText(HEADLINE_TITLES, { selector: "strong" });
+    expect(headlineNotice().className).not.toContain("notice-good");
+  });
+});
+
 describe("the headline is the age of the newest verified backup", () => {
   it("gives the age as a number", async () => {
     show();

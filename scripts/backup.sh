@@ -116,6 +116,18 @@ die() {
   exit 1
 }
 
+# The exit status for "I declined to run, and deliberately wrote nothing". 75 is
+# EX_TEMPFAIL, and it exists because 0 was ambiguous in a way that destroyed the record:
+# the host agent treats "exited 0 and wrote no status" as a run that died silently and
+# writes a failure document of its own over backup-status.json -- which does not carry the
+# carried-forward fields, so a press of "Back up now" during a release erased
+# last_verified_at and the page then said there was no backup at all. Reproduced.
+#
+# systemd treats any non-zero as a failed unit, which is the honest reading for a backup
+# that did not happen; `SuccessExitStatus=75` on saiva-backup.service would soften that if
+# the noise ever matters more than the signal.
+SAIVA_BACKUP_EX_DECLINED=75
+
 CONF="${SAIVA_AGENT_CONF:-/etc/saiva/agent.conf}"
 ACTION="run"
 TRIGGER="cli"
@@ -342,14 +354,14 @@ acquire_lock_or_leave() {
     flock -n 9 && return 0
     log "Another Saiva job holds the lock; nothing was taken, and the record of the run"
     log "that holds it has been left alone."
-    exit 0
+    exit "$SAIVA_BACKUP_EX_DECLINED"
   fi
   wait="${SAIVA_BACKUP_LOCK_WAIT:-600}"
   flock -w "$wait" 9 && return 0
   log "Could not get the deploy lock within ${wait}s -- a release is being applied -- so no"
   log "backup was taken. An update takes a pre-migration dump of its own, and the timer"
   log "runs again tomorrow. The age of the newest VERIFIED backup is the number to watch."
-  exit 0
+  exit "$SAIVA_BACKUP_EX_DECLINED"
 }
 
 # ---------------------------------------------------------------------------------------

@@ -229,11 +229,18 @@ status_flush() { # render the JSON file(s) for this kind, atomically
     backup-status) fields=("${SAIVA_BACKUP_STATUS_FIELDS[@]}") ;;
     *)             fields=("${SAIVA_STATUS_FIELDS[@]}") ;;
   esac
-  _render_status "${fields[@]}" > "$dir/.$kind.json.$$"
+  # A PER-CALL temp name, not `.$kind.json.$$`. A signal arriving inside _render_status
+  # runs the EXIT trap, whose own status_finish flushes again -- with the same pid, so the
+  # same path -- and the two writes interleave into one file that is then renamed into
+  # place. Reproduced 24 times out of 24: backup-status.json became invalid JSON and the
+  # page said there was no backup at all, which is the worst thing it can say wrongly.
+  local tmp
+  tmp="$(mktemp "$dir/.$kind.json.XXXXXX")" || return 0
+  _render_status "${fields[@]}" > "$tmp"
   # The log tail goes only into the private record, appended as a JSON array so the
   # panel can show it without a second request.
   if [ -f "$dir/$(_log_name)" ]; then
-    python3 - "$dir/.$kind.json.$$" "$dir/$(_log_name)" <<'PY' 2>/dev/null || true
+    python3 - "$tmp" "$dir/$(_log_name)" <<'PY' 2>/dev/null || true
 import json, sys
 status_path, log_path = sys.argv[1], sys.argv[2]
 with open(status_path) as fh:
@@ -245,7 +252,7 @@ with open(status_path, "w") as fh:
     fh.write("\n")
 PY
   fi
-  mv -f "$dir/.$kind.json.$$" "$dir/$kind.json"
+  mv -f "$tmp" "$dir/$kind.json"
   # World-readable: Caddy serves the public one, and the api container reads the private
   # one through a read-only mount. Neither contains a secret -- the private one carries
   # the deploy's log tail, which the API only ever returns to an authenticated owner.
@@ -254,8 +261,10 @@ PY
   # Only the update status has a public face. See SAIVA_BACKUP_STATUS_FIELDS for why the
   # backup status deliberately has none.
   [ "$kind" = "status" ] || return 0
-  _render_status "${SAIVA_STATUS_PUBLIC_FIELDS[@]}" > "$dir/.status-public.json.$$"
-  mv -f "$dir/.status-public.json.$$" "$dir/status-public.json"
+  local pub
+  pub="$(mktemp "$dir/.status-public.json.XXXXXX")" || return 0
+  _render_status "${SAIVA_STATUS_PUBLIC_FIELDS[@]}" > "$pub"
+  mv -f "$pub" "$dir/status-public.json"
   chmod 0644 "$dir/status-public.json" 2>/dev/null || true
 }
 
@@ -269,7 +278,12 @@ status_step() { # STEP [MESSAGE] -- advance and publish in one call
 status_finish() { # PHASE MESSAGE EXIT_CODE
   status_set phase "$1"
   status_set message "$2"
-  status_set exit_code "${3:-0}"
+  # `${3-0}`, not `${3:-0}`. A caller that passes an explicitly EMPTY status means "there
+  # is no exit status to report" -- which is the truth when a signal terminated the run
+  # rather than a command failing -- and `:-` substituted 0 for it, so the record said
+  # "no exit status, it was terminated" with exit_code 0 beside phase failed. The renderer
+  # turns an empty value into JSON null, which is the answer that was wanted.
+  status_set exit_code "${3-0}"
   status_set finished_at "$(now)"
   status_flush
 }
