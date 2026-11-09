@@ -20,7 +20,7 @@ stop checking.
 
 ## What you need to do on your LXC host
 
-Four commands and one edit. Run them in the checkout, as root.
+Four steps. Run them in the checkout, as root.
 
 ```bash
 cd /opt/saiva                        # wherever your checkout is
