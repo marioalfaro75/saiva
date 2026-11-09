@@ -1050,28 +1050,41 @@ remove_staged() {
 # Only files ROOT ITSELF WROTE, only `-nightly` names, and never the newest. The rm is
 # given exact names one at a time; there is no glob in it.
 #
-# `-user 0 -perm 600` is the part that matters, and it was missing. The prune decides what
-# to keep by sorting FILENAMES, and the directory it sorts is one the api container has
-# read-write -- docker-compose.prod.yml mounts db_backups into api so the pre-migration
-# dump can be written there. A reviewer reproduced the consequence: three files named
-# `saiva-99999999-999999-nightly.sql.gz` planted by anything with write access sort newest,
-# fill the keep window, and root then deletes every real dump. The container cannot forge
-# either of these two properties -- it runs as uid 10001, and take_dump chmods 0600 before
-# the rename -- so the candidate list is now the set of dumps this script wrote and nothing
-# else. A planted file is left where it is, and scripts/restore-backup.sh's listing names
-# it.
+# `-user <the uid that writes dumps here> -perm 600` is the part that matters, and it was
+# missing. The prune decides what to keep by sorting FILENAMES, and the directory it sorts
+# is one the api container has read-write -- docker-compose.prod.yml mounts db_backups into
+# api so the pre-migration dump can be written there. A reviewer reproduced the
+# consequence: three files named `saiva-99999999-999999-nightly.sql.gz` planted by anything
+# with write access sort newest, fill the keep window, and root then deletes every real
+# dump.
+#
+# The container can forge neither property. It runs as uid 10001, while a dump written
+# through `docker run` on postgres:16-alpine is owned by uid 0; and take_dump chmods 0600
+# before the rename. So the candidate list is the set of dumps this script wrote and
+# nothing else, and a planted file is left where it is for scripts/restore-backup.sh's
+# listing to name.
+#
+# The uid is COMPUTED rather than written as 0, because in --direct mode -- which is how
+# the test suite exercises this, with no Docker -- the dump is written by the host process
+# instead of by a container, so it carries that process's uid. Hardcoding 0 made every
+# fixture unprunable under an unprivileged runner and four retention tests failed in CI
+# while passing locally as root. The invariant being expressed is "this process wrote it",
+# and 0 was only ever a proxy for that.
 #
 # `find` also does not follow symlinks, which is the other half: `[ -f ]` does, so the
 # previous version counted a planted link as a nightly dump and unlinked it.
 prune_nightlies() {
   status_step prune "Keeping the newest ${KEEP_NIGHTLY} nightly dumps."
-  local removed
+  local removed owner
+  # Who writes dumps here: the container's root through `docker run`, or this process in
+  # --direct mode.
+  if [ "$DIRECT" -eq 1 ]; then owner="$(id -u)"; else owner=0; fi
   removed="$(backups_sh '
     cd "$1" 2>/dev/null || exit 0
     keep="$2"
     n=0
     # Reverse-sorted by name, which is reverse-chronological: the stamp is YYYYMMDD-HHMMSS.
-    for f in $(find . -maxdepth 1 -type f -user 0 -perm 600 \
+    for f in $(find . -maxdepth 1 -type f -user "$3" -perm 600 \
                  -name "saiva-????????-??????-nightly*.sql.gz" 2>/dev/null \
                | sed "s|^\./||" \
                | grep -E "^saiva-[0-9]{8}-[0-9]{6}-nightly(-[0-9]+)?\.sql\.gz$" \
@@ -1080,7 +1093,7 @@ prune_nightlies() {
       [ "$n" -le "$keep" ] && continue
       rm -f -- "$f" && printf "%s\n" "$f"
     done
-  ' "$BACKUP_MOUNT" "$KEEP_NIGHTLY" | grep -c . || true)"
+  ' "$BACKUP_MOUNT" "$KEEP_NIGHTLY" "$owner" | grep -c . || true)"
   status_set kept "$KEEP_NIGHTLY"
   # cmd_run prunes TWICE -- to policy before the dump, and again after the verify -- and a
   # plain `status_set pruned` meant the second call overwrote the first. With 8 nightlies

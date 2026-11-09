@@ -1264,6 +1264,30 @@ for n in 1 2 3; do
 done
 ok "19a and the planted files are left for the listing to report, not tidied away"
 
+# The mode is one of the two properties the candidate list requires; the OWNER is the other,
+# and it is the unforgeable one in production -- a dump written through `docker run` on
+# postgres:16-alpine is owned by uid 0 while the api container is uid 10001. The cases above
+# exercise the mode half, because --direct mode writes dumps as whoever runs this suite. The
+# owner half needs a file owned by somebody else, which needs root to create.
+if [ "$(id -u)" = "0" ] && id -u nobody >/dev/null 2>&1; then
+  FOREIGN="saiva-99999999-999900-nightly.sql.gz"
+  printf 'owned by somebody else, mode 0600\n' | gzip -c >"$BACKUPS/$FOREIGN"
+  chown nobody "$BACKUPS/$FOREIGN"
+  chmod 0600 "$BACKUPS/$FOREIGN"
+  rc=0
+  SAIVA_BACKUP_KEEP_NIGHTLY=1 run_backup >/dev/null 2>&1 </dev/null || rc=$?
+  assert_eq "19a a run with a foreign 0600 dump planted still succeeds" "0" "$rc"
+  if [ -f "$BACKUPS/$FOREIGN" ]; then
+    ok "19a a 0600 dump owned by another uid is not a prune candidate either"
+  else
+    bad "19a the prune deleted a dump it did not write, identified only by its mode"
+    note "the candidate list needs -user as well as -perm: the mode is forgeable from a container"
+  fi
+  rm -f "$BACKUPS/$FOREIGN"
+else
+  note "19a skipped the owner half: it needs root to create a file owned by another uid"
+fi
+
 # 19b. SIGKILL runs no trap. The OOM killer, `systemctl stop` past TimeoutStopSec and a
 # power cut all deliver one, and what was left behind was a complete copy of the ledger in
 # a throwaway database and another in a staged file, which nothing would ever reclaim --
