@@ -134,6 +134,11 @@ class BackupFacts:
     drop_box: bool
     stale_after_hours: int
     now: dt.datetime
+    # True while a request is queued or a run is genuinely under way. It is here so that
+    # the first run on a new box cannot mint a permanent "Nothing has been backed up
+    # yet" alert while that first backup is being taken. Defaulted, so a caller that
+    # does not care about the in-flight case need not say so.
+    in_progress: bool = False
 
 
 def backup_facts() -> BackupFacts:
@@ -145,11 +150,16 @@ def backup_facts() -> BackupFacts:
     box, instead of a run that straddles a nightly backup telling the first household
     the box is stale and the second that it is fine.
     """
+    record = backups.read_backup_status()
     return BackupFacts(
-        record=backups.read_backup_status(),
+        record=record,
         drop_box=backups.request_available(),
         stale_after_hours=get_settings().backup_stale_hours,
         now=dt.datetime.now(dt.UTC),
+        # Handed the record that was just read. Asking backups.backup_in_progress() to
+        # find its own would open the file a second time in one run, which the
+        # read-once invariant forbids and its test catches.
+        in_progress=backups.backup_in_progress(record or {}),
     )
 
 
@@ -280,7 +290,7 @@ def _backup_age_candidate(facts: BackupFacts, record: dict[str, Any]) -> Candida
         # A record exists and no run has ever got as far as a dump. Same key as the
         # no-record-at-all case below, because it is the same state told by a different
         # file: nothing has ever been backed up here.
-        return _backup_never_run()
+        return _backup_never_run(facts)
 
     skew = verified_at - facts.now
     if skew > dt.timedelta(0):
@@ -330,7 +340,7 @@ def _backup_age_candidate(facts: BackupFacts, record: dict[str, Any]) -> Candida
     return None
 
 
-def _backup_never_run() -> Candidate:
+def _backup_never_run(facts: BackupFacts) -> Candidate | None:
     """Nothing has ever been backed up on this box, and the regime is installed.
 
     One alert, ever. In the documented flow the owner runs `./scripts/backup.sh`
@@ -344,7 +354,17 @@ def _backup_never_run() -> Candidate:
     successful run. Both are true there -- there is no backup, and here is why -- and
     the headline on the Settings page does exactly the same thing. "No dump has ever
     been taken" would have been the contradiction.
+
+    NOTHING while a run is in flight. The very first run writes its record before it has
+    anything to report -- a run_id, phase `running`, started_at, and no timestamps at
+    all -- and the age ladder reads that as "nothing has ever been backed up", which is
+    true only until that run finishes. The key is bare and the severity is emailed, so
+    the row it leaves can never be retracted and never fires again once the backup
+    succeeds: a permanent "you have no backup" on a box that now has one. Waiting costs
+    nothing, because if the run fails the next pass says so properly, with the reason.
     """
+    if facts.in_progress:
+        return None
     return Candidate(
         key="backup_never_run",
         type="backup",
@@ -358,13 +378,16 @@ def _backup_never_run() -> Candidate:
     )
 
 
-def _backup_verify_candidate(record: dict[str, Any]) -> Candidate | None:
+def _backup_verify_candidate(
+    record: dict[str, Any], *, have_usable_backup: bool
+) -> Candidate | None:
     """A dump was taken and it could not be restored, so it is not a backup.
 
-    The loudest state on this box. It is deliberately NOT part of the age ladder: a run
-    can fail its verification while a verified backup from last night is still the
-    newest thing on the disk, and both facts are then true at once -- the age is fine
-    and the regime is failing now. The panel renders them together for the same reason.
+    Deliberately NOT part of the age ladder: a run can fail its verification while a
+    verified backup from last night is still the newest thing on the disk, and both
+    facts are then true at once -- the age is fine and the regime is failing now. The
+    panel renders them together for the same reason. It does READ the ladder's answer,
+    through `have_usable_backup`, but only to decide how loudly to speak.
     """
     if _host_flag(record.get("verified")) is not False:
         # None included: an absent or unreadable `verified` is "not known", and not
@@ -377,21 +400,48 @@ def _backup_verify_candidate(record: dict[str, Any]) -> Candidate | None:
         else "The host did not record what the restore proved, only that it did not come "
         "back whole."
     )
-    # Keyed on the run, so each night that produces a broken dump says so. That is not
-    # nagging: a fresh dump was taken and found unrestorable, which is new news every
-    # time. run_id is written before anything else in a run, so it is there in practice;
-    # the fallbacks exist because a field that is absent must not silently drop the one
-    # alert that matters most.
-    identity = record.get("run_id") or record.get("dump_name") or record.get("started_at")
+    # KEYED ON THE DUMP, not on the run, and that distinction was a nightly nag.
+    #
+    # backup_begin() clears only step/message/exit_code/finished_at/pruned and then
+    # writes a NEW run_id. The verdict group -- verified, verify_message, dump_name --
+    # is deliberately left standing, because only a run that LOOKED at a dump may change
+    # what is known about one. So every night that never reaches take_dump leaves last
+    # night's `verified: false` beside a brand-new run_id: the stack is down (phase
+    # `skipped`), or a preflight dies on disk space, Docker, or a client version skew.
+    # Keying on run_id therefore minted a fresh key, and so a fresh alert and a fresh
+    # email, EVERY NIGHT -- each one asserting that a dump was taken on a night the
+    # record's own message says nothing was dumped. Found by four independent reviewers
+    # and reproduced by driving scripts/backup.sh for real rather than by argument.
+    #
+    # dump_name is the field that moves in lockstep with the verdict: take_dump() clears
+    # and sets both, and --verify-only sets dump_name before verify_dump() runs. So one
+    # broken dump is one alert however many nights it stands, and a genuinely new broken
+    # dump is a new name and a new alert. With no dump_name the key is BARE rather than
+    # falling back to the run: a record reporting a verdict with nothing to attach it to
+    # can only have been hand-edited, and saying that once beats saying it nightly.
+    name = record.get("dump_name")
+    suffix = f":{_key_part(name)}" if isinstance(name, str) and name.strip() else ""
     return Candidate(
-        key=f"backup_verify_failed:{_key_part(identity)}",
+        key=f"backup_verify_failed{suffix}",
         type="backup",
-        severity="alert",
+        # `alert` is reserved for "you have no backup you can restore from" -- the rule
+        # _backup_offsite_candidate states below, and the one this branch used to break.
+        # A run can fail its verification while a dump verified nine hours ago sits on a
+        # NAS, and shouting about that sent the owner to a Settings page which renders
+        # the very same record at `warn` and tells them, correctly, that they are not
+        # without a backup. The feed and the page it links to now agree.
+        severity="warn" if have_usable_backup else "alert",
         title="A dump was taken, but it could not be restored, so it is not a backup",
         body=f"{quoted} A dump that does not restore is not a backup, however cleanly "
         "pg_dump exited, so the regime is failing now and the age of your newest verified "
         "backup has stopped moving. The dump has been kept for inspection; run "
-        "`./scripts/backup.sh --verify-only` on the host to watch the restore fail.",
+        "`./scripts/backup.sh --verify-only` on the host to watch the restore fail."
+        + (
+            " Your newest verified backup is still inside the window this box expects, "
+            "so you are not without a backup -- but nothing taken since is one."
+            if have_usable_backup
+            else ""
+        ),
         link=BACKUP_LINK,
     )
 
@@ -475,7 +525,10 @@ def _backup_offsite_candidate(record: dict[str, Any]) -> Candidate | None:
         # Rendered as itself, like the panel's default branch. A state this version has
         # not learned is something the owner should see, not something to drop -- and it
         # is certainly not to be assumed benign.
-        title = f"The off-box copy reported a state this version does not know: {state}"
+        # _key_part, not the raw value: `title` is String(200), and this is the one
+        # place a record value reaches it. An over-long state would fail the INSERT and
+        # take every other alert in the same run down with it -- budgets, bills, the lot.
+        title = f"The off-box copy reported a state this version does not know: {_key_part(state)}"
         body = (
             "Nothing here can say whether a copy of your backup left this machine. Run "
             "`./scripts/backup.sh --self-check` on the host to see what it means."
@@ -483,13 +536,53 @@ def _backup_offsite_candidate(record: dict[str, Any]) -> Candidate | None:
     if isinstance(where, str) and where.strip():
         body = f"{body} The destination recorded was {where.strip()}."
     if isinstance(said, str) and said.strip():
-        body = f"{body} The host said: \"{said.strip()}\""
+        body = f'{body} The host said: "{said.strip()}"'
     return Candidate(
         key=f"backup_offsite:{_key_part(state)}",
         type="backup",
         severity="warn",
         title=title,
         body=body,
+        link=BACKUP_LINK,
+    )
+
+
+def _backup_run_failed(record: dict[str, Any]) -> Candidate | None:
+    """A run stopped before it ever had a dump to judge, and nothing else explains why.
+
+    The gap this closes: the block below read only last_verified_at, verified and
+    offsite, so a run that died at a preflight produced NO candidate at all. The case
+    that makes it matter is disk space. db_data and db_backups share one filesystem, so
+    the host's own message for that refusal says it matters more than a failed backup --
+    filling that disk stops Postgres, not merely the backup -- and until this existed
+    the feed stayed silent about it for as long as SAIVA_BACKUP_STALE_HOURS, which is
+    most of two days by default, and then blamed the age.
+
+    Keyed on the STEP it died at, for the reason every key here encodes a state rather
+    than an occasion: a box failing at `room` every night is one alert, and a box that
+    starts failing somewhere else is telling you something genuinely new. `warn`,
+    because a failed run does not by itself mean there is no backup -- where there is
+    none, the age ladder is already saying so, and louder.
+    """
+    if record.get("phase") != "failed":
+        return None
+    step = record.get("step")
+    where = _key_part(step) if isinstance(step, str) and step.strip() else "unknown"
+    said = record.get("message")
+    quoted = (
+        f' The host said: "{said.strip()}"'
+        if isinstance(said, str) and said.strip()
+        else " The host did not record why."
+    )
+    return Candidate(
+        key=f"backup_run_failed:{where}",
+        type="backup",
+        severity="warn",
+        title="The backup run failed before it took a backup",
+        body=f"It stopped at the {where} step, so nothing was added to your backups and "
+        f"the age of your newest verified one has not moved.{quoted} Run "
+        "`./scripts/backup.sh` on the host to watch it fail, and "
+        "`./scripts/backup.sh --self-check` for what the regime believes it is doing.",
         link=BACKUP_LINK,
     )
 
@@ -505,8 +598,11 @@ def _backup_candidates(facts: BackupFacts) -> list[Candidate]:
             # fire on every install that does not use the feature, which is the fastest
             # way to teach a household to ignore this type.
             return []
-        # The drop-box is there, so the regime is installed and nothing has ever run.
-        return [_backup_never_run()]
+        # The drop-box is there, so the regime is installed and nothing has ever run --
+        # unless one is running right now, which is exactly what a fresh install looks
+        # like between pressing the button and the first record being written.
+        never = _backup_never_run(facts)
+        return [never] if never is not None else []
 
     if record.get("phase") == "unreadable":
         # read_backup_status() returns this synthetic record when the file is there and
@@ -531,15 +627,19 @@ def _backup_candidates(facts: BackupFacts) -> list[Candidate]:
             )
         ]
 
-    return [
-        candidate
-        for candidate in (
-            _backup_age_candidate(facts, record),
-            _backup_verify_candidate(record),
-            _backup_offsite_candidate(record),
-        )
-        if candidate is not None
-    ]
+    # The age is asked FIRST, because its answer decides how loud a verification
+    # failure is allowed to be: `alert` means "you have no backup you can restore from",
+    # and the ladder is the only thing that knows. None from it means the newest verified
+    # backup is inside the window -- that is, there is one.
+    age = _backup_age_candidate(facts, record)
+    verify = _backup_verify_candidate(record, have_usable_backup=age is None)
+    offsite = _backup_offsite_candidate(record)
+    # A failed run speaks only when nothing else here already accounts for the failure.
+    # A verification that failed and a copy that never left the box are both more
+    # specific than "the run failed", and two rows about one night is precisely the
+    # noise the rest of this block is careful to avoid.
+    run_failed = None if (verify or offsite) else _backup_run_failed(record)
+    return [c for c in (age, verify, offsite, run_failed) if c is not None]
 
 
 def _candidates(
@@ -672,9 +772,7 @@ def generate(
     ns = settings_for(db, household.id)
     existing = set(
         db.execute(
-            select(models.Notification.key).where(
-                models.Notification.household_id == household.id
-            )
+            select(models.Notification.key).where(models.Notification.household_id == household.id)
         ).scalars()
     )
     created: list[models.Notification] = []
@@ -742,9 +840,7 @@ EMAIL_BACKLOG_DAYS = 7
 MAX_ALERTS_PER_EMAIL = 25
 
 
-def _pending_email(
-    db: Session, household_id: str, today: dt.date
-) -> list[models.Notification]:
+def _pending_email(db: Session, household_id: str, today: dt.date) -> list[models.Notification]:
     """Alerts that still need emailing — not merely the ones created just now.
 
     `generate` is idempotent on `key`, and the notifications feed calls it on every
@@ -755,18 +851,22 @@ def _pending_email(
     household has plainly seen it.
     """
     cutoff = dt.datetime.combine(today - dt.timedelta(days=EMAIL_BACKLOG_DAYS), dt.time.min)
-    rows = db.execute(
-        select(models.Notification)
-        .where(
-            models.Notification.household_id == household_id,
-            models.Notification.emailed_at.is_(None),
-            models.Notification.read_at.is_(None),
-            models.Notification.severity.in_(("alert", "warn")),
-            models.Notification.created_at >= cutoff,
+    rows = (
+        db.execute(
+            select(models.Notification)
+            .where(
+                models.Notification.household_id == household_id,
+                models.Notification.emailed_at.is_(None),
+                models.Notification.read_at.is_(None),
+                models.Notification.severity.in_(("alert", "warn")),
+                models.Notification.created_at >= cutoff,
+            )
+            .order_by(models.Notification.created_at.desc())
+            .limit(MAX_ALERTS_PER_EMAIL)
         )
-        .order_by(models.Notification.created_at.desc())
-        .limit(MAX_ALERTS_PER_EMAIL)
-    ).scalars().all()
+        .scalars()
+        .all()
+    )
     return list(rows)
 
 
@@ -786,16 +886,24 @@ def run_for_household(
     if ns.email_enabled and get_settings().smtp_configured:
         recipients = _recipients(db, household.id)
         urgent = _pending_email(db, household.id, today)
-        if urgent and recipients and send_email(
-            recipients, f"{len(urgent)} new alert(s) from Saiva", _alerts_body(urgent)
+        if (
+            urgent
+            and recipients
+            and send_email(
+                recipients, f"{len(urgent)} new alert(s) from Saiva", _alerts_body(urgent)
+            )
         ):
             now = dt.datetime.utcnow()
             for n in urgent:
                 n.emailed_at = now
             emailed = len(urgent)
             db.commit()
-        if _digest_due(ns, today) and recipients and send_email(
-            recipients, f"Your {ns.digest} Saiva summary", _digest_body(db, household, today)
+        if (
+            _digest_due(ns, today)
+            and recipients
+            and send_email(
+                recipients, f"Your {ns.digest} Saiva summary", _digest_body(db, household, today)
+            )
         ):
             ns.last_digest_at = dt.datetime.utcnow()
             db.commit()

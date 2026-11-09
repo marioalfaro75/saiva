@@ -32,8 +32,9 @@ import pytest
 from fastapi.testclient import TestClient
 
 from app import models
+from app.config import get_settings
 from app.db import SessionLocal
-from app.services import notifications
+from app.services import backups, notifications
 
 # Every key the "how old is the backup" question can produce. One of these may be in a
 # run and never two: they are different readings of one question, and two of them in one
@@ -120,9 +121,7 @@ def _only(created: list[tuple[str, str, str, str]]) -> tuple[str, str, str, str]
 # --------------------------------------------------------------------------------------
 
 
-def test_a_box_with_no_backup_regime_stays_silent(
-    auth_client: TestClient, no_regime: None
-) -> None:
+def test_a_box_with_no_backup_regime_stays_silent(auth_client: TestClient, no_regime: None) -> None:
     """The host side was never installed, so there is nothing to report on.
 
     This is also what keeps every other test in this suite honest: they construct
@@ -173,7 +172,13 @@ def test_a_record_that_has_never_reached_a_dump_is_the_same_state(
     """A run that failed before taking anything is still "nothing has been backed up".
 
     Deliberately the same key as the no-record case: it is one state told by a different
-    file, and two keys would mean a box that failed its very first run says it twice.
+    file, and a second key for the same state would mean a box that failed its very
+    first run says the same thing twice.
+
+    The failure itself is a different question and gets its own, quieter row -- see
+    section 21. "Nothing has ever been backed up" is the state; "it died at the
+    preflight" is tonight's reason; they do not contradict each other, and before the
+    review the reason was not reported at all.
     """
     household_id = _household_id(auth_client)
     _write_status(
@@ -184,10 +189,12 @@ def test_a_record_that_has_never_reached_a_dump_is_the_same_state(
         message="the stack is down",
     )
 
-    key, severity, _, _ = _only(_generate(household_id))
+    by_key = {key: (sev, body) for key, sev, _title, body in _generate(household_id)}
 
-    assert key == "backup_never_run"
-    assert severity == "alert"
+    assert sorted(by_key) == ["backup_never_run", "backup_run_failed:preflight"]
+    assert by_key["backup_never_run"][0] == "alert"
+    assert by_key["backup_run_failed:preflight"][0] == "warn"
+    assert "the stack is down" in by_key["backup_run_failed:preflight"][1]
 
 
 # --------------------------------------------------------------------------------------
@@ -195,9 +202,14 @@ def test_a_record_that_has_never_reached_a_dump_is_the_same_state(
 # --------------------------------------------------------------------------------------
 
 
-def test_verified_false_is_the_loud_one_and_quotes_the_reason(
+def test_verified_false_names_the_dump_and_quotes_the_reason(
     auth_client: TestClient, state_dir: Path
 ) -> None:
+    """How loudly it says this depends on the age; WHAT it says does not.
+
+    This record has a verified backup from two hours ago, so it is `warn` -- see
+    test_how_loud_a_broken_dump_is_depends_on_whether_a_backup_still_exists.
+    """
     household_id = _household_id(auth_client)
     reason = "Row counts disagree: the dump declares 504 rows and 19 came back."
     _write_status(
@@ -217,39 +229,41 @@ def test_verified_false_is_the_loud_one_and_quotes_the_reason(
     failures = [c for c in created if c[0].startswith("backup_verify_failed:")]
     key, severity, title, body = _only(failures)
 
-    assert key == "backup_verify_failed:20260310T030000Z-4242", (
-        "the key must identify the run, so tonight's broken dump is news again"
+    assert key == "backup_verify_failed:saiva-20260310-030000-nightly.sql.gz", (
+        "the key must name the DUMP: the verdict is about a dump, and it is carried "
+        "forward across runs that never looked at one"
     )
-    assert severity == "alert"
+    assert severity == "warn"
     assert "not a backup" in title
     assert reason in body, "the host's own diagnosis is the whole value of this alert"
 
 
-def test_a_second_failing_run_is_a_second_alert(
+def test_a_verdict_with_no_dump_to_name_speaks_once_and_not_nightly(
     auth_client: TestClient, state_dir: Path
 ) -> None:
-    """Each night's dump is a fresh dump that was taken and found broken."""
+    """The fallback, when the record reports a verdict with nothing to attach it to.
+
+    take_dump() sets dump_name and the verdict together, so this record can really only
+    have been hand-edited -- but the key has to be BARE rather than falling back to the
+    run, because falling back to the run is precisely what made this alert nag every
+    night. Said once is the right amount for a state nothing can identify.
+    """
     household_id = _household_id(auth_client)
     fresh = _hours_ago(2)
-    _write_status(
-        state_dir,
-        run_id="run-one",
-        verified="false",
-        verify_message="truncated",
-        last_verified_at=fresh,
-    )
-    assert [c[0] for c in _generate(household_id)] == ["backup_verify_failed:run-one"]
+    for run in ("run-one", "run-two"):
+        _write_status(
+            state_dir,
+            run_id=run,
+            verified="false",
+            verify_message="truncated",
+            last_verified_at=fresh,
+        )
+        created = [c[0] for c in _generate(household_id)]
+        assert created == (["backup_verify_failed"] if run == "run-one" else []), (
+            f"{run} produced {created}"
+        )
 
-    _write_status(
-        state_dir,
-        run_id="run-two",
-        verified="false",
-        verify_message="truncated",
-        last_verified_at=fresh,
-    )
-    second = _generate(household_id)
-
-    assert [c[0] for c in second] == ["backup_verify_failed:run-two"]
+    assert len(_stored(household_id)) == 1
 
 
 def test_a_first_run_that_fails_its_verification_says_both_true_things(
@@ -269,6 +283,8 @@ def test_a_first_run_that_fails_its_verification_says_both_true_things(
         state_dir,
         run_id="first-ever",
         phase="failed",
+        step="verify",
+        dump_name="saiva-20260101-030000-nightly.sql.gz",
         verified="false",
         verify_message="The restored copy has no `households` table.",
     )
@@ -276,7 +292,10 @@ def test_a_first_run_that_fails_its_verification_says_both_true_things(
     created = _generate(household_id)
     by_key = {key: body for key, _, _, body in created}
 
-    assert sorted(by_key) == ["backup_never_run", "backup_verify_failed:first-ever"]
+    assert sorted(by_key) == [
+        "backup_never_run",
+        "backup_verify_failed:saiva-20260101-030000-nightly.sql.gz",
+    ]
     absent = by_key["backup_never_run"].lower()
     assert "no run has ever finished successfully" in absent
     assert "no dump" not in absent and "nothing was dumped" not in absent, (
@@ -294,9 +313,7 @@ def test_a_verified_field_this_version_cannot_read_is_not_a_failure_either(
     exists to remove -- the age below is what speaks instead).
     """
     household_id = _household_id(auth_client)
-    _write_status(
-        state_dir, run_id="odd", verified="maybe", last_verified_at=_hours_ago(1)
-    )
+    _write_status(state_dir, run_id="odd", verified="maybe", last_verified_at=_hours_ago(1))
 
     assert _generate(household_id) == []
 
@@ -340,9 +357,7 @@ def test_a_stale_box_alerts_once_across_repeated_runs(
     """Three weeks of a broken timer is one alert, not twenty-one."""
     household_id = _household_id(auth_client)
     verified_at = _hours_ago(24 * 21)
-    _write_status(
-        state_dir, run_id="20260301T030000Z-1", phase="ok", last_verified_at=verified_at
-    )
+    _write_status(state_dir, run_id="20260301T030000Z-1", phase="ok", last_verified_at=verified_at)
 
     key, severity, title, body = _only(_generate(household_id))
 
@@ -553,16 +568,24 @@ def test_an_unreadable_record_is_reported_as_unreadable(
             id="never verified",
         ),
         pytest.param(
-            {"phase": "ok", "last_success_at": "2026-01-01T00:00:00Z",
-             "last_verified_at": "2026-01-01T00:00:00Z"},
+            {
+                "phase": "ok",
+                "last_success_at": "2026-01-01T00:00:00Z",
+                "last_verified_at": "2026-01-01T00:00:00Z",
+            },
             id="stale",
         ),
         pytest.param({"phase": "ok", "last_verified_at": "2999-01-01T00:00:00Z"}, id="future"),
         pytest.param({"phase": "ok", "last_verified_at": "whenever"}, id="unreadable date"),
         pytest.param({"phase": "unreadable", "message": "no"}, id="unreadable record"),
         pytest.param(
-            {"phase": "failed", "verified": "false", "run_id": "r1", "offsite": "off",
-             "last_verified_at": "2020-01-01T00:00:00Z"},
+            {
+                "phase": "failed",
+                "verified": "false",
+                "run_id": "r1",
+                "offsite": "off",
+                "last_verified_at": "2020-01-01T00:00:00Z",
+            },
             id="everything wrong at once",
         ),
     ],
@@ -650,9 +673,7 @@ def test_the_off_box_state_getting_worse_is_audible_again(
     assert [c[0] for c in _generate(household_id)] == ["backup_offsite:failed"]
 
 
-def test_an_absent_off_box_field_says_nothing(
-    auth_client: TestClient, state_dir: Path
-) -> None:
+def test_an_absent_off_box_field_says_nothing(auth_client: TestClient, state_dir: Path) -> None:
     """A run that never reached the copy step has not reported on it."""
     household_id = _household_id(auth_client)
     _write_status(state_dir, phase="ok", verified="true", last_verified_at=_hours_ago(2))
@@ -750,9 +771,7 @@ def test_the_backup_alert_is_emailed_like_every_other_alert(
         db.commit()
 
     sent: list[tuple] = []
-    monkeypatch.setattr(
-        notifications, "send_email", lambda *a, **k: (sent.append(a), True)[1]
-    )
+    monkeypatch.setattr(notifications, "send_email", lambda *a, **k: (sent.append(a), True)[1])
     monkeypatch.setattr(
         notifications.get_settings(), "smtp_host", "smtp.example.com", raising=False
     )
@@ -768,7 +787,13 @@ def test_the_backup_alert_is_emailed_like_every_other_alert(
     assert result["emailed"] == 1, "the backup alert never reached the email path"
     recipients, subject, body = sent[0][:3]
     assert recipients == ["owner@example.com"]
-    assert "[alert]" in body, "it must carry its severity like every other alert"
+    assert "[warn]" in body, (
+        "it must carry its severity like every other alert -- and `warn` is what this "
+        "record now earns, because a backup verified 26 hours ago is still inside the "
+        "window. `alert` is reserved for having nothing to restore from; both are "
+        "emailed, which is what this test is really about."
+    )
+    assert "not without a backup" in body
     assert "not a backup" in body
     assert "504 declared, 19 restored" in body, "and the host's diagnosis with it"
 
@@ -786,3 +811,435 @@ def test_the_feed_endpoint_carries_the_backup_alert_with_a_link_to_the_page(
     assert backup[0]["severity"] == "warn"
     assert backup[0]["link"] == "/settings", "the alert has to land where the record is"
     assert backup[0]["amount_cents"] is None, "there is no money in this one"
+
+
+# --------------------------------------------------------------------------------------
+# 21. What an adversarial review of this module found
+#
+# Four reviewers with different lenses reported the same blocking defect, and the pass
+# that tried to refute it reproduced it by driving the real scripts/backup.sh rather
+# than by argument. The mutation lens then proved several assertions above vacuous: the
+# staleness threshold, which timestamp the age is measured from, the state-to-sentence
+# mapping and the alert's link all survived being broken. Each test below failed, or
+# passed vacuously, against the code as first written.
+# --------------------------------------------------------------------------------------
+
+
+def test_a_broken_dump_is_one_alert_however_many_nights_it_stands(
+    auth_client: TestClient, state_dir: Path
+) -> None:
+    """The blocking finding: the key named the RUN when the verdict is about the DUMP.
+
+    scripts/backup.sh backup_begin() clears step/message/exit_code/finished_at/pruned
+    and writes a new run_id, but deliberately leaves the verdict group standing --
+    only a run that looked at a dump may change what is known about one. So a night
+    that never reaches take_dump, because the stack is down or a preflight dies, leaves
+    last night's `verified: false` beside a brand-new run_id. Keyed on the run, that
+    minted a fresh alert and a fresh email EVERY NIGHT, each asserting that a dump had
+    been taken on a night the record's own message says nothing was dumped.
+    """
+    household_id = _household_id(auth_client)
+    broken = {
+        "dump_name": "saiva-20261109-030000-nightly.sql.gz",
+        "verified": "false",
+        "verify_message": "row counts differ",
+        "last_success_at": _hours_ago(27),
+        "last_verified_at": _hours_ago(27),
+        "offsite": "remote",
+    }
+    _write_status(state_dir, run_id="20261109T030000Z-22", phase="failed", step="verify", **broken)
+    assert _only(_generate(household_id))[0] == (
+        "backup_verify_failed:saiva-20261109-030000-nightly.sql.gz"
+    ), "the key has to name the dump, which is the thing the verdict is about"
+
+    for run in ("20261110T030000Z-33", "20261111T030000Z-44"):
+        _write_status(
+            state_dir,
+            run_id=run,
+            phase="skipped",
+            step="skipped",
+            exit_code="0",
+            message="The stack is down -- nothing was dumped.",
+            **broken,
+        )
+        assert _generate(household_id) == [], f"{run} re-alerted about a dump taken two nights ago"
+
+    assert len(_stored(household_id)) == 1
+
+
+def test_a_genuinely_new_broken_dump_is_a_second_alert(
+    auth_client: TestClient, state_dir: Path
+) -> None:
+    """The other half: silence must not be bought at the price of the next failure."""
+    household_id = _household_id(auth_client)
+    names = (
+        "saiva-20261109-030000-nightly.sql.gz",
+        "saiva-20261110-030000-nightly.sql.gz",
+    )
+    for name in names:
+        _write_status(
+            state_dir,
+            run_id=f"run-for-{name}",
+            phase="failed",
+            step="verify",
+            dump_name=name,
+            verified="false",
+            verify_message="the gzip stream ended early",
+            last_success_at=_hours_ago(2),
+            last_verified_at=_hours_ago(27),
+            offsite="remote",
+        )
+        assert _only(_generate(household_id))[0] == f"backup_verify_failed:{name}"
+
+    assert len(_stored(household_id)) == 2
+
+
+def test_how_loud_a_broken_dump_is_depends_on_whether_a_backup_still_exists(
+    auth_client: TestClient, state_dir: Path
+) -> None:
+    """`alert` is reserved for "you have no backup you can restore from".
+
+    The rule is stated in _backup_offsite_candidate's docstring and this branch broke
+    it: a run can fail its verification while a dump verified nine hours ago sits on a
+    NAS. Shouting there sent the owner to a Settings page that renders the very same
+    record at `warn` and tells them, correctly, that they are not without a backup.
+    """
+    household_id = _household_id(auth_client)
+    _write_status(
+        state_dir,
+        run_id="r1",
+        phase="failed",
+        step="verify",
+        dump_name="saiva-20261109-030000-nightly.sql.gz",
+        verified="false",
+        verify_message="row counts differ",
+        last_verified_at=_hours_ago(9),
+        last_success_at=_hours_ago(9),
+        offsite="remote",
+    )
+    key, severity, _title, body = _only(_generate(household_id))
+    assert key.startswith("backup_verify_failed:")
+    assert severity == "warn", "there is a verified backup from nine hours ago"
+    assert "not without a backup" in body
+
+    # The same failure on a box whose newest verified backup has aged out IS the
+    # loudest thing it can say, and the age ladder speaks beside it.
+    _write_status(
+        state_dir,
+        run_id="r2",
+        phase="failed",
+        step="verify",
+        dump_name="saiva-20261110-030000-nightly.sql.gz",
+        verified="false",
+        verify_message="row counts differ",
+        last_verified_at=_hours_ago(99),
+        last_success_at=_hours_ago(2),
+        offsite="remote",
+    )
+    by_key = {key: severity for key, severity, _t, _b in _generate(household_id)}
+    assert by_key["backup_verify_failed:saiva-20261110-030000-nightly.sql.gz"] == "alert"
+    assert any(key.startswith("backup_stale:") for key in by_key)
+
+
+def test_a_run_that_never_reached_a_dump_still_says_so(
+    auth_client: TestClient, state_dir: Path
+) -> None:
+    """The silent-failure finding, and disk space is what makes it matter.
+
+    db_data and db_backups share one filesystem, so the host's own refusal says this
+    matters MORE than a failed backup: filling that disk stops Postgres, not merely the
+    backup. The feed read only last_verified_at, verified and offsite, so this night
+    produced no candidate at all and the box stayed quiet for the whole stale window
+    before blaming the age.
+    """
+    household_id = _household_id(auth_client)
+    _write_status(
+        state_dir,
+        run_id="20261110T030000Z-66",
+        phase="failed",
+        step="room",
+        exit_code="1",
+        message=(
+            "Only 180 MB free where the dumps live, and this needs about 2.1 GB. "
+            "Nothing was dumped."
+        ),
+        last_success_at=_hours_ago(27),
+        last_verified_at=_hours_ago(27),
+        offsite="remote",
+    )
+
+    key, severity, title, body = _only(_generate(household_id))
+
+    assert key == "backup_run_failed:room"
+    assert severity == "warn", "a failed run is not by itself the absence of a backup"
+    assert "180 MB free" in body, "the host's own reason has to travel with it"
+    assert "room" in body
+    assert "has been backed up" not in title
+
+    for _ in range(3):
+        assert _generate(household_id) == [], "one alert per failing step, not per night"
+
+    # A box that starts failing somewhere else is telling you something new.
+    _write_status(
+        state_dir,
+        run_id="20261111T030000Z-77",
+        phase="failed",
+        step="preflight",
+        message="Docker is not answering on this host.",
+        last_success_at=_hours_ago(51),
+        last_verified_at=_hours_ago(51),
+        offsite="remote",
+    )
+    assert "backup_run_failed:preflight" in [k for k, _s, _t, _b in _generate(household_id)]
+
+
+def test_a_failed_run_does_not_speak_twice_about_one_night(
+    auth_client: TestClient, state_dir: Path
+) -> None:
+    """A verification that failed is more specific than "the run failed", so it wins."""
+    household_id = _household_id(auth_client)
+    _write_status(
+        state_dir,
+        run_id="r1",
+        phase="failed",
+        step="verify",
+        dump_name="saiva-20261109-030000-nightly.sql.gz",
+        verified="false",
+        verify_message="row counts differ",
+        last_verified_at=_hours_ago(9),
+        last_success_at=_hours_ago(9),
+        offsite="remote",
+    )
+    keys = [k for k, _s, _t, _b in _generate(household_id)]
+    assert keys == ["backup_verify_failed:saiva-20261109-030000-nightly.sql.gz"]
+
+
+def test_the_first_run_in_flight_does_not_claim_there_is_no_backup(
+    auth_client: TestClient, state_dir: Path
+) -> None:
+    """backup_begin() writes its record before there is anything to report.
+
+    A run_id, phase `running`, started_at, and no timestamps at all -- which the age
+    ladder reads as "nothing has ever been backed up". True for as long as the run
+    takes; but the key is bare and the severity is emailed, so the row could never be
+    retracted and would never fire again once the backup succeeded. A permanent "you
+    have no backup" on a box that has one.
+    """
+    household_id = _household_id(auth_client)
+    _write_status(
+        state_dir,
+        run_id="first",
+        phase="running",
+        started_at=_stamp(dt.datetime.now(dt.UTC)),
+    )
+
+    assert _generate(household_id) == []
+
+    # Once that run is no longer live, the same absence is reported honestly.
+    _write_status(state_dir, run_id="first", phase="failed", step="dump", message="pg_dump died")
+    assert "backup_never_run" in [k for k, _s, _t, _b in _generate(household_id)]
+
+
+def test_the_staleness_threshold_is_the_setting_and_not_a_number_in_this_module(
+    auth_client: TestClient, state_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Mutation-proof for the policy: hard-coding 36, and doubling it, both left green.
+
+    Every age test above used the default, so any threshold that happened to put their
+    fixtures on the right side of the line passed. This holds one record to both
+    answers.
+    """
+    household_id = _household_id(auth_client)
+    _write_status(state_dir, run_id="r1", phase="ok", last_verified_at=_hours_ago(10))
+
+    monkeypatch.setattr(get_settings(), "backup_stale_hours", 48)
+    assert _generate(household_id) == [], "ten hours is not stale where the box allows 48"
+
+    monkeypatch.setattr(get_settings(), "backup_stale_hours", 6)
+    key, _severity, _title, body = _only(_generate(household_id))
+    assert key.startswith("backup_stale:")
+    assert "6 hours" in body, "the body has to quote the threshold it actually applied"
+
+
+def test_the_age_is_measured_from_the_verified_backup_and_not_the_last_dump(
+    auth_client: TestClient, state_dir: Path
+) -> None:
+    """Measuring from last_success_at instead survived all 39 tests.
+
+    It is the difference between "a dump was taken an hour ago" and "a dump was PROVED
+    restorable an hour ago", which is the one distinction this whole regime exists to
+    make. A box dumping nightly and verifying none of them has to read as stale.
+    """
+    household_id = _household_id(auth_client)
+    _write_status(
+        state_dir,
+        run_id="r1",
+        phase="ok",
+        last_success_at=_hours_ago(1),
+        last_verified_at=_hours_ago(24 * 5),
+        offsite="remote",
+    )
+
+    key, _severity, title, _body = _only(_generate(household_id))
+
+    assert key.startswith("backup_stale:")
+    assert "5 days ago" in title, (
+        "the age must come from last_verified_at -- last_success_at was an hour ago"
+    )
+
+
+@pytest.mark.parametrize(
+    ("state", "must_say"),
+    [
+        ("off", "No off-box destination is configured"),
+        ("same-filesystem", "same filesystem the database lives on"),
+        ("same-host", "this same machine"),
+        ("unknown", "nothing here could establish"),
+        ("failed", "could not be written to"),
+    ],
+)
+def test_each_off_box_state_is_told_in_its_own_words(
+    auth_client: TestClient, state_dir: Path, state: str, must_say: str
+) -> None:
+    """Mutation-proof for the vocabulary, which the test above left unpinned.
+
+    That one asserted the key and the severity only, so dropping `same-filesystem` from
+    the table -- it then fell through to the unknown-state branch -- and swapping the
+    `off` and `failed` sentences both left the suite green. These states say different
+    things because they MEAN different things, and a household acting on the wrong one
+    is the failure this feature exists to prevent.
+    """
+    household_id = _household_id(auth_client)
+    _write_status(
+        state_dir,
+        run_id="r1",
+        phase="ok",
+        verified="true",
+        last_verified_at=_hours_ago(2),
+        offsite=state,
+    )
+    _key, _severity, title, body = _only(
+        [c for c in _generate(household_id) if c[0].startswith("backup_offsite:")]
+    )
+    assert must_say in body, f"{state} is not being told in its own words: {body}"
+    assert "does not know" not in title, f"{state} fell through to the unknown branch"
+
+
+def test_a_record_that_is_valid_json_but_not_an_object_is_unreadable(
+    auth_client: TestClient, state_dir: Path
+) -> None:
+    """`[]`, `"x"`, `3` and `null`: the file is there and cannot be read as a record.
+
+    read_backup_status() mapped only EXCEPTIONS to the `unreadable` record and returned
+    None for anything that parsed to a non-object -- so the feed said "Nothing has been
+    backed up yet", as an emailed alert, about a box that may have months of backups
+    behind it. To a reader, a parse error and a parsed non-object are the same fact.
+    """
+    household_id = _household_id(auth_client)
+    for payload in ("[1, 2, 3]", '"hello"', "3", "null"):
+        (state_dir / "backup-status.json").write_text(payload, encoding="utf-8")
+        record = backups.read_backup_status()
+        assert record is not None, f"{payload} was read as 'there has never been one'"
+        assert record.get("phase") == "unreadable", payload
+
+    key, severity, _title, body = _only(_generate(household_id))
+    assert key == "backup_unreadable"
+    assert severity == "warn"
+    assert "no backup" not in body.lower()
+
+
+def test_a_record_value_can_never_outgrow_the_column_it_lands_in(
+    auth_client: TestClient, state_dir: Path
+) -> None:
+    """`key` and `title` are both String(200), and the record is hand-editable.
+
+    The off-box state was pasted into the title at whatever length it came in at, so
+    one long value would fail the INSERT and take every other alert in the same run
+    down with it -- budgets, bills, the lot. SQLite will not enforce the width, so this
+    asserts the lengths rather than relying on the write to fail.
+    """
+    household_id = _household_id(auth_client)
+    _write_status(
+        state_dir,
+        run_id="r1",
+        phase="ok",
+        verified="true",
+        last_verified_at=_hours_ago(2),
+        offsite="x" * 10_000,
+    )
+
+    key, _severity, title, _body = _only(_generate(household_id))
+
+    assert len(key) <= 200, f"key is {len(key)} characters"
+    assert len(title) <= 200, f"title is {len(title)} characters"
+    assert len(_stored(household_id)) == 1
+
+
+def test_every_backup_alert_offers_to_take_you_to_the_page(
+    auth_client: TestClient, state_dir: Path
+) -> None:
+    """The link was unpinned: dropping it from the verify alert left the suite green.
+
+    Each of these is about something the owner has to go and look at, and the feed row
+    is the only thing offering to take them there.
+    """
+    household_id = _household_id(auth_client)
+    _write_status(
+        state_dir,
+        run_id="r1",
+        phase="failed",
+        step="verify",
+        dump_name="d.sql.gz",
+        verified="false",
+        verify_message="row counts differ",
+        last_verified_at=_hours_ago(99),
+        offsite="same-host",
+    )
+    with SessionLocal() as db:
+        household = db.get(models.Household, household_id)
+        assert household is not None
+        created = [n for n in notifications.generate(db, household) if n.type == "backup"]
+
+    assert len(created) == 3, f"expected age, verify and off-box: {[n.key for n in created]}"
+    assert [n.link for n in created] == ["/settings"] * 3
+
+
+@pytest.mark.parametrize("raw", ["false", "False", "FALSE", " false ", "no", "0", "off"])
+def test_the_host_saying_no_in_any_of_its_spellings_is_a_failed_verification(
+    auth_client: TestClient, state_dir: Path, raw: str
+) -> None:
+    """The host renders every field as a string, so `verified` arrives as a WORD."""
+    household_id = _household_id(auth_client)
+    _write_status(
+        state_dir,
+        run_id="r1",
+        phase="ok",
+        dump_name="d.sql.gz",
+        verified=raw,
+        last_verified_at=_hours_ago(9),
+        offsite="remote",
+    )
+    assert _only(_generate(household_id))[0].startswith("backup_verify_failed")
+
+
+@pytest.mark.parametrize("raw", ["maybe", "", "  ", "null", "2", None])
+def test_a_verified_value_this_version_cannot_read_is_neither_answer(
+    auth_client: TestClient, state_dir: Path, raw: object
+) -> None:
+    """Not known must never render as either answer.
+
+    A dump nobody has restored is not disproved, and a value this version cannot read
+    is not a tick. The age ladder speaks for such a record instead, and here the age is
+    fine, so nothing is said at all.
+    """
+    household_id = _household_id(auth_client)
+    _write_status(
+        state_dir,
+        run_id="r1",
+        phase="ok",
+        dump_name="d.sql.gz",
+        verified=raw,
+        last_verified_at=_hours_ago(9),
+        offsite="remote",
+    )
+    assert _generate(household_id) == []
