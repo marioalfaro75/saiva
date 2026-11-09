@@ -1201,6 +1201,12 @@ cmd_run() {
   check_room
   take_dump
   verify_dump "$DUMP_NAME" || {
+    # The volume as it NOW is, not as it was before the pre-dump prune. survey_dumps used
+    # to run only on the success paths, so after a prune followed by a failed verification
+    # the record carried the previous run's backup_count and oldest_at -- and the page then
+    # named as the oldest surviving dump a file this run had just deleted, and overstated
+    # what was left. Measured by a reviewer: 3 nightlies on disk, the record said 5.
+    survey_dumps
     # "nothing was pruned" was false and asserted anyway: the pre-dump prune has already
     # run by here, and on the first failing night after a good one it removed whatever was
     # past the retention. Say what the record says instead.

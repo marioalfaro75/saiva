@@ -1458,6 +1458,21 @@ case "$(sf message)" in
   *) bad "19e the failure says nothing about the prune either way"
      note "got: $(sf message)" ;;
 esac
+# And the SHAPE OF THE VOLUME has to describe it as it now is. survey_dumps used to run
+# only on the success paths, so after a prune followed by a failed verification the record
+# carried the previous run's figures -- and the page named as the oldest surviving dump a
+# file this run had just deleted, and overstated what was left. Found by review.
+assert_eq "19e the count describes the volume as it NOW is" \
+  "$(nightly_dumps | wc -l)" "$(sf backup_count)"
+OLDEST_LEFT="$(nightly_dumps | head -n 1)"
+case "$(sf oldest_at)" in
+  "") bad "19e oldest_at was not recorded on the failure path" ;;
+  *) if printf '%s' "$OLDEST_LEFT" | grep -q "$(printf '%s' "$(sf oldest_at)" | cut -c1-4)"; then
+       ok "19e and oldest_at names a dump that still exists = $(sf oldest_at)"
+     else
+       bad "19e oldest_at names a dump this run deleted: $(sf oldest_at), oldest left is $OLDEST_LEFT"
+     fi ;;
+esac
 psql -qc "DROP DATABASE IF EXISTS \"${TESTDB}_e\" WITH (FORCE)" -d postgres >/dev/null
 
 # 19f. BLOCKING. `--verify-only` copies nothing, so leaving the off-box group in place put

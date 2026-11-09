@@ -528,6 +528,43 @@ describe("when the panel itself cannot get an answer", () => {
   });
 });
 
+describe("what the failed-verification notice says about the prune", () => {
+  // It said "and nothing was pruned" unconditionally, and on the first failing night after
+  // a good one that is false: the host prunes to policy BEFORE it takes the dump. A
+  // reviewer rendered a real failed record through this card and found it contradicting
+  // itself two lines apart, with the reassuring half being the wrong one.
+  it("reports the figure the host recorded, not a claim of its own", async () => {
+    show({ verified: false, pruned: "3", verify_message: "the restored copy has no households table" });
+
+    await screen.findByText(/could not be restored/i);
+    expect(screen.getByText(/3 dumps already past the retention were retired/i)).toBeInTheDocument();
+    expect(screen.queryByText(/nothing was pruned/i)).not.toBeInTheDocument();
+  });
+
+  it("says nothing was retired when that is what the host recorded", async () => {
+    show({ verified: false, pruned: "0" });
+
+    await screen.findByText(/could not be restored/i);
+    expect(screen.getByText(/Nothing has been retired/i)).toBeInTheDocument();
+  });
+
+  it("admits it does not know when the host did not say", async () => {
+    show({ verified: false, pruned: null });
+
+    await screen.findByText(/could not be restored/i);
+    expect(
+      screen.getByText(/did not record whether anything was retired/i),
+    ).toBeInTheDocument();
+  });
+
+  it("gets the singular right, because one dump is the common case", async () => {
+    show({ verified: false, pruned: "1" });
+
+    await screen.findByText(/could not be restored/i);
+    expect(screen.getByText(/1 dump already past the retention was retired/i)).toBeInTheDocument();
+  });
+});
+
 describe("the shape of the retained set", () => {
   it("reports what is kept, and names the absence when the host did not say", async () => {
     show({ backup_count: null, kept: null, oldest_at: null, pruned: null });

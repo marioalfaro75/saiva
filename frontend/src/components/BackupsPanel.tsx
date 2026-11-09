@@ -238,6 +238,26 @@ function offsiteIsOffBox(offsite: string | null): boolean {
   return offsite === "remote";
 }
 
+/**
+ * What this run did to the retained set, in words, taken from the record.
+ *
+ * The host prunes twice: to policy before the dump, because dumps already past the
+ * retention are the only space there is to reclaim, and again after a successful verify.
+ * So "nothing was pruned" is false on the first failing night after a good one, and it is
+ * false in the direction that reassures. An absent figure says so rather than guessing.
+ */
+function prunedClause(data: BackupStatus): string {
+  if (data.pruned === null) return "The host did not record whether anything was retired.";
+  const n = Number(data.pruned);
+  if (!Number.isFinite(n)) return "The host did not record whether anything was retired.";
+  if (n === 0) return "Nothing has been retired.";
+  return (
+    `${n} dump${n === 1 ? "" : "s"} already past the retention ` +
+    `${n === 1 ? "was" : "were"} retired before this one was taken; nothing will be ` +
+    `retired again until a dump verifies.`
+  );
+}
+
 function offsiteNotice(data: BackupStatus): Notice | null {
   if (!data.offsite) return null;
   const where = data.offsite_target ? ` (${data.offsite_target})` : "";
@@ -595,8 +615,14 @@ export function BackupsPanel() {
                   "The host did not record what the restore proved, only that it did not " +
                     "come back whole."}
               </div>
+              {/* READ FROM THE RECORD, never asserted. This said "and nothing was pruned"
+                  unconditionally, and on the first failing night after a good one that is
+                  false: the host prunes to policy BEFORE it takes the dump, so dumps have
+                  already gone by the time a verification fails. A reviewer rendered a real
+                  failed record through this card and found it contradicting itself two
+                  lines apart, with the reassuring half being the wrong one. */}
               <div style={{ marginTop: 4 }}>
-                The dump has been kept for inspection and nothing was pruned. Run{" "}
+                The dump has been kept for inspection. {prunedClause(data)} Run{" "}
                 <code>./scripts/backup.sh --verify-only</code> on the host to see the
                 restore fail in front of you.
               </div>
