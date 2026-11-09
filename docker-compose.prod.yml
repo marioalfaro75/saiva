@@ -59,6 +59,12 @@ services:
       # api container can do here is ask for the update the button was going to do
       # anyway. See the volume below.
       SAIVA_UPDATE_DIR: /run/saiva-update
+      # How old the newest VERIFIED backup may be before Settings stops calling it
+      # current. It has to be passed explicitly: there is no `env_file:` on any service
+      # and the image carries no .env, so a setting the owner writes in .env reaches the
+      # api container only if it is listed here. It was not, so the policy had no effect
+      # whatever and the page silently used the code default.
+      SAIVA_BACKUP_STALE_HOURS: ${SAIVA_BACKUP_STALE_HOURS:-36}
     depends_on:
       db:
         condition: service_healthy

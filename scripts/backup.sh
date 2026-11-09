@@ -49,9 +49,15 @@
 #                          dump contains and the restored database is counted after
 #                          loading it. Nothing is compared against a live database that is
 #                          still being written to.
-#   the live aggregate     for the one case the other three cannot see: a complete,
-#                          internally consistent dump OF THE WRONG DATABASE, which is what
-#                          a mistyped POSTGRES_DB produces
+#   the live aggregate     a dump of the right database that came back with no rows in it.
+#                          It is deliberately NOT described as catching "a dump of the
+#                          wrong database" any more, because it cannot: the dump comes from
+#                          $DB and the aggregate counts $DB, so the two always agree.
+#   the marker tables      which IS what answers "is this a dump of Saiva at all":
+#                          `households` and a schema revision have to be in the restored
+#                          copy. Point POSTGRES_DB at an empty database and the four checks
+#                          above all pass on a 396-byte dump of nothing -- measured -- and
+#                          the retention then retires the real dumps behind it.
 #
 # WHY IT RUNS ON THE HOST. The thing that produces the safety net must not be the thing a
 # bad release can break, and a backup is most wanted on the night the api container will
@@ -92,7 +98,23 @@ SAIVA_STATUS_KIND=backup-status
 # sends a line to stdout (the systemd journal, when a timer runs this) and appends it to
 # the run log the status file quotes.
 blank() { printf '\n'; }
-die() { log "  $*"; exit 1; }
+
+# die() RECORDS what it says. It used to only log it, and then _finalise_on_exit replaced
+# `message` with a generic "stopped at step X without finishing" -- so check_room's
+# refusal, which names the free space, the database size and what to do about it, never
+# reached the page at all. The owner saw a failed backup blaming whatever step happened to
+# be set last, with the actual diagnosis only in the journal.
+#
+# The guard is `status_get run_id`: before backup_begin there is no run to attach a message
+# to, and writing one then would go over the record of whatever ran last.
+die() {
+  log "  $*"
+  if [ -n "$(status_get run_id 2>/dev/null || true)" ]; then
+    status_set message "$*"
+    status_flush
+  fi
+  exit 1
+}
 
 CONF="${SAIVA_AGENT_CONF:-/etc/saiva/agent.conf}"
 ACTION="run"
@@ -103,6 +125,8 @@ DUMP_PART=""
 DUMP_REVISION=""
 STAGED=""          # the host-side copy of a dump, while an off-box copy is in flight
 OFFSITE_STATE=""   # how far away the copy actually got; see SAIVA_OFFSITE_STATES
+PREVIOUS_VERIFIED=""   # what the run before this one concluded
+VERIFIED_THIS_RUN=0    # this run's own verdict, not read back out of a shared file
 
 # ---------------------------------------------------------------------------------------
 # configuration root acts on
@@ -153,6 +177,8 @@ conf_value() { # KEY -> value, or empty
 # agent.conf. Nothing here falls back to .env: see the comment above.
 COPY_TO="${SAIVA_BACKUP_COPY_TO-$(conf_value SAIVA_BACKUP_COPY_TO)}"
 COPY_CMD="${SAIVA_BACKUP_COPY_CMD-$(conf_value SAIVA_BACKUP_COPY_CMD)}"
+MIN_FREE_KB="${SAIVA_BACKUP_MIN_FREE_KB:-$(conf_value SAIVA_BACKUP_MIN_FREE_KB)}"
+case "$MIN_FREE_KB" in *[!0-9]*) MIN_FREE_KB="" ;; esac
 KEEP_NIGHTLY="${SAIVA_BACKUP_KEEP_NIGHTLY:-$(conf_value SAIVA_BACKUP_KEEP_NIGHTLY)}"
 KEEP_NIGHTLY="${KEEP_NIGHTLY:-14}"
 case "$KEEP_NIGHTLY" in
@@ -168,12 +194,20 @@ esac
 
 backup_begin() { # TRIGGER
   local run; run="$(date -u +%Y%m%dT%H%M%SZ)-$$"
-  # Clear this run's fields; leave last_success_at, last_verified_at and the offsite
-  # fields alone. "The backup failed last night" and "there is no backup" are different
-  # sentences and the record has to be able to tell the owner which one they are in.
+  # Captured before the clear below, because the pre-dump prune needs it: the last thing
+  # this box knows about its backups decides whether anything may be deleted today.
+  PREVIOUS_VERIFIED="$(status_get verified)"
+  # Clears only what this run is certain to replace. The VERDICT fields -- verified,
+  # verify_message, rows_checked, dump_revision, dump_name, dump_bytes -- are cleared by
+  # take_dump and verify_dump instead, at the moment those actually begin.
+  #
+  # Clearing them here was wrong in a way a reviewer reproduced: a run that then went no
+  # further -- the stack was down, the lock was held -- had already erased "a dump was
+  # taken but it could not be restored", and the page went from red to a shrug. The
+  # carried-forward timestamps survived, so the owner saw a backup age and no reason to
+  # distrust it. Only a run that LOOKED at a dump may change what is known about one.
   local f
-  for f in step message exit_code dump_name dump_bytes dump_revision \
-           verified verify_message rows_checked finished_at pruned; do
+  for f in step message exit_code finished_at pruned; do
     status_set "$f" ""
   done
   status_set run_id "$run"
@@ -187,6 +221,16 @@ backup_begin() { # TRIGGER
 # Mirrors _finalise_on_exit in scripts/lib/release.sh, for the same reason: a run that
 # stops without saying so leaves YESTERDAY's green record standing, and the owner reads a
 # verified backup from before the failure as though it were last night's.
+# A signal is not an exit status. systemd's TimeoutStartSec, a host shutdown mid-dump or a
+# Ctrl-C all terminate the shell without any command having failed, so $? at the top of the
+# EXIT trap is the status of whatever ran last -- usually 0. The record then said "stopped
+# without finishing (exit status 0)" with exit_code 0 beside phase failed, which reads as a
+# contradiction and tells the owner nothing. Trapping the signals gives the trap a real
+# status to report; _finalise_on_exit also refuses to print a 0 it does not believe.
+trap 'exit 143' TERM
+trap 'exit 130' INT
+trap 'exit 129' HUP
+
 _finalise_on_exit() {
   local rc=$?
   drop_scratch_db
@@ -196,16 +240,55 @@ _finalise_on_exit() {
     running) : ;;
     *) return 0 ;;
   esac
-  status_finish failed "The backup stopped at step '$(status_get step)' without finishing \
-(exit status $rc). Run ./scripts/backup.sh on the host to see why; \`journalctl -u \
-saiva-backup.service\` has the last run's output." "$rc"
+  # rc 0 here means the shell was terminated without any command failing -- a signal that
+  # arrived before the traps above were installed, or one they do not cover. Saying "exit
+  # status 0" beside phase failed is a contradiction; saying nothing is the honest version,
+  # and the renderer turns an empty exit_code into null.
+  local how="exit status $rc"
+  [ "$rc" = "0" ] && how="no exit status -- it was terminated rather than failing"
+  # A message die() already wrote is the better one: it names the actual cause. The
+  # generic sentence is for the exits nobody wrote a reason for -- a signal, an unguarded
+  # command failing under set -e.
+  local said step msg
+  said="$(status_get message)"
+  step="$(status_get step)"
+  msg="The backup stopped at step '${step}' without finishing (${how}). Run \
+./scripts/backup.sh on the host to see why; \`journalctl -u saiva-backup.service\` has the \
+last run's output."
+  [ -n "$said" ] && msg="${said} (Stopped at step '${step}', ${how}.)"
+  status_finish failed "$msg" "$([ "$rc" = "0" ] || printf '%s' "$rc")"
   log ""
-  log "✖ Stopped at step '$(status_get step)' without finishing (exit $rc)."
+  log "✖ Stopped at step '${step}' without finishing (${how})."
+}
+
+# The stamp in a dump's name as an ISO timestamp, which is what the page can parse.
+# `stamp_from_name` renders "2026-09-30 03:00:00 UTC" for people; this is for machines.
+iso_from_name() { # DUMP_NAME -> 2026-09-30T03:00:00Z, or nothing
+  local n="$1" d t
+  if [[ "$n" =~ ^saiva-([0-9]{8})-([0-9]{6})- ]]; then
+    d="${BASH_REMATCH[1]}"; t="${BASH_REMATCH[2]}"
+    printf '%s-%s-%sT%s:%s:%sZ' \
+      "${d:0:4}" "${d:4:2}" "${d:6:2}" "${t:0:2}" "${t:2:2}" "${t:4:2}"
+  fi
 }
 
 finish_ok() { # MESSAGE
   status_set last_success_at "$(now)"
-  [ "$(status_get verified)" = "true" ] && status_set last_verified_at "$(now)"
+  # last_verified_at is WHEN THE DUMP WAS TAKEN, not when the verification ran. For a
+  # nightly run those are seconds apart and it makes no difference; for `--verify-only`
+  # it is the whole difference, because that re-verifies whatever is newest in the
+  # volume. Taking the clock meant re-verifying a forty-day-old dump moved the panel's
+  # one headline to "Last verified backup: 0 hours ago" -- a true statement about the
+  # verification presented as a claim about the backup. Reproduced by a reviewer.
+  # VERIFIED_THIS_RUN, not status_get: every status_* call is a read-modify-write of a
+  # file shared with any other invocation, so reading the verdict back out of it made the
+  # decision depend on what else had touched the file in between. A reviewer reproduced a
+  # concurrent press clearing the field between `status_set verified true` and this line,
+  # after which a verified backup never advanced the one number the page reports.
+  if [ "$VERIFIED_THIS_RUN" = "1" ]; then
+    local taken; taken="$(iso_from_name "$DUMP_NAME")"
+    status_set last_verified_at "${taken:-$(now)}"
+  fi
   status_set step "done"
   status_finish ok "$1" 0
 }
@@ -237,25 +320,35 @@ finish_ok() { # MESSAGE
 # last_success_at / last_verified_at untouched. "The backup failed" and "no backup was
 # taken, and the newest one is N hours old" are different sentences; recording the first
 # when the second is true is how a regime trains its owner to ignore it.
-acquire_lock_or_skip() {
+# A run that cannot get the lock writes NOTHING and exits 0.
+#
+# That is the same rule acquire_lock in scripts/lib/release.sh follows, and the reason is
+# the same: the record belongs to the run that IS going, and this process knows nothing
+# about it. Writing "skipped" over a live run's status -- which an earlier version did --
+# corrupts the record of the run that is actually working, because every status_set is a
+# read-modify-write of one shared file. A reviewer reproduced exactly that: a press of
+# "Back up now" during a nightly run overwrote the nightly run's run_id, started_at and
+# verdict, and the page then attributed the first run's result to the second.
+#
+# What the owner sees instead is the page continuing to report the run in flight, and the
+# age of the newest VERIFIED backup -- which is the number that matters and which a
+# skipped run must never reset.
+acquire_lock_or_leave() {
   local lock wait; lock="$(state_dir)/deploy.lock"
   exec 9>"$lock"
   if [ "$TRIGGER" = "button" ]; then
+    # No wait at all: somebody is looking at a page, and "already running" now beats a
+    # spinner for ten minutes.
     flock -n 9 && return 0
-    status_set step skipped
-    status_finish skipped "Another Saiva job is running on this box -- an update, or a \
-backup that was already under way -- so nothing was taken. Try again once it finishes." 0
-    log "Another Saiva job holds the lock; nothing was taken."
+    log "Another Saiva job holds the lock; nothing was taken, and the record of the run"
+    log "that holds it has been left alone."
     exit 0
   fi
   wait="${SAIVA_BACKUP_LOCK_WAIT:-600}"
   flock -w "$wait" 9 && return 0
-  status_set step skipped
-  status_finish skipped "A release held the deploy lock for ${wait} seconds, so no backup \
-was taken this time. An update takes a pre-migration dump of its own, and the timer runs \
-again tomorrow -- but the age of the newest VERIFIED backup is the number to watch, and it \
-is not reset by a skipped run." 0
-  log "Could not get the deploy lock within ${wait}s; skipping this backup."
+  log "Could not get the deploy lock within ${wait}s -- a release is being applied -- so no"
+  log "backup was taken. An update takes a pre-migration dump of its own, and the timer"
+  log "runs again tomorrow. The age of the newest VERIFIED backup is the number to watch."
   exit 0
 }
 
@@ -297,6 +390,7 @@ skip() { # MESSAGE -- a run that should not have tried, recorded as such
 # written. It also matters for the VERIFY: a dump from a newer server cannot be replayed
 # into an older one at all, so there would be no way to prove the backup.
 check_version_skew() {
+  status_step preflight "Checking the client and the server are the same major version."
   local server client
   server="$(psql_on "$MAINT_DB" 'show server_version_num' 2>/dev/null || true)"
   # `pg_dump (PostgreSQL) 16.15 (Ubuntu 16.15-0ubuntu0.24.04.1)` -> 16. Taken as the third
@@ -314,6 +408,45 @@ check_version_skew() {
   into ${client} to verify it even if it could be written.
   Point SAIVA_PG_IMAGE at a postgres:${server_major} image (it is also what
   scripts/restore-backup.sh uses), or move the db service back to ${client}."
+}
+
+# SIGKILL runs no trap. The OOM killer, `systemctl stop` past TimeoutStopSec, an LXC stop
+# and a power cut all deliver one, and what is left behind is a complete copy of the
+# household ledger in a throwaway database and another in a staged file -- neither of which
+# anything would ever reclaim, because the next run makes its own with a different name.
+# A reviewer measured one such leftover at the full size of the database.
+#
+# On one box this could be unconditional -- the deploy lock means there is no other run
+# whose scratch database this could be. But a Postgres SERVER can be shared by more than
+# one checkout (this repository's own test suites do exactly that), and dropping a database
+# another run is restoring into would be a new way to break a verification. So a scratch
+# database is only reclaimed when its own name says nobody is using it: the trailing pid is
+# not a live process, or the stamp in it is more than an hour old, which is longer than
+# saiva-backup.service's TimeoutStartSec allows a run to last.
+sweep_orphans() {
+  local stale
+  stale="$(psql_on "$MAINT_DB" \
+    "select datname from pg_database where datname like 'saiva\\_verify\\_%'" 2>/dev/null || true)"
+  local db pid stamp cutoff
+  cutoff="$(date -u -d '1 hour ago' +%Y%m%d%H%M%S 2>/dev/null || printf '0')"
+  for db in $stale; do
+    case "$db" in saiva_verify_*) ;; *) continue ;; esac
+    pid="${db##*_}"
+    stamp="${db#saiva_verify_}"; stamp="${stamp%_*}"
+    case "$pid" in ''|*[!0-9]*) pid=1 ;; esac           # unreadable: treat as alive
+    if kill -0 "$pid" 2>/dev/null && [ "$stamp" \> "$cutoff" ]; then
+      continue                                          # a run that is still going
+    fi
+    log "  Dropping an abandoned verification database left by an earlier run: ${db}"
+    psql_on "$MAINT_DB" "DROP DATABASE IF EXISTS \"${db}\" WITH (FORCE)" >/dev/null 2>&1 || true
+  done
+  # And any staged off-box copy from a run that did not get to clean up.
+  local f
+  for f in "$(state_dir)"/staging/.offsite.*; do
+    [ -f "$f" ] || continue
+    log "  Removing a staged off-box copy left by an earlier run: $(basename "$f")"
+    rm -f -- "$f"
+  done
 }
 
 # ---------------------------------------------------------------------------------------
@@ -334,6 +467,7 @@ free_kb_in_volume() {
 # same filesystem the dump is on. So the figure to beat is about the size of the database
 # itself, plus room for the dump, and not "twice the last dump".
 check_room() {
+  status_step room "Checking there is space to dump and to verify the dump."
   local free need size_kb
   free="$(free_kb_in_volume | tr -cd '0-9' || true)"
   [ -n "$free" ] || { log "  Could not read free space in ${SOURCE_LABEL}; continuing."; return 0; }
@@ -348,7 +482,11 @@ check_room() {
   # 5/4 of the database for the throwaway copy and its indexes, plus 64 MB of headroom
   # that also covers the dump itself (gzipped plain SQL is a fraction of the database).
   need=$(( size_kb * 5 / 4 + 65536 ))
-  need="${SAIVA_BACKUP_MIN_FREE_KB:-$need}"
+  # Read the same way as the other three settings -- environment, then agent.conf -- and
+  # not from the environment alone. The refusal below names agent.conf as the place to set
+  # it, and it was not read from there, so the one escape hatch from this estimate could
+  # not be reached by anything the nightly timer runs.
+  need="${MIN_FREE_KB:-$need}"
   case "$need" in ''|*[!0-9]*) need=65536 ;; esac
 
   if [ "$free" -lt "$need" ]; then
@@ -368,6 +506,12 @@ check_room() {
 
 take_dump() {
   status_step dump "Dumping database \"${DB}\"."
+  # Cleared here rather than in backup_begin: see its comment. From this line on, this run
+  # owns the verdict, because from this line on it is about to produce one.
+  local f
+  for f in dump_name dump_bytes dump_revision verified verify_message rows_checked; do
+    status_set "$f" ""
+  done
   local stamp; stamp="$(date -u +%Y%m%d-%H%M%S)"
   # The stamp has one-second resolution and that collides in practice, not in theory: a
   # timer firing and a "Back up now" press land in the same second often enough that
@@ -431,8 +575,14 @@ remove_partial_dump() {
 #
 # A COPY block's data section ends at a line holding exactly `\.`. In COPY text format a
 # backslash in a value is written `\\`, so that line cannot occur inside data -- the count
-# is exact rather than approximate. Only a line that is unmistakably pg_dump's own COPY
-# header opens a block, so a string literal inside a function body cannot start one.
+# is exact rather than approximate.
+#
+# `!intbl &&` on the header rule is load-bearing, and it was missing. A DATA row can frame
+# a COPY header: two text columns holding `COPY public.notes (q` and `) FROM stdin;` emit
+# the single physical line `COPY public.notes (q<TAB>) FROM stdin;`, which matched, reset
+# the counter mid-block and failed verification on a perfectly restorable dump. Reproduced
+# with a real pg_dump. Inside a block only `\.` can end it, so the header rule has no
+# business being consulted there.
 #
 # The marker line is counted in the same pass and reported as `=marker <n>`, because
 # reading the dump twice doubles the only expensive thing this script does.
@@ -442,7 +592,19 @@ dump_declares() { # DUMP_NAME -> lines on stdout; exit 3 if the dump could not b
   local -a rc
   set +e
   dump_stream "$name" | awk '
-    /^COPY [A-Za-z0-9_."]+ \(.*\) FROM stdin;$/ { t = $2; n = 0; intbl = 1; next }
+    !intbl && /^COPY .+ \(.*\) FROM stdin;$/ {
+      # The identifier is taken by position, not as $2. pg_dump quotes a name that needs
+      # it -- COPY public."MixedCase Table" (id, v) FROM stdin; -- and the default field
+      # splitting then yields public."MixedCase for $2, so the key never matched what the
+      # database reported, and verification failed on a restorable dump.
+      # (No apostrophes in here: this program is inside a single-quoted shell string, and
+      # the word "awk" followed by one is how that string came to end three lines early.)
+      t = $0
+      sub(/^COPY /, "", t)
+      i = index(t, " (")
+      if (i > 1) t = substr(t, 1, i - 1)
+      n = 0; intbl = 1; next
+    }
     intbl && $0 == "\\." { print t, n; intbl = 0; next }
     intbl { n++; next }
     /^-- PostgreSQL database dump complete$/ { marker++ }
@@ -466,11 +628,25 @@ dump_declares() { # DUMP_NAME -> lines on stdout; exit 3 if the dump could not b
 # query_to_xml rather than n_live_tup: the latter is a statistic and means nothing until
 # something has ANALYZEd the table, which a freshly restored database has not.
 db_declares() { # DBNAME
-  psql_on "$1" "SELECT 'public.' || c.relname || ' ' ||
+  # `format('%I.%I', ...)` rather than `'public.' || relname`, and every non-system schema
+  # rather than public alone, because the key has to match the one dump_declares reads out
+  # of pg_dump's COPY header verbatim. pg_dump writes `schema.table`, quoting an identifier
+  # only where SQL requires it -- which is exactly what %I does. The previous version
+  # disagreed with the dump on a non-public schema, on a mixed-case name and on any
+  # identifier needing quotes: Saiva has none of those today, so the symptom would have
+  # been the FIRST migration to add one making every nightly backup fail verification,
+  # every night, with a message about row counts and nothing about the real cause.
+  #
+  # relkind = 'r' deliberately, which includes a partitioned table's PARTITIONS and
+  # excludes the parent ('p') -- the same set pg_dump emits COPY blocks for by default. A
+  # dump taken with --load-via-partition-root would not match, and nothing here takes one.
+  psql_on "$1" "SELECT format('%I.%I', n.nspname, c.relname) || ' ' ||
       (xpath('/row/c/text()', query_to_xml(
         format('SELECT count(*) AS c FROM %I.%I', n.nspname, c.relname), false, true, '')))[1]::text
     FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
-    WHERE c.relkind = 'r' AND n.nspname = 'public'" | sort
+    WHERE c.relkind = 'r'
+      AND n.nspname NOT IN ('pg_catalog', 'information_schema')
+      AND n.nspname NOT LIKE 'pg\\_%'" | sort
 }
 
 live_row_total() {
@@ -488,6 +664,11 @@ drop_scratch_db() {
 verify_dump() { # DUMP_NAME
   local name="$1"
   status_step verify "Restoring ${name} into a throwaway database."
+  # --verify-only reaches this without take_dump, so the verdict is cleared here too.
+  status_set verified ""
+  status_set verify_message ""
+  status_set rows_checked ""
+  VERIFIED_THIS_RUN=0
 
   local declared restored problems=() marker rows=0
   declared="$(dump_declares "$name")" || {
@@ -542,19 +723,46 @@ tables were created and not one row was loaded, which is what a --schema-only du
         | grep -E '^[<>]' | tr '\n' ';' | cut -c1-240)")
   fi
 
-  # The one check that needs the live database, and the only one a race could touch. It is
-  # an aggregate, and it exists for the case the others cannot see: a complete, consistent
-  # dump of the WRONG database. A ledger with thousands of rows does not reach zero in the
-  # seconds between a dump and this question.
+  # The live aggregate. It used to be described as catching "a dump of the WRONG database",
+  # and it cannot: the dump is taken from $DB and `live_row_total` counts $DB, so the two
+  # always agree. Point POSTGRES_DB at an empty database and both sides read zero -- which
+  # is how a dump of 396 bytes containing nothing at all came back `verified: true`. A
+  # reviewer reproduced it three times.
+  #
+  # What it does catch, and all it claims to: a dump of the RIGHT database that arrived
+  # with no rows in it. The structural check below is what makes "this is a dump of Saiva"
+  # a question with an answer.
   local live; live="$(live_row_total || true)"
   if [ "${live:-0}" -gt 0 ] && [ "$rows" -eq 0 ]; then
-    problems+=("the live database holds ${live} rows and this dump holds none, so it is \
-not a dump of this database")
+    problems+=("the database holds ${live} rows and this dump holds none")
+  fi
+
+  # THE MARKER TABLES. A dump is only a backup of this household's records if those
+  # records are in it, and the only way to ask that is structurally. `households` is the
+  # table backend/app/dbinit.py itself uses to tell a real Saiva database from an empty
+  # one, and scripts/restore-backup.sh's own verification asks the same question -- if
+  # dbinit would not recognise the restored copy as a Saiva database, neither should this.
+  #
+  # This closes the case the aggregate above could not: a mistyped POSTGRES_DB, or one
+  # pointing at a database that has never been migrated, otherwise produced a tiny,
+  # internally consistent, perfectly restorable dump of nothing, every night, reported as
+  # a verified backup -- and the retention then deleted the real dumps behind it. The
+  # fourteenth night would have been the last one that could be restored from.
+  local marker
+  marker="$(psql_on "$SCRATCH_DB" "select to_regclass('public.households') is not null" 2>/dev/null || true)"
+  if [ "$marker" != "t" ]; then
+    problems+=("the restored copy has no \`households\` table, so it is not a dump of a \
+Saiva database at all -- check POSTGRES_DB in .env, which this run read as \"${DB}\"")
   fi
 
   DUMP_REVISION="$(psql_on "$SCRATCH_DB" \
     "select coalesce(string_agg(version_num, ','), '') from alembic_version" 2>/dev/null || true)"
   status_set dump_revision "$DUMP_REVISION"
+  if [ -z "$DUMP_REVISION" ]; then
+    problems+=("the restored copy has no schema revision in \`alembic_version\`, so \
+either this is not a Saiva database or the dump predates Alembic -- a dump that cannot say \
+which schema it is cannot be restored with any confidence")
+  fi
 
   # One real query across three tables, so the verification covers the foreign keys, the
   # enum types and the indexes coming back -- not only that rows arrived somewhere.
@@ -573,6 +781,7 @@ not a dump of this database")
     return 1
   fi
 
+  VERIFIED_THIS_RUN=1
   status_set verified true
   status_set rows_checked "$rows"
   status_set verify_message "Restored into a throwaway database: ${rows} rows across \
@@ -706,7 +915,20 @@ and the backup together. Set SAIVA_BACKUP_COPY_TO in ${CONF}."
     if ! mkdir -p "$COPY_TO" 2>/dev/null; then
       notes+=("${COPY_TO}: cannot be created")
       _offsite_worsen failed
-    elif ! cp -f -- "$staged" "$COPY_TO/$name" 2>/dev/null; then
+    elif [ -L "$COPY_TO/$name" ]; then
+      # A symlink at the destination path makes `cp` write THROUGH it, and the chmod
+      # below follow it: root then writes the household ledger wherever the link points
+      # and relaxes that file to 0600. The destination is root-configured, but agent.conf
+      # recommends exactly the places other parties can write -- a NAS, an NFS or CIFS
+      # share, a Proxmox mount point -- and a dump name is a stamp anyone can predict a
+      # second at a time. A reviewer planted 91 links named for the next 91 seconds and
+      # hit the target. So this is refused rather than resolved: nothing here needs to
+      # follow a link, and a link where a dump should be is a destination to look at.
+      notes+=("${COPY_TO}/${name} is a symlink, so nothing was written -- a dump is never \
+copied through a link, because that writes root's copy of the ledger wherever the link \
+points. Remove it, or point SAIVA_BACKUP_COPY_TO somewhere nothing else writes")
+      _offsite_worsen failed
+    elif ! { rm -f -- "$COPY_TO/$name" 2>/dev/null; cp -- "$staged" "$COPY_TO/$name" 2>/dev/null; }; then
       notes+=("${COPY_TO}: the copy failed -- check that it is mounted and writable")
       _offsite_worsen failed
     else
@@ -785,8 +1007,17 @@ stage_dump_on_host() { # DUMP_NAME -> sets STAGED
   # In the state directory rather than /tmp: /tmp is tmpfs on many hosts, so a large dump
   # would be staged in RAM, and a systemd unit that ever gains PrivateTmp would stage it
   # somewhere the rest of the run cannot see. $STATE is root:root on local disk.
-  ( umask 077; : > "$(state_dir)/.offsite.$$" ) 2>/dev/null || return 1
-  tmp="$(state_dir)/.offsite.$$"
+  #
+  # In a 0700 SUBDIRECTORY of it rather than in $STATE itself, which is 0755 and
+  # bind-mounted into the caddy container -- and the caddy image runs as root, so a 0600
+  # root file sitting in a 0755 directory it can traverse is readable from inside it. The
+  # file is a complete copy of the ledger; records/ gets the same 0700 treatment for the
+  # same reason.
+  local dir; dir="$(state_dir)/staging"
+  ( umask 077; mkdir -p "$dir" ) 2>/dev/null || return 1
+  chmod 0700 "$dir" 2>/dev/null || true
+  ( umask 077; : > "$dir/.offsite.$$" ) 2>/dev/null || return 1
+  tmp="$dir/.offsite.$$"
   STAGED="$tmp"
   local -a rc
   set +e
@@ -816,18 +1047,22 @@ remove_staged() {
 # retention
 # ---------------------------------------------------------------------------------------
 
-# Only `-nightly` dumps, only names this script could have written, only REGULAR files,
-# and never the newest. The rm is given exact names one at a time; there is no glob in it.
+# Only files ROOT ITSELF WROTE, only `-nightly` names, and never the newest. The rm is
+# given exact names one at a time; there is no glob in it.
 #
-# `[ -L "$f" ] && continue` is what makes "only regular files" true, and the previous
-# version of this comment claimed it without the code: `[ -f "$f" ]` FOLLOWS symlinks, so a
-# link named saiva-20260101-010101-nightly.sql.gz counted as the oldest nightly and was
-# removed. The target survived -- `rm` on a symlink unlinks the link -- so it was never a
-# way to delete someone else's file, but a prune that can be aimed at all is one to close,
-# and a comment describing code that is not there is worse than no comment.
+# `-user 0 -perm 600` is the part that matters, and it was missing. The prune decides what
+# to keep by sorting FILENAMES, and the directory it sorts is one the api container has
+# read-write -- docker-compose.prod.yml mounts db_backups into api so the pre-migration
+# dump can be written there. A reviewer reproduced the consequence: three files named
+# `saiva-99999999-999999-nightly.sql.gz` planted by anything with write access sort newest,
+# fill the keep window, and root then deletes every real dump. The container cannot forge
+# either of these two properties -- it runs as uid 10001, and take_dump chmods 0600 before
+# the rename -- so the candidate list is now the set of dumps this script wrote and nothing
+# else. A planted file is left where it is, and scripts/restore-backup.sh's listing names
+# it.
 #
-# A link is now left where it is, and the listing in scripts/restore-backup.sh names it as
-# "not a regular file" rather than this quietly tidying it away.
+# `find` also does not follow symlinks, which is the other half: `[ -f ]` does, so the
+# previous version counted a planted link as a nightly dump and unlinked it.
 prune_nightlies() {
   status_step prune "Keeping the newest ${KEEP_NIGHTLY} nightly dumps."
   local removed
@@ -836,19 +1071,21 @@ prune_nightlies() {
     keep="$2"
     n=0
     # Reverse-sorted by name, which is reverse-chronological: the stamp is YYYYMMDD-HHMMSS.
-    for f in $(ls -1 2>/dev/null | grep -E "^saiva-[0-9]{8}-[0-9]{6}-nightly(-[0-9]+)?\.sql\.gz$" | sort -r); do
-      [ -L "$f" ] && continue
-      [ -f "$f" ] || continue
+    for f in $(find . -maxdepth 1 -type f -user 0 -perm 600 \
+                 -name "saiva-????????-??????-nightly*.sql.gz" 2>/dev/null \
+               | sed "s|^\./||" \
+               | grep -E "^saiva-[0-9]{8}-[0-9]{6}-nightly(-[0-9]+)?\.sql\.gz$" \
+               | sort -r); do
       n=$((n + 1))
       [ "$n" -le "$keep" ] && continue
       rm -f -- "$f" && printf "%s\n" "$f"
     done
   ' "$BACKUP_MOUNT" "$KEEP_NIGHTLY" | grep -c . || true)"
   status_set kept "$KEEP_NIGHTLY"
-  # DEFECT 4 was here: cmd_run prunes twice -- to policy before the dump, and again after
-  # the verify -- and a plain `status_set pruned` meant the second call overwrote the
-  # first. With 8 nightlies and keep=5 the record said 1 when the run had removed 4 and
-  # then 1, under-reporting the one number somebody checks after changing the retention.
+  # cmd_run prunes TWICE -- to policy before the dump, and again after the verify -- and a
+  # plain `status_set pruned` meant the second call overwrote the first. With 8 nightlies
+  # and keep=5 the record said 1 when the run had removed 4 and then 1, under-reporting the
+  # one number somebody checks after changing the retention.
   local before; before="$(status_get pruned)"
   case "$before" in ''|*[!0-9]*) before=0 ;; esac
   status_set pruned "$(( before + ${removed:-0} ))"
@@ -905,15 +1142,18 @@ newest_dump() {
 
 cmd_run() {
   state_init
+  # The lock comes BEFORE the record and before the EXIT trap, so an invocation that is
+  # not going to run writes nothing and has no trap to fire. See acquire_lock_or_leave.
+  acquire_lock_or_leave
   trap _finalise_on_exit EXIT
   backup_begin "$TRIGGER"
-  acquire_lock_or_skip
 
   skip_unless_stack_is_up
   docker_preflight 1
   load_settings
   db_preflight
   check_version_skew
+  sweep_orphans
   # To policy, BEFORE the dump. Not to make room below the retention the owner chose --
   # never that -- but because dumps already past it are the only space there is to
   # reclaim, and filling this filesystem does not merely fail the backup: db_data and
@@ -921,12 +1161,31 @@ cmd_run() {
   # Postgres meeting ENOSPC on its WAL is a hard stop rather than a slowdown. This box has
   # been here before -- see the crash-loop that wrote a full copy of the database on every
   # restart in docs/UPDATING.md.
-  prune_nightlies
+  #
+  # Unless the last thing this box knows is that a dump could NOT be restored. Then
+  # nothing is deleted, however far past the retention it is: fourteen bad nights in a row
+  # would otherwise retire the last restorable dump one night at a time, each run doing
+  # exactly what it was configured to do. A regime that can delete its way to having
+  # nothing is not one worth installing.
+  if [ "$PREVIOUS_VERIFIED" = "false" ]; then
+    log "  Not pruning: the last backup could not be restored, so nothing is being retired"
+    log "  until one can. Fix the cause, or run ./scripts/backup.sh --verify-only."
+  else
+    prune_nightlies
+  fi
   check_room
   take_dump
   verify_dump "$DUMP_NAME" || {
+    # "nothing was pruned" was false and asserted anyway: the pre-dump prune has already
+    # run by here, and on the first failing night after a good one it removed whatever was
+    # past the retention. Say what the record says instead.
+    local retired; retired="$(status_get pruned)"
+    case "$retired" in ''|0) retired="nothing was retired before it" ;;
+      *) retired="${retired} dump(s) past the retention had already been retired before \
+this one was taken, and nothing will be retired again until a dump verifies" ;;
+    esac
     status_finish failed "A dump was taken but it could not be restored, so it is not a \
-backup. ${DUMP_NAME} has been kept for inspection; nothing was pruned. $(status_get verify_message)" 1
+backup. ${DUMP_NAME} has been kept for inspection; ${retired}. $(status_get verify_message)" 1
     return 1
   }
   copy_offsite "$DUMP_NAME"
@@ -937,15 +1196,26 @@ backup. ${DUMP_NAME} has been kept for inspection; nothing was pruned. $(status_
 
 cmd_verify_only() {
   state_init
+  acquire_lock_or_leave
   trap _finalise_on_exit EXIT
   backup_begin "$TRIGGER"
-  acquire_lock_or_skip
   skip_unless_stack_is_up
   docker_preflight 1
   load_settings
   db_preflight
+  # The off-box group is cleared, because this path copies nothing. Keeping it meant the
+  # page put "a copy of it left this machine" beside a re-verified dump that had never been
+  # copied anywhere -- the verdict was about last night's dump and the headline was about
+  # this one. Unknown is the honest answer, and the page has a sentence for it.
+  local f
+  for f in offsite offsite_target offsite_at offsite_message; do status_set "$f" ""; done
+
   local name; name="$(newest_dump)"
   [ -n "$name" ] || die "There are no dumps in ${SOURCE_LABEL} to verify."
+  # The GLOBAL as well as the record: finish_ok reads DUMP_NAME to work out when the dump
+  # was taken, and leaving it empty here made --verify-only fall back to the clock -- the
+  # exact defect the stamp is there to fix.
+  DUMP_NAME="$name"
   status_set dump_name "$name"
   verify_dump "$name" || {
     status_finish failed "${name} could not be restored, so it is not a backup. \
@@ -1007,7 +1277,9 @@ while [ $# -gt 0 ]; do
     --list)        ACTION="list" ;;
     --self-check)  ACTION="self-check" ;;
     --direct)      DIRECT=1 ;;
-    --trigger)     shift; TRIGGER="${1:-cli}" ;;
+    --trigger)     [ $# -ge 2 ] || {
+                     printf -- '--trigger needs a value: timer, cli or button\n' >&2; exit 2; }
+                   shift; TRIGGER="$1" ;;
     --trigger=*)   TRIGGER="${1#*=}" ;;
     -h|--help)     sed -n '2,10p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *)             printf 'Unknown option: %s\n' "$1" >&2; exit 2 ;;

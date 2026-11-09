@@ -338,3 +338,98 @@ def test_the_api_stops_believing_a_running_backup_before_systemd_kills_it() -> N
             f"{label}.STALE_RUN_AFTER is more than twice {unit}'s timeout, which leaves "
             "the button refused long after systemd has given up"
         )
+
+
+def test_every_setting_the_owner_sets_in_dot_env_actually_reaches_the_api_container() -> None:
+    """A setting the image cannot see is a policy with no effect.
+
+    There is no `env_file:` on any service and backend/Dockerfile copies no .env, so a
+    value the owner writes in .env reaches the api process only if docker-compose.prod.yml
+    lists it in that service's `environment:` block. SAIVA_BACKUP_STALE_HOURS was not
+    listed: the page silently used the code default, and the number in .env did nothing at
+    all. Nothing failed, which is what made it worth a test.
+
+    Scoped to the settings whose names say they come from the deployment -- the ones read
+    through an explicit SAIVA_ alias. Everything else on Settings is either passed under a
+    different name already (DATABASE_URL, SECRET_KEY) or is not an operator knob.
+    """
+    import yaml
+
+    from app.config import Settings
+
+    aliased = {
+        str(field.validation_alias)
+        for field in Settings.model_fields.values()
+        if isinstance(field.validation_alias, str)
+        and field.validation_alias.startswith("SAIVA_")
+    }
+    assert aliased, "no SAIVA_-aliased settings found; this test would pass on anything"
+
+    compose = yaml.safe_load((REPO / "docker-compose.prod.yml").read_text())
+    api_env = compose["services"]["api"].get("environment") or {}
+    passed = set(api_env) if isinstance(api_env, dict) else {e.split("=", 1)[0] for e in api_env}
+
+    missing = sorted(aliased - passed)
+    assert not missing, (
+        f"docker-compose.prod.yml does not pass {missing} to the api service, so whatever "
+        "the owner sets for them in .env has no effect on the running app"
+    )
+
+
+def test_every_copy_command_example_is_quoted_so_the_agent_can_source_it() -> None:
+    """The one defect here that would have taken out both in-app buttons.
+
+    /etc/saiva/agent.conf is shared: scripts/backup.sh READS the keys it wants, and
+    scripts/saiva-update-agent SOURCES the whole file as root. An unquoted
+    `SAIVA_BACKUP_COPY_CMD=rclone copyto "$1" ...` is therefore parsed as shell -- `rclone`
+    becomes the value, `copyto` becomes a command to run, `$1` expands to nothing, and
+    under `set -e` the agent dies. The backup itself would have kept working, which is
+    exactly how such a line survives a test: only the buttons break.
+
+    So every example anybody could copy has to be valid as a sourced assignment. Checked
+    in the installer's template and in the runbook, because those are the two places a
+    value gets copied from.
+    """
+    sources = {
+        "scripts/install-updater.sh": INSTALLER.read_text(),
+        "docs/BACKUPS.md": (REPO / "docs" / "BACKUPS.md").read_text(),
+    }
+    found = 0
+    for where, text in sources.items():
+        for line in text.splitlines():
+            stripped = line.strip().lstrip("#").strip()
+            if not stripped.startswith("SAIVA_BACKUP_COPY_CMD="):
+                continue
+            value = stripped.split("=", 1)[1]
+            if not value:  # the empty default in the template
+                continue
+            found += 1
+            assert value.startswith("'") and value.endswith("'"), (
+                f"{where} shows `{stripped}` as an example; unquoted, the update agent "
+                "dies sourcing it and both in-app buttons stop working"
+            )
+    assert found, (
+        "no SAIVA_BACKUP_COPY_CMD example found in either place -- this test would then "
+        "pass however the examples were written"
+    )
+
+
+def test_an_upgrade_adds_the_backup_settings_to_an_existing_config() -> None:
+    """The box this ships to already has an agent.conf, written by the previous version.
+
+    The installer must not rewrite it -- that would throw away a configured destination,
+    and re-running the installer is the documented fix for half a dozen other things. But
+    leaving it entirely alone meant an upgraded box had nowhere to put a destination and
+    nothing saying so: the page would report "nothing is copied off this box" forever and
+    the owner would have no file to edit.
+    """
+    text = INSTALLER.read_text()
+    assert "added the nightly-backup settings" in text, (
+        "the installer no longer backfills the backup keys into an existing agent.conf, "
+        "so an upgraded box has nowhere to configure a destination"
+    )
+    assert "the existing values were left alone" in text
+    for key in ("SAIVA_BACKUP_COPY_TO", "SAIVA_BACKUP_COPY_CMD", "SAIVA_BACKUP_KEEP_NIGHTLY"):
+        assert text.count(key) >= 2, (
+            f"{key} should appear in both the fresh template and the upgrade backfill"
+        )

@@ -115,6 +115,33 @@ if [ -f "$CONF" ]; then
       printf '%s\n' "$kv" >> "$CONF"
     fi
   done
+  # And the backup settings are APPENDED if absent, which is the upgrade path: a box that
+  # ran an earlier version has an agent.conf with no backup keys in it at all, and leaving
+  # it alone meant the owner had nowhere to put a destination and nothing telling them so.
+  # An existing value is never touched -- only a missing key is added, empty.
+  if ! grep -qE '^[[:space:]]*SAIVA_BACKUP_COPY_TO=' "$CONF"; then
+    cat >> "$CONF" <<EOF
+
+# --- nightly backups (added by scripts/install-updater.sh) -----------------------------
+# WHERE A VERIFIED BACKUP GOES AFTER THIS BOX. Empty means nowhere, and then every copy of
+# your database lives on the disk it is protecting you against. See docs/BACKUPS.md.
+SAIVA_BACKUP_COPY_TO=
+
+# Or a command, handed the dump's path as \$1 and its name as \$2. QUOTE IT: this file is
+# sourced by the update agent, so an unquoted value is parsed as shell.
+#   SAIVA_BACKUP_COPY_CMD='rclone copyto "\$1" "remote:saiva/\$2"'
+SAIVA_BACKUP_COPY_CMD=
+
+# How many nightly dumps to keep. -premigrate and -prerestore dumps are never pruned.
+SAIVA_BACKUP_KEEP_NIGHTLY=14
+
+# Free space this insists on before dumping, in KB. Unset means "about 1.25x the database",
+# because verifying a dump replays it into a throwaway database on the same filesystem.
+# Set it only if you know that estimate is too cautious here.
+#SAIVA_BACKUP_MIN_FREE_KB=
+EOF
+    echo "  → $CONF (added the nightly-backup settings; the existing values were left alone)"
+  fi
 else
   cat > "$CONF" <<EOF
 # Read by $AGENT_DST and by $ROOT/scripts/backup.sh, as root.
@@ -136,14 +163,28 @@ SAIVA_STATE_DIR=$STATE
 SAIVA_BACKUP_COPY_TO=
 
 # Instead of, or as well as, a directory: a command handed the dump's path as \$1 and its
-# name as \$2. This is how rclone, restic or rsync-over-ssh fit, e.g.
-#   SAIVA_BACKUP_COPY_CMD=rclone copyto "\$1" "remote:saiva/\$2"
+# name as \$2. This is how rclone, restic or rsync-over-ssh fit.
+#
+# QUOTE IT, as the example does. $AGENT_DST SOURCES this file, so an unquoted value is
+# parsed as shell: \`SAIVA_BACKUP_COPY_CMD=rclone copyto "\$1" ...\` runs \`copyto\` as a
+# command with that variable in its environment, \$1 and \$2 expand to nothing, and under
+# \`set -e\` the agent dies -- taking both in-app buttons with it. backup.sh does not source
+# this file, so it would have worked there, which is exactly how such a line survives a
+# test. Single quotes also stop \$1 being expanded at source time.
+#
+#   SAIVA_BACKUP_COPY_CMD='rclone copyto "\$1" "remote:saiva/\$2"'
 SAIVA_BACKUP_COPY_CMD=
 
 # How many nightly dumps to keep. The -premigrate dumps the app writes before a migration,
 # and the -prerestore dumps a restore writes before replacing a database, are NEVER pruned
 # automatically -- the backup script may remove what it created and nothing else.
 SAIVA_BACKUP_KEEP_NIGHTLY=14
+
+# Free space the backup insists on before it dumps, in KB. Unset means "about 1.25x the
+# size of the database", because verifying a dump replays it into a throwaway database on
+# the same filesystem. Set it only if you know that estimate is too cautious here -- and
+# note that filling this filesystem stops Postgres, not just the backup.
+#SAIVA_BACKUP_MIN_FREE_KB=
 EOF
   echo "  → $CONF"
 fi
@@ -189,6 +230,13 @@ Description=Apply the newest Saiva release
 Documentation=file://$ROOT/docs/UPDATING.md
 After=docker.service network-online.target
 Requires=docker.service
+# No start rate limit. This unit is activated by a path unit watching a directory the api
+# container writes into, so the trigger rate is not under this host's control -- and the
+# quick-exit cases are the normal ones when something is wrong (another job holds the lock,
+# the stack is down). systemd's default of five starts in ten seconds would then latch the
+# button off with nothing written to say why, which is the one outcome a request-driven
+# unit must not have.
+StartLimitIntervalSec=0
 
 [Service]
 Type=oneshot
@@ -289,6 +337,9 @@ Description=Take a Saiva backup because the app asked for one
 Documentation=file://$ROOT/docs/BACKUPS.md
 After=docker.service network-online.target
 Wants=docker.service
+# See saiva-update.service: path-activated, so the trigger rate is not this host's to
+# control, and a rate limit would latch the button off silently.
+StartLimitIntervalSec=0
 
 [Service]
 Type=oneshot

@@ -106,8 +106,14 @@ because the filesystem type proves it. This is the best option on a home network
 **Object storage, with a command.** For a copy that survives the house:
 
 ```bash
-SAIVA_BACKUP_COPY_CMD=rclone copyto "$1" "remote:saiva-backups/$2"
+SAIVA_BACKUP_COPY_CMD='rclone copyto "$1" "remote:saiva-backups/$2"'
 ```
+
+**Those single quotes are not optional.** The update agent sources this file, so an
+unquoted value is parsed as shell: `rclone` becomes the value, `copyto` becomes a command
+to run, and under `set -e` the agent dies — taking both in-app buttons with it. `backup.sh`
+reads the file rather than sourcing it, so an unquoted line would work there and fail only
+on the button, which is exactly how such a line survives a test.
 
 `$1` is the dump's path on the host, `$2` is its filename. Anything works —
 `rclone`, `restic`, `rsync -e ssh`, `aws s3 cp`. It runs as root, after the dump has been
@@ -120,8 +126,14 @@ Because the backup script runs **as root**. A destination path taken from `.env`
 anyone who can write the checkout have root create files wherever they chose; a *command*
 taken from `.env` would simply be a way to become root. `agent.conf` is root-owned, and the
 script refuses to act on either setting unless the file is owned by root and not writable
-by group or other. It reads the keys it wants rather than sourcing the file, so reading the
-configuration cannot itself run anything.
+by group or other.
+
+`backup.sh` **reads the keys it wants** rather than sourcing the file, so reading the
+configuration cannot itself run anything. The update agent, which shares the file, **does**
+source it — so every line in it has to be a valid shell assignment, and a value containing
+spaces has to be quoted. That is why the `SAIVA_BACKUP_COPY_CMD` example above is in single
+quotes: unquoted, `rclone` would be taken as the value and `copyto` as a command to run,
+and the agent would die on it, taking both in-app buttons with it.
 
 Database settings still come from `.env`, because that is what docker-compose reads and the
 backup must dump the same database the stack runs.
@@ -214,9 +226,16 @@ So four checks run and none of them is spare: gunzip's exit status (the only one
 a truncated archive), pg_dump's completion marker (the only cheap one that sees a dump that
 died partway), a row-for-row comparison between what the dump declares and what came back
 (the only one that sees `--schema-only`, and it catches both truncations a second time),
-and one aggregate comparison against the live database, for the single case the other three
-cannot see — a complete, internally consistent dump **of the wrong database**, which is
-what a mistyped `POSTGRES_DB` produces.
+one aggregate comparison against the live database,
+which catches a dump of the *right* database that came back with no rows in it; and a
+structural check that the restored copy really contains a `households` table and a schema
+revision.
+
+That last one is what answers *is this a dump of Saiva at all*, and it is there because the
+aggregate cannot be: the dump comes from `POSTGRES_DB` and the aggregate counts
+`POSTGRES_DB`, so the two always agree. Point it at an empty database and every other check
+passes on a 396-byte dump of nothing — measured — while the retention retires the real
+dumps behind it. That was a real defect in the first version of this, found by review.
 
 ### Disk space
 
@@ -232,7 +251,8 @@ failed backup would: filling that filesystem stops Postgres, not just the backup
 has been there before — see the crash-loop in [UPDATING.md](UPDATING.md) that wrote a full
 copy of the database on every restart attempt.
 
-If the estimate is too cautious for your setup, `SAIVA_BACKUP_MIN_FREE_KB` overrides it.
+If the estimate is too cautious for your setup, set `SAIVA_BACKUP_MIN_FREE_KB` in
+`/etc/saiva/agent.conf` — the installer leaves it there commented out.
 
 ### What it will never delete
 
@@ -288,10 +308,18 @@ reload the page.
 '3 days ago'`. If the unit is not there, the installer has not been run since the release
 that added it.
 
-**`skipped`, repeatedly.** A backup skips rather than failing when a release holds the
-deploy lock, or when the stack is down — reporting failure every night for a box somebody
-turned off is how a regime teaches its owner to ignore it. Repeated skips mean the stack is
-down or an update is stuck: `./scripts/deploy.sh --status`.
+**`skipped`, repeatedly.** A nightly run records `skipped` rather than failing when the
+stack is deliberately down — reporting failure every night for a box somebody turned off is
+how a regime teaches its owner to ignore it. Repeated skips mean the stack is down:
+`make up`.
+
+**The record has not changed for a day, and nothing says why.** A run that could not take
+the deploy lock — because a release was being applied — writes *nothing at all*, on
+purpose: the record belongs to the run that holds the lock, and every write to it is a
+read-modify-write of one shared file, so a second run saying "skipped" over a live one
+corrupts the live one. The journal has it:
+`journalctl -u saiva-backup.service --since '2 days ago'`. And the age on the page is the
+number that notices.
 
 **`a dump was taken but it could not be restored`.** The most important message here, and
 the dump is kept for inspection. The reason is on the page and in `backup.sh --status`. If

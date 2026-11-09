@@ -69,10 +69,17 @@ STALE_RUN_AFTER = dt.timedelta(minutes=65)
 # the shell and holds all three sides together.
 #
 # `skipped` is the one that is not in the updater's vocabulary, and it is load-bearing. A
-# nightly run that finds a release holding the deploy lock, or finds the stack deliberately
-# stopped, records `skipped` and leaves last_success_at / last_verified_at exactly as they
-# were. "The backup failed last night" and "there is no backup" are different sentences,
-# and a regime that cannot tell its owner which one they are in trains them to ignore it.
+# nightly run that fires while the stack is deliberately down records `skipped` and leaves
+# last_success_at / last_verified_at exactly as they were -- because "the backup failed"
+# and "no backup was taken this time, and the newest verified one is N hours old" are
+# different sentences, and reporting the first when the second is true is how a regime
+# trains its owner to ignore it.
+#
+# A run that could not take the DEPLOY LOCK records nothing at all, which is a different
+# case and deliberately not this one: the record belongs to the run that holds the lock,
+# and every write here is a read-modify-write of one shared file. See
+# acquire_lock_or_leave in scripts/backup.sh. The owner sees the run in flight still being
+# reported, and the age climbing if it keeps happening.
 TERMINAL_PHASES = frozenset({"ok", "failed", "skipped"})
 # Only what scripts/lib/state.sh actually writes: backup_begin() sets `running` and
 # nothing sets a queued phase. The window between the button being pressed and the timer

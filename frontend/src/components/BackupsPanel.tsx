@@ -222,15 +222,20 @@ function headline(data: BackupStatus, age: Age | null): Notice {
 /**
  * Whether the recorded off-box state means the copy actually left the machine.
  *
- * `remote` is the name the contract uses; `ok` is the value scripts/backup.sh writes
- * today for the same measured thing (a network filesystem under the destination, or a
- * push command the owner configured which exited zero). Both are accepted, because a
- * panel that knew only one of the two names would render a genuine off-box copy as a
- * state it does not recognise — and, worse, the other way round, would have to decide
- * what to do with a value it had been told is good news under a name it did not know.
+ * `remote` and nothing else. This accepted `ok` as well while scripts/backup.sh wrote it
+ * — which it did only because the final `status_set offsite "${worst:-ok}"` defaulted to
+ * the most reassuring value in the union, so a branch that forgot to record what happened
+ * said "copied off this box". That defect was fixed in the script, and the vocabulary is
+ * now declared there as SAIVA_OFFSITE_STATES; carrying `ok` here any longer would mean
+ * this panel treats as good news a value the host cannot produce, which is the same shape
+ * of claim in the other direction.
+ *
+ * backend/tests/test_deployment_hardening.py keeps the declared set and this switch in
+ * step, so an `ok` from some future host lands in the default branch and is rendered as
+ * itself rather than as a tick.
  */
 function offsiteIsOffBox(offsite: string | null): boolean {
-  return offsite === "remote" || offsite === "ok";
+  return offsite === "remote";
 }
 
 function offsiteNotice(data: BackupStatus): Notice | null {
@@ -239,7 +244,6 @@ function offsiteNotice(data: BackupStatus): Notice | null {
   const said = data.offsite_message ? ` ${data.offsite_message}.` : "";
   switch (data.offsite) {
     case "remote":
-    case "ok":
       return {
         tone: "good",
         title: `A copy is off this box${where}`,
@@ -521,15 +525,34 @@ export function BackupsPanel() {
   // about the box rather than news about this press.
   const runNotice = readable && !superseded ? phaseNotice(data, runningMs) : null;
   const verifyFailed = readable && !superseded && data.verified === false;
-  const installed = readable && data.available;
-  const head = installed ? headline(data, age) : null;
-  const offsite = installed ? offsiteNotice(data) : null;
+  // TWO SEPARATE QUESTIONS, and conflating them hid the answer to the one that matters.
+  //
+  // `available` means only "this container can write a backup request" -- the drop-box
+  // exists and is writable. backups.py's own docstring says it says nothing about whether
+  // the nightly TIMER is installed. Gating the whole record on it meant a box whose timer
+  // runs perfectly, with a verified backup from four hours ago, rendered "nightly backups
+  // aren't set up on this box" and nothing else, the moment the drop-box was missing or
+  // its mode was wrong. A reviewer built that state: the record was there, readable, and
+  // the page hid it while contradicting it.
+  //
+  // So the RECORD is shown whenever there is one, and `available` gates only the button
+  // and what is said about pressing it.
+  const hasRecord = readable && data.phase !== null;
+  const canRequest = readable && data.available;
+  // The headline is shown whenever this page knows ANYTHING about backups on this box --
+  // either a run has happened, or the regime is installed and none has yet. headline()
+  // has a sentence for the second case ("no run has finished on this box"), and it is the
+  // right thing to say on a fresh install. The off-box notice needs an actual run to be
+  // about, so it waits for one.
+  const knowsSomething = hasRecord || canRequest;
+  const head = knowsSomething ? headline(data, age) : null;
+  const offsite = hasRecord ? offsiteNotice(data) : null;
 
   return (
     <div className="card">
       <h2>Backups</h2>
 
-      {readable && !data.available && (
+      {readable && !data.available && !hasRecord && (
         <div className="notice notice-warn">
           <strong>Nightly backups aren&rsquo;t set up on this box</strong>
           <div>
@@ -540,7 +563,20 @@ export function BackupsPanel() {
         </div>
       )}
 
-      {installed && head && (
+      {readable && !data.available && hasRecord && (
+        <div className="notice notice-warn">
+          <strong>Backups are running, but this page can&rsquo;t ask for one</strong>
+          <div>
+            The record below is real &mdash; something on the host is taking backups. What is
+            missing is the drop-box this page writes a request into, so{" "}
+            <em>Back up now</em> has nothing to write to. Re-run{" "}
+            <code>sudo ./scripts/install-updater.sh</code> on the host to create it;
+            the nightly timer is unaffected either way.
+          </div>
+        </div>
+      )}
+
+      {knowsSomething && head && (
         <>
           <div className={`notice notice-${head.tone}`}>
             <strong>{head.title}</strong>
@@ -634,7 +670,7 @@ export function BackupsPanel() {
           // the press -- and, more simply, asking for a backup before knowing whether
           // anything on the box can take one is a request with nowhere to go.
           disabled={
-            startBackup.isPending || status.isPending || busy || (readable && !data.available)
+            startBackup.isPending || status.isPending || busy || !canRequest
           }
         >
           {startBackup.isPending ? "Asking the host…" : "Back up now"}

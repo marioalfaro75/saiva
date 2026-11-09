@@ -162,14 +162,17 @@ describe("how far the copy actually got", () => {
     expect(await screen.findByText(/a copy is off this box/i)).toBeInTheDocument();
   });
 
-  it("accepts the value the host script writes for that state as well as the contract's name", async () => {
-    // scripts/backup.sh writes `ok` where the contract says `remote`. Both mean "a
-    // network filesystem, or a push command that succeeded", so neither may be rendered
-    // as a state the panel does not recognise.
+  it("does not treat `ok` as off-box, because the host does not write it", async () => {
+    // This panel accepted `ok` as a synonym for `remote` while scripts/backup.sh wrote it
+    // — which it did only because the final `status_set offsite "${worst:-ok}"` defaulted
+    // to the most reassuring value in the union, so a branch that forgot to record what
+    // happened said "copied off this box". The script was fixed and now declares its
+    // vocabulary; keeping `ok` here would mean the panel calls good news a value the host
+    // cannot produce. An `ok` from some future host is rendered as itself.
     show({ offsite: "ok" });
 
-    expect(await screen.findByText(/a copy is off this box/i)).toBeInTheDocument();
-    expect(screen.queryByText(/unrecognised state/i)).not.toBeInTheDocument();
+    expect(await screen.findByText(/unrecognised state/i)).toBeInTheDocument();
+    expect(screen.queryByText(/a copy is off this box/i)).not.toBeInTheDocument();
   });
 
   it("warns about the disk when the copy is on the same filesystem", async () => {
@@ -368,6 +371,40 @@ describe("pressing the button", () => {
 
     expect(await screen.findByText(/couldn.t ask the host to back up/i)).toBeInTheDocument();
     expect(screen.getByText(/nothing is running/i)).toBeInTheDocument();
+  });
+});
+
+describe("a record and the ability to ask for one are different questions", () => {
+  // `available` means only "this container can write a backup request". Gating the whole
+  // record on it meant a box whose timer runs perfectly, with a verified backup from four
+  // hours ago, rendered "nightly backups aren't set up on this box" and nothing else the
+  // moment the drop-box was missing or its mode was wrong -- the page hiding the answer
+  // while contradicting it. Found by an adversarial review.
+  it("shows a real record even when the drop-box this page writes to is missing", async () => {
+    const fourHoursAgo = new Date(Date.now() - 4 * 3_600_000).toISOString();
+    show({
+      available: false,
+      phase: "ok",
+      verified: true,
+      last_verified_at: fourHoursAgo,
+      last_success_at: fourHoursAgo,
+      dump_name: "saiva-20261109-023700-nightly.sql.gz",
+    });
+
+    expect(await screen.findByText(/last verified backup/i)).toBeInTheDocument();
+    expect(screen.queryByText(/aren.t set up on this box/i)).not.toBeInTheDocument();
+    // And it says what IS missing, rather than what is not.
+    expect(screen.getByText(/can.t ask for one/i)).toBeInTheDocument();
+    // Present but disabled, with the notice above it saying why. Hiding it would leave the
+    // owner wondering where it went; this says it cannot be pressed and what to run.
+    expect(screen.getByRole("button", { name: /back up now/i })).toBeDisabled();
+  });
+
+  it("still says nothing is set up when there is no record either", async () => {
+    show({ available: false, phase: null });
+
+    expect(await screen.findByText(/aren.t set up on this box/i)).toBeInTheDocument();
+    expect(screen.getByText(/install-updater\.sh/)).toBeInTheDocument();
   });
 });
 

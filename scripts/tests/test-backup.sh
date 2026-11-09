@@ -133,6 +133,24 @@ run_backup() {
   "$BACKUP" "$@"
 }
 
+# The same, against a database of the caller's choosing. run_backup pins POSTGRES_DB to
+# the scratch ledger, which is right for almost every case here -- but section 18a is
+# specifically about what happens when POSTGRES_DB names the WRONG database, and a prefixed
+# assignment cannot win against the one inside run_backup.
+run_backup_as() { # DBNAME [ARG...]
+  local db="$1"; shift
+  SAIVA_BACKUP_DIRECT=1 \
+  SAIVA_ENV_FILE="$WORK/no-such.env" \
+  SAIVA_AGENT_CONF="$WORK/no-such.conf" \
+  SAIVA_STATE_DIR="$STATE" \
+  SAIVA_BACKUP_DIR="$BACKUPS" \
+  POSTGRES_DB="$db" \
+  POSTGRES_USER="$PGUSER" \
+  SAIVA_BACKUP_COPY_TO="" \
+  SAIVA_BACKUP_COPY_CMD="" \
+  "$BACKUP" "$@"
+}
+
 # The same, with the off-box destination or command under the caller's control.
 run_backup_to() { # DEST CMD [ARG...]
   local dest="$1" cmd="$2"; shift 2
@@ -205,6 +223,15 @@ sf() { # FIELD -> its value, or <null> for a JSON null, or nothing if the field 
 listed_dumps() { ( cd "$BACKUPS" && ls -1 ./*.sql.gz 2>/dev/null | sed 's|^\./||' | sort ) || true; }
 nightly_dumps() { listed_dumps | grep -E "$NIGHTLY_RE" || true; }
 clear_backups() { find "$BACKUPS" -mindepth 1 -maxdepth 1 -exec rm -rf -- {} + 2>/dev/null || true; }
+
+# Plant a dump the way scripts/backup.sh writes one: owned by root, mode 0600. The prune
+# considers ONLY files with both of those properties -- see section 19a for the reason --
+# so a fixture that leaves the default mode is not standing in for a previous night's
+# dump, it is standing in for a file something else put there.
+plant_nightly() { # NAME [CONTENT]
+  printf '%s\n' "${2:-planted dump $1}" | gzip -c >"$BACKUPS/$1"
+  chmod 0600 "$BACKUPS/$1"
+}
 
 # The three things that must be true after every run, successful or not. The live database
 # is the household's ledger: a verification that reaches it, or a throwaway copy of it left
@@ -450,6 +477,7 @@ weak_check() { # PATH-TO-DUMP-GZ
 verify_only_on() { # STAMPED-NAME  < uncompressed SQL on stdin, or via $2 as a path
   clear_backups
   if [ -n "${2:-}" ]; then gzip -c "$2" >"$BACKUPS/$1"; else gzip -c >"$BACKUPS/$1"; fi
+  chmod 0600 "$BACKUPS/$1"
   VO_RC=0
   run_backup --verify-only >"$WORK/verify.out" 2>&1 </dev/null || VO_RC=$?
   read_status "$1"
@@ -650,14 +678,25 @@ assert_eq "last_success_at is still carried forward"  "$SEED_SUCCESS_AT"  "$(sf 
 assert_eq "last_verified_at is still carried forward" "$SEED_VERIFIED_AT" "$(sf last_verified_at)"
 assert_nothing_else_touched "pg_dump died part way"
 
-# --- 7. a run that cannot take the deploy lock is SKIPPED, not failed --------------------
+# --- 7. a run that cannot take the deploy lock LEAVES THE RECORD ALONE -------------------
 #
 # ONE lock, and it is the UPDATE's lock, so an update, a rollback and a backup can never
-# overlap. What matters here is the vocabulary: "the backup failed" and "no backup was taken
-# this time, and the newest verified one is N hours old" are different sentences, and
-# recording the first when the second is true is how a regime trains its owner to ignore it.
-# A skipped run therefore exits 0 and leaves the carried-forward timestamps alone -- so the
-# age of the newest VERIFIED backup keeps rising and does the shouting instead.
+# overlap.
+#
+# This section used to assert that such a run recorded `phase: skipped`, and an adversarial
+# review showed why that was wrong: every status_set is a read-modify-write of one shared
+# file, so writing anything at all goes over the record of the run that HOLDS the lock. A
+# press of "Back up now" during a nightly run replaced that run's run_id, started_at and
+# verdict with the press's own. The rule is now the same one scripts/lib/release.sh states
+# for acquire_lock: the record belongs to the run that is going, and a process that could
+# not start knows nothing about it.
+#
+# So: exit 0, say so on stdout, write nothing. What the owner sees is the run in flight
+# still being reported, and the age of the newest VERIFIED backup -- which a run that took
+# nothing must never reset, and which does the shouting if this keeps happening.
+PRE_LOCK_PHASE="$(sf phase)"
+PRE_LOCK_RUN_ID="$(sf run_id)"
+PRE_LOCK_STARTED="$(sf started_at)"
 ( flock 9; sleep 6 ) 9>"$STATE/deploy.lock" &
 LOCK_HOLDER=$!
 sleep 0.4
@@ -666,27 +705,30 @@ rc=0
 run_backup --trigger=button >"$WORK/button.out" 2>&1 </dev/null || rc=$?
 read_status "button press while the lock is held"
 assert_eq "a button press waits for nothing and exits 0" "0" "$rc"
-assert_eq "phase"     "skipped" "$(sf phase)"
-assert_eq "step"      "skipped" "$(sf step)"
-assert_eq "trigger"   "button"  "$(sf trigger)"
-assert_eq "exit_code" "0"       "$(sf exit_code)"
-assert_eq "verified is left unknown -- this run proved nothing" "<null>" "$(sf verified)"
-assert_eq "last_success_at is untouched by a skipped run"  "$SEED_SUCCESS_AT"  "$(sf last_success_at)"
-assert_eq "last_verified_at is untouched by a skipped run" "$SEED_VERIFIED_AT" "$(sf last_verified_at)"
+assert_eq "it does not overwrite the holder's phase"      "$PRE_LOCK_PHASE"   "$(sf phase)"
+assert_eq "nor the holder's run id"                       "$PRE_LOCK_RUN_ID"  "$(sf run_id)"
+assert_eq "nor when the holder started"                   "$PRE_LOCK_STARTED" "$(sf started_at)"
+assert_eq "verified is left as it was -- this run proved nothing" "<null>" "$(sf verified)"
+assert_eq "last_success_at is untouched"  "$SEED_SUCCESS_AT"  "$(sf last_success_at)"
+assert_eq "last_verified_at is untouched" "$SEED_VERIFIED_AT" "$(sf last_verified_at)"
+case "$(cat "$WORK/button.out")" in
+  *"holds the lock"*) ok "and it says on stdout why nothing was taken" ;;
+  *) bad "a press that took nothing said nothing"; note "got: $(cat "$WORK/button.out")" ;;
+esac
 
 rc=0
 SAIVA_BACKUP_LOCK_WAIT=1 run_backup >"$WORK/timer.out" 2>&1 </dev/null || rc=$?
 read_status "timer run that waited and gave up"
 assert_eq "a timer run that waits and gives up also exits 0" "0" "$rc"
-assert_eq "phase" "skipped" "$(sf phase)"
+assert_eq "and leaves the record alone too" "$PRE_LOCK_RUN_ID" "$(sf run_id)"
 assert_eq "last_verified_at is still untouched" "$SEED_VERIFIED_AT" "$(sf last_verified_at)"
-if grep -qi 'verified' "$WORK/timer.out" || printf '%s' "$(sf message)" | grep -qi 'verified'; then
+if grep -qi 'verified' "$WORK/timer.out"; then
   ok "and it points at the number that does matter: the age of the newest verified backup"
 else
-  bad "a skipped run does not say what the owner should watch instead"
+  bad "a run that took nothing does not say what the owner should watch instead"
 fi
 wait "$LOCK_HOLDER" 2>/dev/null || true
-assert_nothing_else_touched "skipped runs"
+assert_nothing_else_touched "runs that could not take the lock"
 
 # --- 8. retention: the oldest go, the newest never, and only what this script wrote ------
 #
@@ -697,7 +739,7 @@ assert_nothing_else_touched "skipped runs"
 # dumps survive alongside the new one, and the four oldest are gone.
 clear_backups
 for day in 01 02 03 04 05 06 07 08; do
-  printf 'planted nightly %s\n' "$day" | gzip -c >"$BACKUPS/saiva-202603${day}-010101-nightly.sql.gz"
+  plant_nightly "saiva-202603${day}-010101-nightly.sql.gz"
 done
 # Never pruned, however old. This script may remove what it created and may not remove what
 # the api's pre-migration dump or restore-backup.sh's safety dump created -- their count is
@@ -736,8 +778,8 @@ assert_eq "the 2020 prerestore dump is untouched too" "1" \
 # `docker cp`. keep=1 so that everything prunable is pruned and there is nowhere for a
 # survivor to hide.
 clear_backups
-printf 'planted nightly A\n' | gzip -c >"$BACKUPS/saiva-20260501-010101-nightly.sql.gz"
-printf 'planted nightly B\n' | gzip -c >"$BACKUPS/saiva-20260502-020202-nightly.sql.gz"
+plant_nightly "saiva-20260501-010101-nightly.sql.gz" "planted nightly A"
+plant_nightly "saiva-20260502-020202-nightly.sql.gz" "planted nightly B"
 printf 'these are my notes, not a dump\n' >"$BACKUPS/notes.sql.gz"
 printf 'wrong shape of name\n'            >"$BACKUPS/saiva-bad-name-nightly.sql.gz"
 printf 'PRECIOUS, and not in the dumps directory\n' >"$OUTSIDE/precious.txt"
@@ -982,17 +1024,353 @@ assert_eq "no saiva_verify_% database survives the whole suite" "0" "$(verify_db
 assert_eq "the live ledger is exactly as it started" "$LIVE_ROWS" "$(q 'select count(*) from transactions')"
 assert_eq "and its schema era is untouched" "0003" "$(q 'select version_num from alembic_version')"
 
-# One thing this suite measured and does not assert on, recorded here rather than left for
-# someone to rediscover: every run that has an off-box destination configured leaves its
-# staged host-side copy of the dump behind in the state directory as `.offsite.<pid>`,
-# because stage_dump_on_host sets STAGED inside a command substitution -- a subshell -- so
-# remove_staged in the parent never sees it. Mode 0600, so it is not a disclosure, but it is
-# one dump-sized file per run under a new name every time. Not asserted because fixing it
-# belongs to scripts/backup.sh, not to its test.
-STAGED_LEFT="$(find "$STATE" -maxdepth 1 -name '.offsite.*' | wc -l)"
-[ "$STAGED_LEFT" -eq 0 ] \
-  && note "staged off-box copies left in the state directory: none" \
-  || note "staged off-box copies left in the state directory: ${STAGED_LEFT} (see the comment above)"
+# This suite found the leak and it is now fixed, so it is asserted rather than noted: every
+# run with an off-box destination used to leave its staged host-side copy of the dump in
+# the state directory as `.offsite.<pid>`, because stage_dump_on_host set STAGED inside a
+# command substitution -- a subshell -- so remove_staged in the parent never saw it. Mode
+# 0600, so not a disclosure, but one dump-sized copy of the whole ledger per run,
+# accumulating on the same filesystem as the database.
+assert_eq "no staged off-box copy is left in the state directory" \
+  "0" "$(find "$STATE" -maxdepth 1 -name '.offsite.*' | wc -l)"
+
+
+# ==========================================================================================
+# 18. What an adversarial review of this regime found, each case now pinned
+# ==========================================================================================
+#
+# Five findings, four of them reproduced by a reviewer against this script rather than
+# reasoned about. Each is here because it was a way for the regime to be broken and report
+# itself fine, which is the one failure the whole design exists to prevent.
+
+clear_backups
+rc=0
+
+# 18a. BLOCKING. The live-aggregate check was described as catching "a dump of the WRONG
+# database", and it could not: the dump comes from $DB and the aggregate counts $DB, so the
+# two always agree. Point POSTGRES_DB at a database with no tables and both read zero -- a
+# 396-byte dump of nothing came back `verified: true`, every night, while the retention
+# retired the real dumps behind it. The structural check (`households` present, a schema
+# revision present) is what answers "is this a dump of Saiva at all".
+psql -qc "DROP DATABASE IF EXISTS \"${TESTDB}_empty\" WITH (FORCE)" -d postgres >/dev/null
+psql -qc "CREATE DATABASE \"${TESTDB}_empty\"" -d postgres >/dev/null
+rc=0
+run_backup_as "${TESTDB}_empty" >"$WORK/wrongdb.out" 2>&1 </dev/null || rc=$?
+read_status "a dump of an empty database"
+assert_eq "18a a dump of a database with no Saiva tables fails" "1" "$rc"
+assert_eq "18a and is NOT recorded as verified" "false" "$(sf verified)"
+assert_eq "18a phase" "failed" "$(sf phase)"
+case "$(sf verify_message)" in
+  *households*) ok "18a the message names the missing table and the database it read" ;;
+  *) bad "18a the message does not name what made it not a Saiva dump"
+     note "got: $(sf verify_message)" ;;
+esac
+psql -qc "DROP DATABASE IF EXISTS \"${TESTDB}_empty\" WITH (FORCE)" -d postgres >/dev/null
+
+# 18b. The compounding harm, and the guard against it. A regime that keeps failing must not
+# be able to delete its way to having nothing: fourteen bad nights would otherwise retire
+# the last restorable dump one night at a time, each run doing exactly what it was
+# configured to do.
+clear_backups
+for d in 01 02 03 04 05; do plant_nightly "saiva-202601${d}-000000-nightly.sql.gz"; done
+rc=0
+SAIVA_BACKUP_KEEP_NIGHTLY=2 run_backup >/dev/null 2>&1 </dev/null || rc=$?
+assert_eq "18b a good run prunes to policy as usual" "0" "$rc"
+psql -qc "DROP DATABASE IF EXISTS \"${TESTDB}_empty\" WITH (FORCE)" -d postgres >/dev/null
+psql -qc "CREATE DATABASE \"${TESTDB}_empty\"" -d postgres >/dev/null
+rc=0
+SAIVA_BACKUP_KEEP_NIGHTLY=2 run_backup_as "${TESTDB}_empty" >/dev/null 2>&1 </dev/null || rc=$?
+BEFORE_BAD="$(nightly_dumps | wc -l)"
+for _ in 1 2 3; do
+  SAIVA_BACKUP_KEEP_NIGHTLY=2 run_backup_as "${TESTDB}_empty" >/dev/null 2>&1 </dev/null || true
+done
+AFTER_BAD="$(nightly_dumps | wc -l)"
+if [ "$AFTER_BAD" -ge "$BEFORE_BAD" ]; then
+  ok "18b three more failing runs deleted nothing (${BEFORE_BAD} -> ${AFTER_BAD} dumps)"
+else
+  bad "18b a failing run pruned: ${BEFORE_BAD} dumps became ${AFTER_BAD}"
+  note "while verification is failing nothing may be retired, however far past the retention"
+fi
+rc=0
+SAIVA_BACKUP_KEEP_NIGHTLY=2 run_backup >/dev/null 2>&1 </dev/null || rc=$?
+assert_eq "18b and a good run re-enables the policy" "0" "$rc"
+assert_eq "18b back to the retention it was told" "2" "$(nightly_dumps | wc -l)"
+psql -qc "DROP DATABASE IF EXISTS \"${TESTDB}_empty\" WITH (FORCE)" -d postgres >/dev/null
+
+# 18c. SERIOUS. `last_verified_at` is when the DUMP WAS TAKEN, not when the verification
+# ran. The panel's one headline is derived from it, so taking the clock meant re-verifying
+# a forty-day-old dump moved the headline to "Last verified backup: 0 hours ago" -- a true
+# statement about the verification presented as a claim about the backup.
+clear_backups
+pg_dump -d "$TESTDB" --no-owner --no-privileges | gzip -c \
+  >"$BACKUPS/saiva-20260930-030000-nightly.sql.gz"
+rc=0
+run_backup --verify-only >/dev/null 2>&1 </dev/null || rc=$?
+read_status "re-verifying an old dump"
+assert_eq "18c re-verifying an old dump succeeds" "0" "$rc"
+assert_eq "18c last_verified_at is the DUMP's stamp, not the clock" \
+  "2026-09-30T03:00:00Z" "$(sf last_verified_at)"
+case "$(sf last_success_at)" in
+  2026-09-30*) bad "18c last_success_at took the dump's stamp; it is when the RUN finished" ;;
+  "") bad "18c last_success_at was not set" ;;
+  *) ok "18c while last_success_at is when the run finished = $(sf last_success_at)" ;;
+esac
+
+# 18d. A data row can frame a COPY header. Two text columns holding `COPY public.notes (q`
+# and `) FROM stdin;` emit one physical line that matched the header pattern, reset the row
+# counter mid-block and failed verification on a perfectly restorable dump.
+psql -q -d "$TESTDB" >/dev/null <<'SQL'
+DROP TABLE IF EXISTS copy_decoy;
+CREATE TABLE copy_decoy (a text, b text);
+INSERT INTO copy_decoy VALUES ('COPY public.copy_decoy (q', ') FROM stdin;'), ('ordinary', 'row');
+SQL
+clear_backups
+rc=0
+run_backup >/dev/null 2>&1 </dev/null || rc=$?
+read_status "a row that frames a COPY header"
+assert_eq "18d a dump whose DATA frames a COPY header still verifies" "0" "$rc"
+assert_eq "18d and is recorded as verified" "true" "$(sf verified)"
+
+# 18e. The two sides of the row-count comparison keyed tables differently: the dump's side
+# took pg_dump's `schema.table` verbatim, the database's side synthesised `'public.' ||
+# relname`. Saiva has no non-public schema and no quoted identifier today, so the symptom
+# would have been the first migration to add one making every nightly backup fail
+# verification, every night, with a message about row counts and nothing about the cause.
+psql -q -d "$TESTDB" >/dev/null <<'SQL'
+CREATE SCHEMA IF NOT EXISTS review_audit;
+CREATE TABLE IF NOT EXISTS review_audit.events (id serial primary key, note text);
+INSERT INTO review_audit.events (note) SELECT 'e' || g FROM generate_series(1, 7) g;
+CREATE TABLE IF NOT EXISTS "MixedCase Table" (id serial primary key, v int);
+INSERT INTO "MixedCase Table" (v) VALUES (1), (2);
+SQL
+clear_backups
+rc=0
+run_backup >/dev/null 2>&1 </dev/null || rc=$?
+read_status "a non-public schema and a quoted name"
+assert_eq "18e a table outside public, and one needing quotes, still verify" "0" "$rc"
+assert_eq "18e and are recorded as verified" "true" "$(sf verified)"
+case "$(sf verify_message)" in
+  *" rows across "*) ok "18e and their rows are counted = $(sf rows_checked)" ;;
+  *) bad "18e the verification said something unexpected: $(sf verify_message)" ;;
+esac
+psql -q -d "$TESTDB" >/dev/null <<'SQL'
+DROP SCHEMA IF EXISTS review_audit CASCADE;
+DROP TABLE IF EXISTS "MixedCase Table";
+DROP TABLE IF EXISTS copy_decoy;
+SQL
+
+# 18f. BLOCKING. A run that cannot take the lock used to write "skipped" over the record of
+# the run that HOLDS it -- every status_set is a read-modify-write of one shared file, so a
+# press of "Back up now" during a nightly run replaced that run's run_id, started_at and
+# verdict. And because backup_begin ran before the lock, a run that went no further had
+# already erased "a dump was taken but it could not be restored": the page went from red to
+# a shrug while the carried-forward age still looked fine.
+clear_backups
+pg_dump -d "$TESTDB" --no-owner --no-privileges | gzip -c | head -c 900 \
+  >"$BACKUPS/saiva-20261101-010101-nightly.sql.gz"
+rc=0
+run_backup --verify-only >/dev/null 2>&1 </dev/null || rc=$?
+read_status "a dump that will not restore"
+assert_eq "18f a truncated dump is recorded as not verified" "false" "$(sf verified)"
+VERDICT_RUN_ID="$(sf run_id)"
+VERDICT_STARTED="$(sf started_at)"
+( flock 9; sleep 6 ) 9>"$STATE/deploy.lock" &
+LOCK_HOLDER=$!
+sleep 1
+rc=0
+run_backup --trigger button >"$WORK/locked.out" 2>&1 </dev/null || rc=$?
+assert_eq "18f a press while the lock is held exits 0 without taking anything" "0" "$rc"
+read_status "after a press that could not get the lock"
+assert_eq "18f the verdict is untouched" "false" "$(sf verified)"
+assert_eq "18f phase is untouched" "failed" "$(sf phase)"
+assert_eq "18f and so is the run it belongs to" "$VERDICT_RUN_ID" "$(sf run_id)"
+assert_eq "18f and when that run started" "$VERDICT_STARTED" "$(sf started_at)"
+wait "$LOCK_HOLDER" 2>/dev/null || true
+
+# 18g. A signal is not an exit status. systemd's TimeoutStartSec, a host shutdown mid-dump
+# or a Ctrl-C terminate the shell without any command having failed, so $? at the top of
+# the EXIT trap was 0 -- and the record said "stopped without finishing (exit status 0)"
+# beside phase failed, which reads as a contradiction.
+clear_backups
+: >"$STATE/backup-status.kv"
+run_backup >/dev/null 2>&1 </dev/null &
+KILL_ME=$!
+# Wait for the run to be doing real work, then terminate it the way systemd would.
+for _ in $(seq 1 60); do
+  [ -s "$STATE/backup-status.kv" ] && grep -q '^step' "$STATE/backup-status.kv" && break
+  sleep 0.2
+done
+kill -TERM "$KILL_ME" 2>/dev/null || true
+wait "$KILL_ME" 2>/dev/null || true
+read_status "a run terminated by a signal"
+assert_eq "18g a terminated run is recorded as failed" "failed" "$(sf phase)"
+case "$(sf exit_code)" in
+  0) bad "18g a signal was recorded as exit_code 0, beside phase failed"
+     note "a status nobody can act on: nothing failed, and yet it failed" ;;
+  "" ) ok "18g and its exit code is left unknown rather than claimed as 0" ;;
+  *) ok "18g and carries the real status = $(sf exit_code)" ;;
+esac
+case "$(sf message)" in
+  *"exit status 0"*) bad "18g the message claims exit status 0 for a terminated run" ;;
+  *) ok "18g and the message does not claim a status it does not have" ;;
+esac
+
+# 18h. `--trigger` with its value missing consumed the argument list, the loop's own shift
+# then failed under set -e, and the script died before the dispatch -- exit 1, nothing on
+# stdout, nothing on stderr, no record. A cron line with a typo in it would have looked
+# like a backup regime that simply never ran.
+rc=0
+TRIGGER_OUT="$(run_backup --trigger 2>&1 </dev/null)" || rc=$?
+assert_eq "18h --trigger with no value exits 2, like any other usage error" "2" "$rc"
+case "$TRIGGER_OUT" in
+  *"--trigger needs a value"*) ok "18h and says what it needs" ;;
+  *) bad "18h it exited without saying why"; note "got: ${TRIGGER_OUT:-<nothing at all>}" ;;
+esac
+
+# ==========================================================================================
+# 19. What a second adversarial review found: the prune's trust, and what a kill leaves
+# ==========================================================================================
+
+# 19a. BLOCKING. The prune decided what to keep by sorting FILENAMES in a directory the api
+# container has read-write -- docker-compose.prod.yml mounts db_backups into api so the
+# pre-migration dump can land there. Three files named `saiva-99999999-999999-nightly.sql.gz`
+# therefore sorted newest, filled the keep window, and root deleted every real dump. The
+# candidate list is now restricted to files root itself wrote (uid 0, mode 600), neither of
+# which anything in a container can forge.
+clear_backups
+rc=0
+run_backup >/dev/null 2>&1 </dev/null || rc=$?
+read_status "a verified dump to protect"
+assert_eq "19a a real verified dump to protect" "0" "$rc"
+REAL_DUMP="$(sf dump_name)"
+[ -n "$REAL_DUMP" ] || bad "19a the fixture produced no dump to protect"
+# What a compromised api container could write: uid != 0, and not mode 600.
+for n in 1 2 3; do
+  printf 'not a dump, planted by something that is not root\n' | gzip -c \
+    >"$BACKUPS/saiva-99999999-99999${n}-nightly.sql.gz"
+  chmod 0644 "$BACKUPS/saiva-99999999-99999${n}-nightly.sql.gz"
+done
+rc=0
+SAIVA_BACKUP_KEEP_NIGHTLY=2 run_backup >/dev/null 2>&1 </dev/null || rc=$?
+assert_eq "19a the run after the plant still succeeds" "0" "$rc"
+if [ -f "$BACKUPS/$REAL_DUMP" ]; then
+  ok "19a a planted newest-sorting name did not get the real dump deleted"
+else
+  bad "19a planted filenames made the prune delete a verified dump"
+  note "the candidate list must be restricted to files root wrote: -user 0 -perm 600"
+fi
+for n in 1 2 3; do
+  [ -f "$BACKUPS/saiva-99999999-99999${n}-nightly.sql.gz" ] \
+    || bad "19a the prune deleted a file it did not write (the planted one)"
+done
+ok "19a and the planted files are left for the listing to report, not tidied away"
+
+# 19b. SIGKILL runs no trap. The OOM killer, `systemctl stop` past TimeoutStopSec and a
+# power cut all deliver one, and what was left behind was a complete copy of the ledger in
+# a throwaway database and another in a staged file, which nothing would ever reclaim --
+# the next run makes its own under a different name. Every run now sweeps first.
+clear_backups
+psql -qc "CREATE DATABASE \"saiva_verify_19700101000000_1\"" -d postgres >/dev/null 2>&1 || true
+install -d -m 0700 "$STATE/staging"
+: >"$STATE/staging/.offsite.999999"
+rc=0
+run_backup >"$WORK/sweep.out" 2>&1 </dev/null || rc=$?
+assert_eq "19b the run succeeds with orphans to clear" "0" "$rc"
+assert_eq "19b an abandoned verification database from an earlier run is dropped" \
+  "0" "$(psql -At -d postgres -c "select count(*) from pg_database where datname = 'saiva_verify_19700101000000_1'")"
+assert_eq "19b and an abandoned staged copy of the ledger is removed" \
+  "0" "$(find "$STATE/staging" -maxdepth 1 -name '.offsite.*' 2>/dev/null | wc -l)"
+case "$(cat "$WORK/sweep.out")" in
+  *"abandoned"*) ok "19b and it says what it cleared, rather than doing it silently" ;;
+  *) bad "19b the sweep was silent"; note "a dropped database is worth a line in the log" ;;
+esac
+
+# 19c. The staged copy is a complete plaintext ledger. $STATE is 0755 and bind-mounted into
+# the caddy container, which runs as root in its own image -- so a 0600 root file sitting
+# directly in $STATE is readable from inside it. It lives in a 0700 subdirectory now, the
+# same treatment records/ already gets.
+assert_eq "19c the staging directory is 0700" "700" "$(stat -c '%a' "$STATE/staging" 2>/dev/null || echo missing)"
+
+# 19d. SERIOUS. `cp` writes THROUGH a symlink at the destination, and the chmod that
+# follows follows it too: root would write the household ledger wherever the link points
+# and relax that file to 0600. The destination is root-configured, but agent.conf
+# recommends exactly the places other parties can write, and a dump name is a stamp anyone
+# can predict a second at a time.
+OFFBOX="$WORK/offbox-link"
+mkdir -p "$OFFBOX"
+printf 'IMPORTANT HOST FILE - do not clobber\n' >"$WORK/offbox-victim"
+VICTIM_SUM="$(md5sum <"$WORK/offbox-victim")"
+clear_backups
+rc=0
+run_backup >/dev/null 2>&1 </dev/null || rc=$?
+LINK_TARGET_NAME="$(sf dump_name)"
+clear_backups
+# Re-take the dump with the destination configured, having planted a link under the name
+# the next dump will have. The stamp is the second it is taken, so the test plants a link
+# for every second in the next minute -- which is what an attacker able to write the
+# destination would do.
+for off in $(seq 0 90); do
+  n="saiva-$(date -u -d "+${off} seconds" +%Y%m%d-%H%M%S)-nightly.sql.gz"
+  ln -sfn "$WORK/offbox-victim" "$OFFBOX/$n"
+done
+rc=0
+run_backup_to "$OFFBOX" "" >"$WORK/link.out" 2>&1 </dev/null || rc=$?
+read_status "an off-box destination holding a planted symlink"
+assert_eq "19d the victim outside the destination is untouched" \
+  "$VICTIM_SUM" "$(md5sum <"$WORK/offbox-victim")"
+assert_eq "19d the backup itself still succeeds -- the dump is verified and local" "0" "$rc"
+assert_eq "19d and the copy is recorded as failed, not as success" "failed" "$(sf offsite)"
+case "$(sf offsite_message)" in
+  *symlink*) ok "19d and it says a link is why nothing was written" ;;
+  *) bad "19d the refusal does not name the cause"; note "got: $(sf offsite_message)" ;;
+esac
+rm -rf "$OFFBOX"
+
+# 19e. A run that fails verification asserted "nothing was pruned" in its own message, and
+# the pre-dump prune had already run. Say what the record says instead.
+case "$(printf '%s' "$LINK_TARGET_NAME")" in
+  saiva-*) ok "19e (a dump was taken for 19d to work with = $LINK_TARGET_NAME)" ;;
+  *) bad "19e the 19d fixture did not produce a dump" ;;
+esac
+psql -qc "DROP DATABASE IF EXISTS \"${TESTDB}_e\" WITH (FORCE)" -d postgres >/dev/null
+psql -qc "CREATE DATABASE \"${TESTDB}_e\"" -d postgres >/dev/null
+clear_backups
+for d in 01 02 03 04; do
+  plant_nightly "saiva-202602${d}-000000-nightly.sql.gz"
+  chmod 0600 "$BACKUPS/saiva-202602${d}-000000-nightly.sql.gz"
+done
+rc=0
+SAIVA_BACKUP_KEEP_NIGHTLY=2 run_backup_as "${TESTDB}_e" >/dev/null 2>&1 </dev/null || rc=$?
+read_status "a failed verification after a prune"
+assert_eq "19e a dump of a non-Saiva database fails" "1" "$rc"
+case "$(sf message)" in
+  *"nothing was pruned"*)
+    bad "19e the failure says nothing was pruned, and the pre-dump prune had already run" ;;
+  *"already been retired"*|*"nothing was retired before it"*)
+    ok "19e the failure reports the retirement that actually happened" ;;
+  *) bad "19e the failure says nothing about the prune either way"
+     note "got: $(sf message)" ;;
+esac
+psql -qc "DROP DATABASE IF EXISTS \"${TESTDB}_e\" WITH (FORCE)" -d postgres >/dev/null
+
+# 19f. BLOCKING. `--verify-only` copies nothing, so leaving the off-box group in place put
+# "a copy of it left this machine" beside a re-verified dump that had never been copied
+# anywhere: the verdict was about one dump and the headline about another.
+clear_backups
+rc=0
+run_backup_to "$WORK/offbox-ok" "" >/dev/null 2>&1 </dev/null || rc=$?
+mkdir -p "$WORK/offbox-ok"
+read_status "a run that did copy off-box"
+OFFSITE_AFTER_COPY="$(sf offsite)"
+rc=0
+run_backup --verify-only >/dev/null 2>&1 </dev/null || rc=$?
+read_status "a --verify-only after a run that copied"
+assert_eq "19f --verify-only succeeds" "0" "$rc"
+assert_eq "19f and leaves no off-box verdict about a dump it never copied" "<null>" "$(sf offsite)"
+case "$OFFSITE_AFTER_COPY" in
+  "<null>"|"") note "19f (the preceding run recorded no off-box state, so this is weak)" ;;
+  *) ok "19f (the preceding run had recorded offsite=${OFFSITE_AFTER_COPY})" ;;
+esac
+rm -rf "$WORK/offbox-ok"
 
 # --- summary -----------------------------------------------------------------------------
 
