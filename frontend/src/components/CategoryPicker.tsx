@@ -249,7 +249,23 @@ export function CategoryPicker({
     if (opt.id !== value) onChange(opt.id);
   };
 
+  // Leaving the field -- Tab, or a click anywhere else, such as on Apply -- after typing
+  // keeps the match that was highlighted, as the ARIA pattern specifies and as a native
+  // select's type-ahead did by changing its value as you typed. Without this, "type fuel,
+  // click Apply" silently saved the OLD category: in the categorise dialog with "all from
+  // this merchant" chosen, to every transaction from that merchant, and into a rule.
+  // Opening the list and leaving without typing changes nothing; Escape backs out.
+  const settle = () => {
+    if (open && query.trim() !== "" && activeIndex >= 0) choose(flat[activeIndex]);
+    else close();
+  };
+
   const onKeyDown = (e: KeyboardEvent<HTMLInputElement>) => {
+    // A key that finishes an IME composition (Japanese, Chinese, Korean, an Android
+    // keyboard) belongs to the composition. Enter there confirms the word typed; acting
+    // on it here would pick the first match -- and on the transactions table, save it.
+    // Safari reports the confirming keydown after compositionend, as keyCode 229.
+    if (e.nativeEvent.isComposing || e.keyCode === 229) return;
     switch (e.key) {
       case "ArrowDown":
       case "ArrowUp": {
@@ -284,24 +300,34 @@ export function CategoryPicker({
         close();
         return;
       case "Tab":
-        if (open) close();
+        // Not prevented: focus moves on as usual, with the highlighted match kept.
+        if (open) settle();
         return;
     }
   };
 
-  // Keep the floating list with its input through window resizes and through any
-  // scrolling container moving the input. Placed first when it opens, by showList.
+  // Keep the floating list with its input while it is open. Checked every frame rather
+  // than on scroll and resize alone: a notice disappearing above the field, or a row
+  // refetched away, moves the input without either event, and the list was left behind
+  // over the wrong row. One picker is open at a time, and nothing is set unless the
+  // placement actually changed. Placed first when it opens, by showList.
   useEffect(() => {
     if (!open) return;
+    let frame = 0;
+    let last = "";
     const follow = () => {
-      if (inputRef.current) setPlace(placeUnder(inputRef.current));
+      if (inputRef.current) {
+        const next = placeUnder(inputRef.current);
+        const key = JSON.stringify(next);
+        if (key !== last) {
+          last = key;
+          setPlace(next);
+        }
+      }
+      frame = window.requestAnimationFrame(follow);
     };
-    window.addEventListener("resize", follow);
-    window.addEventListener("scroll", follow, true);
-    return () => {
-      window.removeEventListener("resize", follow);
-      window.removeEventListener("scroll", follow, true);
-    };
+    frame = window.requestAnimationFrame(follow);
+    return () => window.cancelAnimationFrame(frame);
   }, [open]);
 
   const activeDomId = open && activeIndex >= 0 ? optionDomId(activeIndex) : undefined;
@@ -325,7 +351,7 @@ export function CategoryPicker({
     >
       {flat.length === 0 && (
         <div className="catpick-none" role="presentation">
-          No category matches “{query.trim()}”
+          {query.trim() ? `No category matches “${query.trim()}”` : "No categories to choose from"}
         </div>
       )}
       {shown.map((section) => {
@@ -395,7 +421,7 @@ export function CategoryPicker({
         }}
         onBlur={() => {
           setFocused(false);
-          close();
+          settle();
         }}
         onClick={() => {
           if (!open) openList();

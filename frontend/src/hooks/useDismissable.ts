@@ -1,4 +1,4 @@
-import { type RefObject, useEffect, useRef } from "react";
+import { type RefObject, useEffect, useEffectEvent, useRef } from "react";
 
 const FOCUSABLE =
   'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), ' +
@@ -23,6 +23,12 @@ export function useDismissable<T extends HTMLElement>(
 ): RefObject<T | null> {
   const ref = useRef<T>(null);
   const returnTo = useRef<Element | null>(null);
+  // The latest onClose, without making the effect below depend on its identity. Callers
+  // pass a fresh arrow on every render, and depending on it re-ran the effect on every
+  // re-render of the page behind the dialog -- each run sending focus back out and in
+  // again. That blurred whatever field was in use, which for a category picker meant
+  // its list closed and the letters typed into it were lost.
+  const close = useEffectEvent(onClose);
 
   useEffect(() => {
     if (!open) return;
@@ -40,7 +46,7 @@ export function useDismissable<T extends HTMLElement>(
       if (e.key === "Escape" && isOpenCombobox(e.target)) return;
       if (e.key === "Escape") {
         e.stopPropagation();
-        onClose();
+        close();
         return;
       }
       if (e.key !== "Tab" || !panel) return;
@@ -66,10 +72,16 @@ export function useDismissable<T extends HTMLElement>(
       (panel.contains(target as Node) ||
         !!(target as Element | null)?.closest?.("[data-floating-layer]"));
     const onPointerDown = (e: PointerEvent) => {
+      // A press outside while a picker's list is open closes that list, not the dialog --
+      // the same order Escape follows, and what a native select's popup did with it.
+      if (isOpenCombobox(document.activeElement)) {
+        startedOutside = false;
+        return;
+      }
       startedOutside = !!panel && !inside(e.target);
     };
     const onPointerUp = (e: PointerEvent) => {
-      if (startedOutside && panel && !inside(e.target)) onClose();
+      if (startedOutside && panel && !inside(e.target)) close();
       startedOutside = false;
     };
 
@@ -88,7 +100,7 @@ export function useDismissable<T extends HTMLElement>(
       // Send focus back where it came from, so dismissing doesn't lose the user's place.
       (returnTo.current as HTMLElement | null)?.focus?.();
     };
-  }, [open, onClose]);
+  }, [open]);
 
   return ref;
 }

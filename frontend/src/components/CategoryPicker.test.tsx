@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, within } from "@testing-library/react";
+import { act, fireEvent, render, screen, within } from "@testing-library/react";
 import { useState } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -225,18 +225,30 @@ describe("the keyboard", () => {
     expect(field()).toHaveValue("Fuel");
   });
 
-  it("never submits the form it sits in when Enter is pressed", () => {
-    const onSubmit = vi.fn((e: { preventDefault: () => void }) => e.preventDefault());
-    render(
-      <form onSubmit={onSubmit}>
-        <Harness />
-      </form>,
-    );
+  it("never lets Enter reach the form it sits in, open or closed", () => {
+    // jsdom never submits a form on a synthetic keydown, so asserting onSubmit was not
+    // called proved nothing. What stops a real browser submitting is preventDefault on
+    // the keydown, and fireEvent reports that by returning false.
+    render(<Harness />);
     fireEvent.focus(field());
-    key("Enter");
-    key("Enter");
 
-    expect(onSubmit).not.toHaveBeenCalled();
+    expect(fireEvent.keyDown(field(), { key: "Enter" })).toBe(false);
+    expect(field()).toHaveAttribute("aria-expanded", "true");
+    expect(fireEvent.keyDown(field(), { key: "Enter" })).toBe(false);
+  });
+
+  it("leaves a key that finishes an IME composition to the composition", () => {
+    const onChange = vi.fn();
+    render(<Harness onChange={onChange} />);
+    fireEvent.focus(field());
+    type("groc");
+
+    // Enter confirming a composed word, as Chrome/Firefox and as Safari report it.
+    fireEvent.keyDown(field(), { key: "Enter", isComposing: true });
+    fireEvent.keyDown(field(), { key: "Enter", keyCode: 229 });
+
+    expect(onChange).not.toHaveBeenCalled();
+    expect(field()).toHaveAttribute("aria-expanded", "true");
   });
 
   it("does not report a change when the current choice is picked again", () => {
@@ -247,6 +259,102 @@ describe("the keyboard", () => {
     key("Enter");
 
     expect(onChange).not.toHaveBeenCalled();
+  });
+});
+
+describe("leaving the field", () => {
+  // The review's blocking finding. A native select's type-ahead changed its value as you
+  // typed, so "type, then Tab" or "type, then click Apply" worked. The first version of
+  // this picker threw the typed match away on both, and Apply saved the OLD category.
+  it("keeps the highlighted match when Tab moves on, and lets focus move", () => {
+    const onChange = vi.fn();
+    render(<Harness onChange={onChange} />);
+    fireEvent.focus(field());
+    type("fuel");
+
+    expect(fireEvent.keyDown(field(), { key: "Tab" })).toBe(true);
+    expect(onChange).toHaveBeenCalledWith(fuel.id);
+  });
+
+  it("keeps the highlighted match when a click elsewhere takes focus", () => {
+    const onChange = vi.fn();
+    render(<Harness onChange={onChange} />);
+    fireEvent.focus(field());
+    type("park");
+    fireEvent.blur(field());
+
+    expect(onChange).toHaveBeenCalledWith(parking.id);
+    expect(field()).toHaveValue("Parking");
+  });
+
+  it("changes nothing when the list was only opened, not typed into", () => {
+    const onChange = vi.fn();
+    render(<Harness initial={fuel.id} onChange={onChange} />);
+    fireEvent.click(field());
+    key("ArrowDown");
+    fireEvent.blur(field());
+
+    expect(onChange).not.toHaveBeenCalled();
+  });
+
+  it("changes nothing when what was typed matches nothing", () => {
+    const onChange = vi.fn();
+    render(<Harness initial={fuel.id} onChange={onChange} />);
+    fireEvent.focus(field());
+    type("zzz");
+    fireEvent.blur(field());
+
+    expect(onChange).not.toHaveBeenCalled();
+    expect(field()).toHaveValue("Fuel");
+  });
+
+  it("changes nothing after Escape, which is how to back out", () => {
+    const onChange = vi.fn();
+    render(<Harness initial={fuel.id} onChange={onChange} />);
+    fireEvent.focus(field());
+    type("park");
+    key("Escape");
+    fireEvent.blur(field());
+
+    expect(onChange).not.toHaveBeenCalled();
+  });
+});
+
+describe("an empty list", () => {
+  it("says what was not found when something was typed", () => {
+    render(<Harness />);
+    fireEvent.focus(field());
+    type("zzz");
+
+    expect(screen.getByText("No category matches “zzz”")).toBeInTheDocument();
+  });
+
+  it("does not claim a search failed when nothing was typed", () => {
+    render(<Harness selectable={() => false} />);
+    fireEvent.click(field());
+
+    expect(screen.getByText("No categories to choose from")).toBeInTheDocument();
+    expect(screen.queryByText(/no category matches/i)).not.toBeInTheDocument();
+  });
+});
+
+describe("staying with its field", () => {
+  it("moves with the field when the page shifts without scrolling", async () => {
+    // A notice disappearing above the field moves it with no scroll or resize event.
+    let top = 300;
+    vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockImplementation(
+      () => ({ top, bottom: top + 30, left: 40, right: 240, width: 200, height: 30, x: 40, y: top, toJSON: () => ({}) }) as DOMRect,
+    );
+    const frame = () => act(() => new Promise((r) => window.requestAnimationFrame(() => r(null))));
+    render(<Harness />);
+    fireEvent.click(field());
+    await frame();
+    expect(screen.getByRole("listbox").style.top).toBe("334px");
+
+    top = 246;
+    await frame();
+    await frame();
+    expect(screen.getByRole("listbox").style.top).toBe("280px");
   });
 });
 
@@ -345,6 +453,58 @@ describe("inside a dialog", () => {
     expect(field()).toHaveAttribute("placeholder", "Parking");
     fireEvent.blur(field());
     expect(field()).toHaveValue("Parking");
+  });
+
+  it("a press outside while the list is open closes the list, not the dialog", () => {
+    const onClose = vi.fn();
+    render(<Dialog onClose={onClose} />);
+    fireEvent.click(field());
+
+    fireEvent.pointerDown(document.body);
+    fireEvent.blur(field());
+    fireEvent.pointerUp(document.body);
+    expect(onClose).not.toHaveBeenCalled();
+    expect(field()).toHaveAttribute("aria-expanded", "false");
+
+    fireEvent.pointerDown(document.body);
+    fireEvent.pointerUp(document.body);
+    expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
+  it("survives the page behind it re-rendering, with what was typed intact", () => {
+    // Callers pass a fresh onClose arrow each render. The dialog's effect used to depend
+    // on it, so every re-render sent focus out and back in: the list closed and the
+    // typed letters were erased -- or, now that leaving keeps the match, chosen.
+    //
+    // The dialog is opened from a focused button, as "More actions" is: that button is
+    // where the bounce sent focus. Without one, focus had nowhere to go and the bug hid.
+    function Page() {
+      const [tick, setTick] = useState(0);
+      const [shown, setShown] = useState(false);
+      return (
+        <>
+          <button type="button" onClick={() => setShown(true)}>
+            More actions
+          </button>
+          <button type="button" onClick={() => setTick(tick + 1)}>
+            Refresh {tick}
+          </button>
+          {shown && <Dialog onClose={() => {}} />}
+        </>
+      );
+    }
+    render(<Page />);
+    const opener = screen.getByRole("button", { name: "More actions" });
+    opener.focus();
+    fireEvent.click(opener);
+    expect(field()).toHaveFocus();
+    type("fu");
+    // fireEvent.click does not move focus, so these re-render the page and nothing else.
+    fireEvent.click(screen.getByRole("button", { name: /^Refresh/ }));
+    fireEvent.click(screen.getByRole("button", { name: /^Refresh/ }));
+
+    expect(field()).toHaveAttribute("aria-expanded", "true");
+    expect(field()).toHaveValue("fu");
   });
 
   it("a click genuinely outside still closes the dialog", () => {
