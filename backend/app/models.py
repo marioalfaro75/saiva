@@ -60,6 +60,10 @@ class Household(Base, TimestampMixin):
     children: Mapped[int] = mapped_column(Integer, default=0)
     income_band: Mapped[str | None] = mapped_column(String(32), nullable=True)
 
+    # When dbinit applied the household's rules to every transaction they may change:
+    # once, for rules made before rules took effect by themselves. See dbinit.
+    rules_applied_at: Mapped[dt.datetime | None] = mapped_column(DateTime, nullable=True)
+
     users: Mapped[list[User]] = relationship(back_populates="household")
 
 

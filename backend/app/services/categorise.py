@@ -318,6 +318,37 @@ def reapply_rules(
     return effect
 
 
+def apply_all_rules(db: Session, household_id: str) -> RuleEffect:
+    """File every transaction rules may change in its first matching rule's category.
+
+    reapply_rules keeps transactions in line with ONE rule as it changes; this brings
+    them in line with all of them at once. Needed once per household: before 0.17.5 a
+    rule only filled blanks, and only on "Apply now", so rules made then never filed the
+    transactions already there. Afterwards an import files by the same rules and every
+    rule change re-files what it reaches, so they stay in line.
+
+    Never touches what a person chose or locked, a transfer or part of a split, and
+    leaves alone a transaction no rule matches.
+    """
+    rules = ordered_rules(db, household_id)
+    effect = RuleEffect()
+    if not rules:
+        return effect
+    for t in _rule_scope(db, household_id):
+        if not rules_may_change(t):
+            continue
+        winner = _first_match(rules, t)
+        if winner is None:
+            continue
+        if t.category_id != winner.category_id:
+            effect.categorised += 1
+            t.category_id = winner.category_id
+            t.confidence = RULE_CONFIDENCE
+        elif t.confidence != RULE_CONFIDENCE:
+            t.confidence = RULE_CONFIDENCE
+    return effect
+
+
 # What a prospective rule would do to one transaction it matches.
 OUTCOMES = ("change", "same", "locked", "kept", "other_rule")
 

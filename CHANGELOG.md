@@ -6,6 +6,18 @@ All notable changes to Saiva are documented here. The project follows
 ## [Unreleased]
 
 
+## [0.17.6] — 2026-11-14
+
+Apply it with **Update now** in Settings.
+
+### Fixed
+
+- **Rules you made before 0.17.5 now apply to past transactions.** 0.17.5 made a rule
+  take effect when it's made or changed, but a rule made earlier never went back over
+  the transactions already there — and *Apply now* was gone, so nothing would. The
+  update applies all your rules once, on first start. Categories you chose yourself, or
+  locked, are left as they are.
+
 ## [0.17.5] — 2026-11-14
 
 Apply it with **Update now** in Settings.

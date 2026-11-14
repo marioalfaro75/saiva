@@ -36,7 +36,7 @@ import pytest
 from alembic import command
 from alembic.config import Config
 from alembic.script import ScriptDirectory
-from sqlalchemy import create_engine, inspect, text
+from sqlalchemy import create_engine, inspect, select, text
 from sqlalchemy.engine import Engine, make_url
 
 from app import db as app_db
@@ -615,3 +615,54 @@ def test_a_url_without_a_password_does_not_export_an_empty_pgpassword(
 
     assert captured, "subprocess.run was never called, so nothing was asserted"
     assert "PGPASSWORD" not in captured
+
+
+def test_a_start_applies_rules_made_before_rules_applied_themselves(cold_start: Engine) -> None:
+    """main() runs the one-time step that files what pre-0.17.5 rules never did.
+
+    The step itself is tested in test_rule_effects.py; this proves the code path the
+    container runs at every start reaches it -- and only once per household.
+    """
+    from sqlalchemy.orm import Session
+
+    from app import models
+
+    dbinit.main()
+    with Session(cold_start) as db:
+        household = models.Household(name="Smith Family")
+        db.add(household)
+        db.flush()
+        account = models.Account(household_id=household.id, name="Everyday", type="everyday")
+        loan = models.Category(
+            household_id=household.id, name="Car Loan repayments", kind="expense"
+        )
+        db.add_all([account, loan])
+        db.flush()
+        txn = models.Transaction(
+            household_id=household.id,
+            account_id=account.id,
+            txn_date=dt.date(2026, 5, 18),
+            amount_cents=-38946,
+            raw_description="By Authority To Vw",
+            source="import",
+        )
+        db.add(txn)
+        db.add(
+            models.CategorisationRule(
+                household_id=household.id,
+                match_type="contains",
+                pattern="By Authority To Vw",
+                category_id=loan.id,
+                priority=10,
+                source="user",
+            )
+        )
+        db.commit()
+        txn_id, loan_id = txn.id, loan.id
+
+    dbinit.main()
+
+    with Session(cold_start) as db:
+        filed = db.get(models.Transaction, txn_id)
+        assert filed is not None and filed.category_id == loan_id
+        assert db.execute(select(models.Household.rules_applied_at)).scalar_one() is not None
