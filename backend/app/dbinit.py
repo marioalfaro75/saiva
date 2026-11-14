@@ -32,11 +32,17 @@ from alembic import command
 from alembic.config import Config
 from sqlalchemy import and_, inspect, or_, select, update
 from sqlalchemy.engine import URL, Engine
+from sqlalchemy.orm import Session
 
 from .db import engine
-from .models import Category, Transaction
+from .models import Category, Household, Transaction
 from .schema_state import SchemaState, ahead_warning, alembic_config, read_schema_state
-from .services.categorise import ML_MAX_CONFIDENCE, PERSON_CONFIDENCE, UNTOUCHED
+from .services.categorise import (
+    ML_MAX_CONFIDENCE,
+    PERSON_CONFIDENCE,
+    UNTOUCHED,
+    apply_all_rules,
+)
 
 BASELINE_REVISION = "0001"
 
@@ -125,6 +131,7 @@ def main(db: Engine | None = None, cfg: Config | None = None) -> SchemaState:
     if not state.is_ahead:
         _record_category_keys(db)
         _mark_automatic_categories(db)
+        _apply_rules_once(db)
     return state
 
 
@@ -246,6 +253,54 @@ def _mark_automatic_categories(db: Engine) -> None:
                 # updated_at kept: this is bookkeeping, not a change anyone made.
                 .values(confidence=ML_MAX_CONFIDENCE, updated_at=Transaction.updated_at)
             )
+
+
+def _apply_rules_once(db: Engine) -> None:
+    """Apply each household's rules to its transactions, once.
+
+    Before 0.17.5 a rule only filled blanks, and only on "Apply now"; 0.17.5 made a rule
+    take effect when it is made or changed -- so a rule made before then never filed the
+    transactions already there, and nothing would ever make it. This does, once per
+    household, recorded in households.rules_applied_at. It runs after
+    _mark_automatic_categories, so old guesses already read as guesses; categories a
+    person chose or locked are never touched.
+
+    Skipped, like the others, when the column is not there yet.
+    """
+    inspector = inspect(db)
+    if "households" not in inspector.get_table_names():
+        return
+    if "rules_applied_at" not in {c["name"] for c in inspector.get_columns("households")}:
+        return
+    with Session(db) as session:
+        pending = (
+            session.execute(select(Household).where(Household.rules_applied_at.is_(None)))
+            .scalars()
+            .all()
+        )
+        for household in pending:
+            # Never a reason not to start: a failure leaves the household unmarked, to
+            # be tried again on the next start, and the app serves meanwhile -- rules
+            # still apply as they are made and changed.
+            try:
+                effect = apply_all_rules(session, household.id)
+                household.rules_applied_at = dt.datetime.utcnow()
+                session.commit()
+            except Exception as exc:  # noqa: BLE001 - logged, and retried next start
+                session.rollback()
+                print(
+                    f"Saiva: could not apply rules to earlier transactions ({exc!r}); "
+                    "will try again on the next start.",
+                    file=sys.stderr,
+                    flush=True,
+                )
+                continue
+            if effect.categorised:
+                print(
+                    f"Saiva: applied the household's rules to {effect.categorised} "
+                    "earlier transaction(s).",
+                    flush=True,
+                )
 
 
 def _migrate(db: Engine, cfg: Config, tables: set[str]) -> SchemaState:

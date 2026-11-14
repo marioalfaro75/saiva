@@ -18,6 +18,7 @@ from ..db import get_db
 from ..deps import get_current_user, optional_period, require_writer
 from ..services import periods, transfers
 from ..services.categorise import (
+    PERSON_CONFIDENCE,
     RuleDefinition,
     build_categoriser,
     matches,
@@ -379,7 +380,7 @@ def bulk_categorise(
     for t in rows:
         if payload.set_category:
             t.category_id = payload.category_id
-            t.confidence = 1.0 if payload.category_id else None
+            t.confidence = PERSON_CONFIDENCE
         if payload.lock is not None:
             t.category_locked = payload.lock
     db.commit()
@@ -444,14 +445,14 @@ def recategorise(
             raise HTTPException(status.HTTP_400_BAD_REQUEST, "Unknown category")
 
     t.category_id = payload.category_id
-    t.confidence = 1.0 if payload.category_id else None
+    t.confidence = PERSON_CONFIDENCE
     if payload.lock:
         t.category_locked = True
     updated = 1
 
     for s in _scope_targets(db, user.household_id, t, payload.scope, payload.pattern):
         s.category_id = payload.category_id
-        s.confidence = 1.0 if payload.category_id else None
+        s.confidence = PERSON_CONFIDENCE
         if payload.lock:
             s.category_locked = True
         updated += 1

@@ -13,17 +13,20 @@ from __future__ import annotations
 
 import datetime as dt
 
+import pytest
 from conftest import create_account
 from fastapi.testclient import TestClient
 from sqlalchemy import select
 
+from app import dbinit as dbinit_module
 from app import models
 from app.db import SessionLocal, engine
-from app.dbinit import _mark_automatic_categories
+from app.dbinit import _apply_rules_once, _mark_automatic_categories
 from app.services.categorise import (
     ML_MAX_CONFIDENCE,
     RULE_CONFIDENCE,
     Categoriser,
+    apply_all_rules,
     preview_rule,
 )
 from app.services.ml import NaiveBayesCategoriser
@@ -674,3 +677,256 @@ def test_a_rule_saved_before_patterns_were_checked_can_still_be_switched_off(
     assert patch({"category_id": takeaway}).status_code == 200
     assert patch({"pattern": "zebra(("}).status_code == 422
     assert patch({"pattern": "^zebra"}).status_code == 200
+
+
+# --------------------------------------------------------------------------------------
+# Rules made before rules took effect by themselves
+# --------------------------------------------------------------------------------------
+
+
+def _old_rule(pattern: str, category_id: str) -> str:
+    """A rule as a release before 0.17.5 saved it: the rule, and nothing filed by it."""
+    with SessionLocal() as db:
+        household = db.execute(select(models.Household.id)).scalar_one()
+        rule = models.CategorisationRule(
+            household_id=household,
+            match_type="contains",
+            pattern=pattern,
+            category_id=category_id,
+            priority=10,
+            source="user",
+        )
+        db.add(rule)
+        db.commit()
+        return rule.id
+
+
+def _not_yet_applied() -> None:
+    with SessionLocal() as db:
+        for household in db.execute(select(models.Household)).scalars():
+            household.rules_applied_at = None
+        db.commit()
+
+
+def test_a_rule_made_before_rules_applied_themselves_is_applied_once_on_update(
+    auth_client: TestClient,
+) -> None:
+    # Reported with a screenshot: an active rule "By Authority To Vw" -> Car Loan
+    # repayments, made on 0.17.4, and 14 of its transactions still Uncategorised on
+    # 0.17.5 -- the preview saying each was "taken first" by that very rule.
+    account = create_account(auth_client)["id"]
+    loan, coffee = _cat(auth_client, "Loan repayments"), _cat(auth_client, "Coffee")
+    blank = [_add(auth_client, account, "By Authority To Vw") for _ in range(3)]
+    chosen = _add(auth_client, account, "By Authority To Vw")
+    _choose(auth_client, chosen, coffee)
+    _old_rule("By Authority To Vw", loan)
+    _not_yet_applied()
+
+    p = auth_client.post(
+        "/api/rules/preview",
+        json={"match_type": "contains", "pattern": "By Authority To Vw", "category_id": loan},
+    ).json()
+    assert (p["other_rule"], p["kept"]) == (3, 1), "the reported state"
+    assert all(_state(t) == (None, None) for t in blank)
+
+    _apply_rules_once(engine)
+
+    assert all(_state(t) == (loan, RULE_CONFIDENCE) for t in blank)
+    assert _state(chosen) == (coffee, 1.0)
+    with SessionLocal() as db:
+        assert db.execute(select(models.Household.rules_applied_at)).scalar_one() is not None
+
+    # Once: a later start leaves things to the rules' own changes.
+    late = _add(auth_client, account, "OKAPI LOAN")
+    before = _state(late)
+    _old_rule("okapi loan", loan)
+    _apply_rules_once(engine)
+    assert _state(late) == before
+
+
+def test_switching_an_old_rule_off_and_on_applies_it(auth_client: TestClient) -> None:
+    # What can be done straight away, before updating.
+    account = create_account(auth_client)["id"]
+    loan = _cat(auth_client, "Loan repayments")
+    blank = _add(auth_client, account, "By Authority To Vw")
+    rule_id = _old_rule("By Authority To Vw", loan)
+
+    assert auth_client.patch(f"/api/rules/{rule_id}", json={"is_active": False}).status_code == 200
+    on = auth_client.patch(f"/api/rules/{rule_id}", json={"is_active": True}).json()
+
+    assert on["categorised"] == 1
+    assert _state(blank) == (loan, RULE_CONFIDENCE)
+
+
+def test_applying_every_rule_files_what_rules_may_change_and_nothing_else(
+    auth_client: TestClient,
+) -> None:
+    account = create_account(auth_client)["id"]
+    coffee, takeaway = _cat(auth_client, "Coffee"), _cat(auth_client, "Takeaway")
+    blank = _add(auth_client, account, "ZEBRA CAFE 1")
+    guessed = _add(auth_client, account, "ZEBRA CAFE 2")
+    _set(guessed, category_id=takeaway, confidence=GUESS)
+    same_guess = _add(auth_client, account, "ZEBRA CAFE 3")
+    _set(same_guess, category_id=coffee, confidence=GUESS)
+    locked = _add(auth_client, account, "ZEBRA CAFE 4")
+    _set(locked, category_locked=True)
+    transfer = _add(auth_client, account, "ZEBRA CAFE 5")
+    _set(transfer, is_transfer=True)
+    unmatched = _add(auth_client, account, "OKAPI BAR")
+    _set(unmatched, category_id=takeaway, confidence=GUESS)
+    _old_rule("zebra cafe", coffee)
+    _old_rule("zebra", takeaway)  # younger: "zebra cafe" goes first
+
+    with SessionLocal() as db:
+        household = db.execute(select(models.Household.id)).scalar_one()
+        first = apply_all_rules(db, household)
+        db.commit()
+        again = apply_all_rules(db, household)
+        db.commit()
+
+    assert (first.categorised, first.uncategorised) == (2, 0)
+    assert (again.categorised, again.uncategorised) == (0, 0)
+    assert _state(blank) == (coffee, RULE_CONFIDENCE)
+    assert _state(guessed) == (coffee, RULE_CONFIDENCE)
+    assert _state(same_guess) == (coffee, RULE_CONFIDENCE)
+    assert _state(locked) == (None, None)
+    assert _state(transfer) == (None, None)
+    assert _state(unmatched) == (takeaway, GUESS)
+
+
+def test_a_failure_applying_old_rules_never_stops_a_start(
+    auth_client: TestClient, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # It runs before the app serves: an error here must not become a crash loop.
+    account = create_account(auth_client)["id"]
+    loan = _cat(auth_client, "Loan repayments")
+    blank = _add(auth_client, account, "By Authority To Vw")
+    _old_rule("By Authority To Vw", loan)
+    _not_yet_applied()
+
+    def broken(*_args: object) -> None:
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(dbinit_module, "apply_all_rules", broken)
+    _apply_rules_once(engine)  # does not raise
+
+    assert "will try again on the next start" in capsys.readouterr().err
+    with SessionLocal() as db:
+        assert db.execute(select(models.Household.rules_applied_at)).scalar_one() is None
+    monkeypatch.undo()
+    _apply_rules_once(engine)  # ... and the next start does it
+    assert _state(blank) == (loan, RULE_CONFIDENCE)
+
+
+# --------------------------------------------------------------------------------------
+# Found in review of the one-time sweep
+# --------------------------------------------------------------------------------------
+
+
+def test_uncategorised_picked_by_a_person_stays_that_way(auth_client: TestClient) -> None:
+    # Picking "Uncategorised" is a choice: a starter rule had filed this as Fuel, the
+    # person said no. Neither the sweep nor a later rule change may put it back.
+    account = create_account(auth_client)["id"]
+    fuel = _cat(auth_client, "Fuel")
+    txn = _add(auth_client, account, "SHELLHARBOUR CITY COUNCIL RATES")
+    assert _state(txn)[0] == fuel, "the starter rule 'shell' files it"
+    resp = auth_client.post(
+        f"/api/transactions/{txn}/recategorise", json={"category_id": None, "scope": "none"}
+    )
+    assert resp.status_code == 200, resp.text
+    assert _state(txn) == (None, 1.0)
+
+    _not_yet_applied()
+    _apply_rules_once(engine)
+    assert _state(txn) == (None, 1.0)
+
+    p = auth_client.post(
+        "/api/rules/preview",
+        json={"match_type": "contains", "pattern": "shellharbour", "category_id": fuel},
+    ).json()
+    assert p["rows"][0]["outcome"] == "kept"
+    made = _rule(auth_client, "shellharbour", fuel)
+    assert made["categorised"] == 0
+    assert _state(txn) == (None, 1.0)
+
+
+def test_the_sweep_leaves_a_blank_someone_made_before_clearing_was_recorded(
+    auth_client: TestClient,
+) -> None:
+    account = create_account(auth_client)["id"]
+    loan = _cat(auth_client, "Loan repayments")
+    cleared = _add(auth_client, account, "By Authority To Vw")
+    never_touched = _add(auth_client, account, "By Authority To Vw")
+    with SessionLocal() as db:
+        for txn_id, gap in ((cleared, dt.timedelta(days=2)), (never_touched, dt.timedelta(0))):
+            t = db.get(models.Transaction, txn_id)
+            assert t is not None
+            t.category_id, t.confidence = None, None
+            db.flush()
+            t.updated_at = t.created_at + gap
+        db.commit()
+    _old_rule("By Authority To Vw", loan)
+    _not_yet_applied()
+
+    _apply_rules_once(engine)
+
+    assert _state(cleared) == (None, None)
+    assert _state(never_touched) == (loan, RULE_CONFIDENCE)
+
+
+def test_a_household_made_after_the_update_is_not_swept_later(auth_client: TestClient) -> None:
+    # The sweep catches up households that predate it; one made now has nothing to
+    # catch up on, and an unprompted re-file at some later restart is the last thing
+    # it should get.
+    with SessionLocal() as db:
+        assert db.execute(select(models.Household.rules_applied_at)).scalar_one() is not None
+    account = create_account(auth_client)["id"]
+    loan = _cat(auth_client, "Loan repayments")
+    blank = _add(auth_client, account, "By Authority To Vw")
+    _old_rule("By Authority To Vw", loan)
+
+    _apply_rules_once(engine)
+
+    assert _state(blank) == (None, None)
+
+
+def test_a_slow_regular_expression_cannot_hold_up_the_sweep(
+    auth_client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # One that runs out of time costs its full timeout on every row it is tried on: over
+    # a few thousand rows, longer than an update waits for the app to come up.
+    from app.services import categorise
+
+    account = create_account(auth_client)["id"]
+    coffee = _cat(auth_client, "Coffee")
+    rows = [_add(auth_client, account, f"ZEBRA CAFE {i}") for i in range(12)]
+    slow = r"(\w+\s*)+(?:zz){e<=1}$"
+    with SessionLocal() as db:
+        household = db.execute(select(models.Household.id)).scalar_one()
+        db.add(
+            models.CategorisationRule(
+                household_id=household,
+                match_type="regex",
+                pattern=slow,
+                category_id=coffee,
+                priority=5,
+                source="user",
+            )
+        )
+        db.commit()
+    _old_rule("zebra cafe", coffee)
+    tries: list[str] = []
+    real = categorise._regex_search
+
+    def counting(pattern: str, subject: str) -> bool | None:
+        tries.append(pattern)
+        return None if pattern == slow else real(pattern, subject)
+
+    monkeypatch.setattr(categorise, "_regex_search", counting)
+    with SessionLocal() as db:
+        effect = apply_all_rules(db, household)
+        db.commit()
+
+    assert tries.count(slow) == 3
+    assert effect.categorised == len(rows)
+    assert all(_state(t) == (coffee, RULE_CONFIDENCE) for t in rows)
