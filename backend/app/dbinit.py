@@ -30,7 +30,7 @@ from typing import Any
 
 from alembic import command
 from alembic.config import Config
-from sqlalchemy import Row, and_, inspect, or_, select, update
+from sqlalchemy import and_, inspect, or_, select, update
 from sqlalchemy.engine import URL, Engine
 
 from .db import engine
@@ -218,10 +218,11 @@ def _mark_automatic_categories(db: Engine) -> None:
             )
         ).all()
 
-        def untouched(r: Row[Any]) -> bool:
+        # Rows typed loosely: the shape SQLAlchemy gives them differs between 2.0 and 2.1.
+        def untouched(r: Any) -> bool:
             return bool(r.updated_at - r.created_at < UNTOUCHED)
 
-        def look_alike(r: Row[Any]) -> tuple[str, str, str]:
+        def look_alike(r: Any) -> tuple[str, str, str]:
             return (r.household_id, r.merchant or r.raw_description, r.category_id)
 
         chosen = {look_alike(r) for r in rows if r.confidence is not None and not untouched(r)}
