@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import unicodedata
+
 from fastapi import APIRouter, Depends, HTTPException, Response, status
 from sqlalchemy import Select, delete, func, select, update
 from sqlalchemy.orm import Session
@@ -36,8 +38,18 @@ def list_categories(
     )
 
 
+# Characters that print as nothing. Stripped so a name cannot be invisible, and so
+# "Fuel" with a zero-width space after it is not a second, indistinguishable "Fuel".
+# The zero-width JOINER is kept: emoji sequences need it.
+_INVISIBLE = dict.fromkeys(map(ord, "\u200b\u200c\u2060\ufeff\u00ad"))
+
+
 def _clean_name(raw: str) -> str:
-    name = " ".join(raw.split())
+    # NFC, so "Cafés" typed with a combining accent is the same name as the seeded one;
+    # control characters out (a NUL also makes Postgres refuse the value outright).
+    text = unicodedata.normalize("NFC", raw).translate(_INVISIBLE)
+    text = "".join(ch for ch in text if unicodedata.category(ch) != "Cc" or ch.isspace())
+    name = " ".join(text.split())
     if not name:
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "A category needs a name")
     return name
@@ -50,14 +62,20 @@ def _ensure_unique(db: Session, household_id: str, name: str, *, ignore: str | N
     that finds one would not say which. The default tree has no repeated names, so this
     costs nothing there.
     """
-    clash = db.execute(
-        select(models.Category.id).where(
-            models.Category.household_id == household_id,
-            func.lower(models.Category.name) == name.lower(),
-            models.Category.id != (ignore or ""),
+    # Folded here, in Python, on both sides. Comparing the database's lower() with
+    # Python's lower() let exact duplicates through: Postgres lowers "İ" to "i" and a
+    # final "Σ" to "σ", Python to "i̇" and "ς". casefold() also equates "Straße" and
+    # "STRASSE". A household has at most a few hundred categories.
+    wanted = name.casefold()
+    names = db.execute(
+        select(models.Category.id, models.Category.name).where(
+            models.Category.household_id == household_id
         )
-    ).first()
-    if clash is not None:
+    ).all()
+    if any(
+        cid != ignore and unicodedata.normalize("NFC", other).casefold() == wanted
+        for cid, other in names
+    ):
         raise HTTPException(status.HTTP_409_CONFLICT, f"There is already a category called {name}")
 
 

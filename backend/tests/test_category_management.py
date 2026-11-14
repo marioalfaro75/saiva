@@ -432,3 +432,58 @@ def test_startup_keys_existing_built_ins_once_and_never_overwrites_a_key(
     assert _rename(auth_client, cats["Internal transfers"]["id"], "Moves").status_code == 200
     _record_category_keys(engine)
     assert _by_name(auth_client, "Moves")["system_key"] == "Internal transfers"
+
+
+# --------------------------------------------------------------------------------------
+# Found in review
+# --------------------------------------------------------------------------------------
+
+
+def test_loading_demo_data_after_a_rename_still_files_it_in_the_built_in_category(
+    auth_client: TestClient,
+) -> None:
+    # The demo seeder looked categories up by name too -- a sixth lookup the first pass
+    # missed. Renamed "Supermarkets" left every demo grocery shop uncategorised and its
+    # budget never made.
+    supermarkets = _by_name(auth_client, "Supermarkets")
+    assert _rename(auth_client, supermarkets["id"], "Grocery stores").status_code == 200
+
+    resp = auth_client.post("/api/admin/seed-demo")
+    assert resp.status_code in (200, 201), resp.text
+
+    with SessionLocal() as db:
+        grocers = (
+            db.execute(
+                select(models.Transaction).where(
+                    models.Transaction.raw_description.ilike("%WOOLWORTHS%")
+                )
+            )
+            .scalars()
+            .all()
+        )
+        budgeted = set(db.execute(select(models.Budget.category_id)).scalars())
+    assert grocers, "the demo should include supermarket shops"
+    assert all(t.category_id == supermarkets["id"] for t in grocers)
+    assert supermarkets["id"] in budgeted
+
+
+def test_names_are_compared_the_same_way_on_both_sides(auth_client: TestClient) -> None:
+    # The database's lower() and Python's lower() disagree on some letters, so an exact
+    # duplicate got through. Now both sides are folded in Python.
+    assert auth_client.post("/api/categories", json={"name": "İzmir"}).status_code == 201
+    assert auth_client.post("/api/categories", json={"name": "İzmir"}).status_code == 409
+    assert auth_client.post("/api/categories", json={"name": "Straße"}).status_code == 201
+    assert auth_client.post("/api/categories", json={"name": "STRASSE"}).status_code == 409
+
+
+def test_a_name_cannot_hide_behind_characters_that_print_as_nothing(
+    auth_client: TestClient,
+) -> None:
+    assert auth_client.post("/api/categories", json={"name": "​"}).status_code == 422
+    assert auth_client.post("/api/categories", json={"name": "Fuel​"}).status_code == 409
+    assert auth_client.post("/api/categories", json={"name": "Fu\u0000el"}).status_code == 409
+    # The seeded "Restaurants/Cafés", typed with a combining accent instead.
+    assert (
+        auth_client.post("/api/categories", json={"name": "Restaurants/Cafés"}).status_code
+        == 409
+    )

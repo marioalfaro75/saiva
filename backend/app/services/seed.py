@@ -103,13 +103,16 @@ def _add_txn(
 
 def create_demo_budgets(db: Session, household: models.Household) -> None:
     """A few realistic monthly budgets so the Budgets page isn't empty in the demo."""
+    # By key, not name: the household may have renamed "Supermarkets" before loading the
+    # demo, and the demo still means the built-in category.
     cats = {
-        c.name: c.id
+        c.system_key: c.id
         for c in db.execute(
             select(models.Category).where(models.Category.household_id == household.id)
         )
         .scalars()
         .all()
+        if c.system_key
     }
     for name, limit in [("Supermarkets", 90000), ("Takeaway", 30000), ("Coffee", 8000)]:
         category_id = cats.get(name)
@@ -196,13 +199,16 @@ def create_demo_data(db: Session, household: models.Household, months: int = 6) 
     db.add_all([everyday, savings, credit])
     db.flush()
 
+    # By key, not name: the household may have renamed "Supermarkets" before loading the
+    # demo, and the demo still means the built-in category.
     cats = {
-        c.name: c.id
+        c.system_key: c.id
         for c in db.execute(
             select(models.Category).where(models.Category.household_id == household.id)
         )
         .scalars()
         .all()
+        if c.system_key
     }
     rng = random.Random(42)
     today = dt.date.today()

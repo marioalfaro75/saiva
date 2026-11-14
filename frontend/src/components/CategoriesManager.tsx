@@ -1,5 +1,14 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { type FormEvent, type KeyboardEvent, useId, useMemo, useState } from "react";
+import {
+  type FormEvent,
+  type KeyboardEvent,
+  type RefObject,
+  useEffect,
+  useId,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 
 import { api } from "../api/client";
 import type { Category, CategoryUsage } from "../api/types";
@@ -44,6 +53,17 @@ export function CategoriesManager() {
   const categories = useQuery({ queryKey: ["categories"], queryFn: api.categories });
   const [filter, setFilter] = useState("");
   const [flash, setFlash] = useState<string | null>(null);
+  // Which groups the person has opened. Kept here rather than in each group, because a
+  // group the find box filters out is unmounted -- and came back closed when it cleared.
+  const [openGroups, setOpenGroups] = useState<ReadonlySet<string>>(() => new Set());
+  const setGroupOpen = (key: string, isOpen: boolean) =>
+    setOpenGroups((prev) => {
+      if (prev.has(key) === isOpen) return prev;
+      const next = new Set(prev);
+      if (isOpen) next.add(key);
+      else next.delete(key);
+      return next;
+    });
   const fid = useId();
 
   const all = categories.data;
@@ -116,6 +136,8 @@ export function CategoriesManager() {
           <GroupBlock
             key={g.group?.id ?? "other"}
             entry={g}
+            userOpen={openGroups.has(g.group?.id ?? "other")}
+            onUserToggle={(isOpen) => setGroupOpen(g.group?.id ?? "other", isOpen)}
             all={all ?? []}
             canEdit={canEdit}
             forceOpen={words.length > 0}
@@ -134,12 +156,16 @@ function GroupBlock({
   all,
   canEdit,
   forceOpen,
+  userOpen,
+  onUserToggle,
   onDone,
 }: {
   entry: Group;
   all: Category[];
   canEdit: boolean;
   forceOpen: boolean;
+  userOpen: boolean;
+  onUserToggle: (open: boolean) => void;
   onDone: (message: string) => void;
 }) {
   const { group, heading, children } = entry;
@@ -172,18 +198,20 @@ function GroupBlock({
       {canEdit && group && <AddCategory group={group} onDone={onDone} />}
     </div>
   );
-  // Filtering shows every match, so its groups are plainly open; otherwise each group is
-  // a disclosure, which keeps 20 groups and 78 categories to one screen.
-  if (forceOpen) {
-    return (
-      <section className="cat-group" aria-label={heading}>
-        <div className="cat-group-summary">{summary}</div>
-        {body}
-      </section>
-    );
-  }
+  // Each group is a disclosure, which keeps 20 groups and 78 categories to one screen;
+  // while the find box has text, every group with a match is held open. Always the same
+  // element: switching between a <details> and a <section> when the find box filled or
+  // emptied remounted the whole group, discarding an open Rename or Remove and closing
+  // every group the person had opened.
   return (
-    <details className="cat-group">
+    <details
+      className="cat-group"
+      open={forceOpen || userOpen}
+      onToggle={(e) => {
+        // Only the person's own opening and closing is remembered, not the find box's.
+        if (!forceOpen) onUserToggle(e.currentTarget.open);
+      }}
+    >
       <summary className="cat-group-summary">{summary}</summary>
       {body}
     </details>
@@ -206,6 +234,20 @@ function CategoryRow({
   onDone: (message: string) => void;
 }) {
   const [mode, setMode] = useState<"view" | "rename" | "remove">("view");
+  const renameButton = useRef<HTMLButtonElement>(null);
+  const removeButton = useRef<HTMLButtonElement>(null);
+  // Which button opened the panel, so closing it puts the keyboard back there instead of
+  // dropping focus to the top of the page (the button is not rendered while it is open).
+  const openedBy = useRef<RefObject<HTMLButtonElement | null> | null>(null);
+  useEffect(() => {
+    if (mode !== "view" || !openedBy.current) return;
+    openedBy.current.current?.focus();
+    openedBy.current = null;
+  }, [mode]);
+  const open = (next: "rename" | "remove") => {
+    openedBy.current = next === "rename" ? renameButton : removeButton;
+    setMode(next);
+  };
   const label = isGroup ? `the ${category.name} group` : category.name;
   // A group with categories in it, and the two the app files into itself, cannot go.
   const removable = !category.protected && !(isGroup && childCount > 0);
@@ -232,19 +274,21 @@ function CategoryRow({
           {canEdit && mode === "view" && (
             <span className="cat-row-actions">
               <button
+                ref={renameButton}
                 type="button"
                 className="btn btn-ghost"
                 aria-label={`Rename ${label}`}
-                onClick={() => setMode("rename")}
+                onClick={() => open("rename")}
               >
                 Rename
               </button>
               {removable && (
                 <button
+                  ref={removeButton}
                   type="button"
                   className="btn btn-ghost"
                   aria-label={`Remove ${label}`}
-                  onClick={() => setMode("remove")}
+                  onClick={() => open("remove")}
                 >
                   Remove
                 </button>
@@ -340,9 +384,16 @@ function RemovePanel({
   const qc = useQueryClient();
   const fid = useId();
   const [moveTo, setMoveTo] = useState("");
+  const panel = useRef<HTMLDivElement>(null);
+  // The keyboard goes into the panel it opened, rather than to the top of the page.
+  useEffect(() => panel.current?.focus(), []);
   const usage = useQuery({
     queryKey: ["category-usage", category.id],
     queryFn: () => api.categoryUsage(category.id),
+    // Never kept once the panel closes. A remembered "nothing uses Coffee" from earlier
+    // showed, with Remove enabled, while the fresh answer was still on its way -- and a
+    // quick click then uncategorised transactions nobody was asked about.
+    gcTime: 0,
   });
   // Anywhere a transaction can live, except the category being removed.
   const destinations = useMemo(
@@ -350,28 +401,43 @@ function RemovePanel({
     [category.id],
   );
   const remove = useMutation({
-    mutationFn: () => api.removeCategory(category.id, moveTo || null),
-    onSuccess: (result) => {
-      // Transactions, rules, budgets, and every total built from them may have changed.
-      qc.invalidateQueries();
-      const target = all.find((c) => c.id === moveTo)?.name ?? "Uncategorised";
+    // The destination travels with the request, so the message afterwards names where
+    // things actually went -- not whatever the picker happens to hold by then.
+    mutationFn: (destination: string) => api.removeCategory(category.id, destination || null),
+    onSuccess: (result, destination) => {
+      const target = all.find((c) => c.id === destination)?.name ?? "Uncategorised";
       onDone(
         result.moved_transactions
           ? `Removed ${category.name}. ${plural(result.moved_transactions, "transaction")} moved to ${target}.`
           : `Removed ${category.name}.`,
       );
+      // Closed and forgotten before anything refetches: the category no longer exists,
+      // and asking what uses it would only answer "not found" under the message above.
+      qc.removeQueries({ queryKey: ["category-usage", category.id] });
+      onClose();
+      // Transactions, rules, budgets, and every total built from them may have changed.
+      qc.invalidateQueries();
     },
   });
 
-  const u = usage.data;
+  // Only an answer from THIS visit to the panel, and only once it has fully arrived.
+  const u = usage.isFetching ? undefined : usage.data;
   const hasThings = !!u && (u.transactions > 0 || u.rules > 0);
   return (
-    <div className="cat-remove" role="group" aria-label={`Remove ${category.name}`}>
-      {usage.isLoading && <p className="muted">Checking what uses {category.name}…</p>}
-      {usage.isError && <div className="notice notice-warn">{errorText(usage.error)}</div>}
+    <div
+      ref={panel}
+      tabIndex={-1}
+      className="cat-remove"
+      role="group"
+      aria-label={`Remove ${category.name}`}
+    >
+      {usage.isFetching && <p className="muted">Checking what uses {category.name}…</p>}
+      {usage.isError && !usage.isFetching && (
+        <div className="notice notice-warn">{errorText(usage.error)}</div>
+      )}
       {u && (
         <>
-          <p>{usageSentence(category.name, u)}</p>
+          <p aria-live="polite">{usageSentence(category.name, u)}</p>
           {hasThings && (
             <div className="field">
               <label htmlFor={`${fid}-move`}>Move its transactions to</label>
@@ -382,6 +448,7 @@ function RemovePanel({
                 value={moveTo}
                 onChange={setMoveTo}
                 emptyLabel="Uncategorised"
+                disabled={remove.isPending}
               />
             </div>
           )}
@@ -407,7 +474,7 @@ function RemovePanel({
           type="button"
           className="btn btn-danger"
           disabled={!u || remove.isPending}
-          onClick={() => remove.mutate()}
+          onClick={() => remove.mutate(moveTo)}
         >
           {remove.isPending ? "Removing…" : `Remove ${category.name}`}
         </button>
@@ -419,10 +486,28 @@ function RemovePanel({
   );
 }
 
+/** Puts the keyboard back on the button that opened a form, once the form closes. */
+function useReturnFocus(open: boolean): RefObject<HTMLButtonElement | null> {
+  const button = useRef<HTMLButtonElement>(null);
+  const wasOpen = useRef(false);
+  useEffect(() => {
+    if (open) {
+      wasOpen.current = true;
+      return;
+    }
+    if (wasOpen.current) {
+      wasOpen.current = false;
+      button.current?.focus();
+    }
+  }, [open]);
+  return button;
+}
+
 function AddCategory({ group, onDone }: { group: Category; onDone: (message: string) => void }) {
   const qc = useQueryClient();
   const [open, setOpen] = useState(false);
   const [name, setName] = useState("");
+  const addButton = useReturnFocus(open);
   const add = useMutation({
     mutationFn: () => api.createCategory({ name, parent_id: group.id }),
     onSuccess: (created) => {
@@ -434,7 +519,7 @@ function AddCategory({ group, onDone }: { group: Category; onDone: (message: str
   });
   if (!open) {
     return (
-      <button type="button" className="btn btn-ghost cat-add" onClick={() => setOpen(true)}>
+      <button ref={addButton} type="button" className="btn btn-ghost cat-add" onClick={() => setOpen(true)}>
         + Add a category to {group.name}
       </button>
     );
@@ -479,6 +564,7 @@ function AddGroup({ onDone }: { onDone: (message: string) => void }) {
   const [open, setOpen] = useState(false);
   const [name, setName] = useState("");
   const [kind, setKind] = useState("expense");
+  const addButton = useReturnFocus(open);
   const add = useMutation({
     mutationFn: () => api.createCategory({ name, kind }),
     onSuccess: (created) => {
@@ -490,7 +576,7 @@ function AddGroup({ onDone }: { onDone: (message: string) => void }) {
   });
   if (!open) {
     return (
-      <button type="button" className="btn cat-add-group" onClick={() => setOpen(true)}>
+      <button ref={addButton} type="button" className="btn cat-add-group" onClick={() => setOpen(true)}>
         + Add a group
       </button>
     );

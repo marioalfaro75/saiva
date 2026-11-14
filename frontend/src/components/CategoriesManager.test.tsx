@@ -85,8 +85,9 @@ describe("the list", () => {
     await screen.findByText("Coffee");
     fireEvent.change(screen.getByLabelText("Find a category"), { target: { value: "fuel" } });
 
-    const section = screen.getByRole("region", { name: "Transport" });
-    expect(within(section).getByText("Fuel")).toBeInTheDocument();
+    const group = screen.getByText("Fuel").closest("details")!;
+    expect(group).toHaveAttribute("open");
+    expect(within(group).getByText("Transport", { selector: ".cat-group-name" })).toBeInTheDocument();
     expect(screen.queryByText("Coffee")).not.toBeInTheDocument();
   });
 });
@@ -269,5 +270,116 @@ describe("a read-only member", () => {
 
     expect(screen.getByText(/Only adults and owners can change them/)).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /^Rename|^Remove|Add/ })).not.toBeInTheDocument();
+  });
+});
+
+describe("found in review", () => {
+  it("never shows an answer from an earlier visit while the fresh one is on its way", async () => {
+    // Removing then cancelling cached "nothing uses Coffee". Reopened later -- after
+    // transactions had been filed into it -- the panel showed that old answer with Remove
+    // enabled, and a quick click uncategorised transactions nobody was asked about.
+    const usage = vi
+      .spyOn(api, "categoryUsage")
+      .mockResolvedValueOnce({ transactions: 0, rules: 0, budgets: 0, subcategories: 0 })
+      .mockReturnValueOnce(new Promise(() => {}));
+    show();
+    fireEvent.click(await screen.findByRole("button", { name: "Remove Coffee" }));
+    await screen.findByText(/Nothing uses Coffee/);
+    fireEvent.click(button("Cancel"));
+
+    fireEvent.click(button("Remove Coffee"));
+
+    expect(await screen.findByText("Checking what uses Coffee…")).toBeInTheDocument();
+    expect(screen.queryByText(/Nothing uses Coffee/)).not.toBeInTheDocument();
+    expect(button("Remove Coffee")).toBeDisabled();
+    expect(usage).toHaveBeenCalledTimes(2);
+  });
+
+  it("names where things went, not what the picker holds by the time it finishes", async () => {
+    vi.spyOn(api, "categoryUsage").mockResolvedValue(USAGE);
+    let finish: (v: { moved_transactions: number; moved_rules: number; removed_rules: number; removed_budgets: number }) => void = () => {};
+    const remove = vi.spyOn(api, "removeCategory").mockReturnValue(new Promise((r) => (finish = r)));
+    show();
+    fireEvent.click(await screen.findByRole("button", { name: "Remove Coffee" }));
+    const picker = await screen.findByLabelText("Move its transactions to");
+    fireEvent.focus(picker);
+    fireEvent.change(picker, { target: { value: "take" } });
+    fireEvent.keyDown(picker, { key: "Enter" });
+    fireEvent.click(button("Remove Coffee"));
+
+    await waitFor(() => expect(remove).toHaveBeenCalledWith(coffee.id, takeaway.id));
+    expect(screen.getByLabelText("Move its transactions to")).toBeDisabled();
+    finish({ moved_transactions: 2, moved_rules: 1, removed_rules: 0, removed_budgets: 1 });
+
+    expect(await screen.findByRole("status")).toHaveTextContent("2 transactions moved to Takeaway.");
+  });
+
+  it("closes once the category is gone, rather than asking what uses it", async () => {
+    const usage = vi.spyOn(api, "categoryUsage").mockResolvedValue(USAGE);
+    vi.spyOn(api, "removeCategory").mockResolvedValue({
+      moved_transactions: 2,
+      moved_rules: 0,
+      removed_rules: 1,
+      removed_budgets: 1,
+    });
+    show();
+    fireEvent.click(await screen.findByRole("button", { name: "Remove Coffee" }));
+    await screen.findByText(/Coffee is used by/);
+    fireEvent.click(button("Remove Coffee"));
+
+    await screen.findByRole("status");
+    expect(screen.queryByRole("group", { name: "Remove Coffee" })).not.toBeInTheDocument();
+    expect(usage).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps an open Remove, and what was chosen in it, while the find box is used", async () => {
+    vi.spyOn(api, "categoryUsage").mockResolvedValue(USAGE);
+    show();
+    fireEvent.click(await screen.findByRole("button", { name: "Remove Coffee" }));
+    const picker = await screen.findByLabelText("Move its transactions to");
+    fireEvent.focus(picker);
+    fireEvent.change(picker, { target: { value: "take" } });
+    fireEvent.keyDown(picker, { key: "Enter" });
+
+    fireEvent.change(screen.getByLabelText("Find a category"), { target: { value: "coffee" } });
+
+    expect(screen.getByRole("group", { name: "Remove Coffee" })).toBeInTheDocument();
+    expect(screen.getByText("Its 1 rule will move with them.")).toBeInTheDocument();
+  });
+
+  it("remembers which groups were open once the find box is cleared", async () => {
+    show();
+    await screen.findByText("Coffee");
+    const food = screen.getByText("Food & Drink (out)", { selector: ".cat-group-name" }).closest("details")!;
+    food.open = true;
+    fireEvent(food, new Event("toggle"));
+
+    fireEvent.change(screen.getByLabelText("Find a category"), { target: { value: "fuel" } });
+    fireEvent.change(screen.getByLabelText("Find a category"), { target: { value: "" } });
+
+    const again = screen.getByText("Food & Drink (out)", { selector: ".cat-group-name" }).closest("details")!;
+    expect(again).toHaveAttribute("open");
+  });
+
+  it("moves the keyboard into Remove, and back to the button when it is cancelled", async () => {
+    vi.spyOn(api, "categoryUsage").mockResolvedValue(USAGE);
+    show();
+    fireEvent.click(await screen.findByRole("button", { name: "Remove Coffee" }));
+    await screen.findByText(/Coffee is used by/);
+
+    expect(screen.getByRole("group", { name: "Remove Coffee" })).toHaveFocus();
+    fireEvent.click(button("Cancel"));
+    expect(button("Remove Coffee")).toHaveFocus();
+  });
+
+  it("puts the keyboard back on Rename, and on Add, when those are cancelled", async () => {
+    show();
+    fireEvent.click(await screen.findByRole("button", { name: "Rename Fuel" }));
+    fireEvent.keyDown(screen.getByLabelText("New name for Fuel"), { key: "Escape" });
+    expect(button("Rename Fuel")).toHaveFocus();
+
+    fireEvent.click(button("+ Add a category to Transport"));
+    fireEvent.click(button("Cancel"));
+    expect(button("+ Add a category to Transport")).toHaveFocus();
   });
 });
