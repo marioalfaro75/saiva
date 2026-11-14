@@ -3,6 +3,7 @@ learning ML categoriser (R12). Low-confidence results route to the review queue.
 
 from __future__ import annotations
 
+import datetime as dt
 from collections import Counter
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -206,10 +207,37 @@ class RuleDefinition:
     pattern: str
     category_id: str
     is_active: bool = True
+    created_at: dt.datetime | None = None
 
     @classmethod
     def of(cls, rule: models.CategorisationRule) -> RuleDefinition:
-        return cls(rule.id, rule.match_type, rule.pattern, rule.category_id, rule.is_active)
+        return cls(
+            rule.id,
+            rule.match_type,
+            rule.pattern,
+            rule.category_id,
+            rule.is_active,
+            rule.created_at,
+        )
+
+
+# created_at and updated_at are two clock reads at insert, microseconds apart: a row
+# whose two are closer than this has not been changed since it was created.
+UNTOUCHED = dt.timedelta(seconds=2)
+
+
+def could_have_filed(rule: RuleDefinition, t: models.Transaction) -> bool:
+    """Whether `rule` can be what put `t` where it is.
+
+    A rule files a row either when the row arrives (the rule is older than it) or by
+    changing it later (the row was last changed after the rule was made). A rule
+    younger than a row that has not changed since the rule was made did neither: the
+    row's rule mark is another rule's, or a guess an older release stored as exactly
+    0.99 -- and taking this rule away must not take that row's category with it.
+    """
+    if rule.created_at is None:
+        return True
+    return rule.created_at <= t.created_at or t.updated_at >= rule.created_at
 
 
 def pattern_problem(match_type: str, pattern: str) -> str | None:
@@ -270,6 +298,7 @@ def reapply_rules(
             and before.is_active
             and set_by_rule(t)
             and t.category_id == before.category_id
+            and could_have_filed(before, t)
             and matches(before.match_type, before.pattern, t)
         )
         if not (matched_now or filed_by_it) or not rules_may_change(t):

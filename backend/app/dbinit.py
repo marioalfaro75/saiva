@@ -26,16 +26,17 @@ import os
 import shutil
 import subprocess  # nosec B404 - argv is built from our own config, never user input
 import sys
+from typing import Any
 
 from alembic import command
 from alembic.config import Config
-from sqlalchemy import and_, inspect, or_, select, update
+from sqlalchemy import Row, and_, inspect, or_, select, update
 from sqlalchemy.engine import URL, Engine
 
 from .db import engine
 from .models import Category, Transaction
 from .schema_state import SchemaState, ahead_warning, alembic_config, read_schema_state
-from .services.categorise import ML_MAX_CONFIDENCE, PERSON_CONFIDENCE
+from .services.categorise import ML_MAX_CONFIDENCE, PERSON_CONFIDENCE, UNTOUCHED
 
 BASELINE_REVISION = "0001"
 
@@ -152,11 +153,6 @@ def _record_category_keys(db: Engine) -> None:
         )
 
 
-# How long after a transaction was created an untouched row can still show a change:
-# created_at and updated_at are two clock reads at insert, microseconds apart.
-_UNTOUCHED = dt.timedelta(seconds=2)
-
-
 def _mark_automatic_categories(db: Engine) -> None:
     """Mark categories no person chose as automatic, so rules may re-file them.
 
@@ -168,7 +164,11 @@ def _mark_automatic_categories(db: Engine) -> None:
       guess for a regular merchant was stored as exactly 1.0. One that nothing has
       touched since it was imported was never a person's choice: a person's change
       moves updated_at, and nothing but a person (or transfer detection, on transfers,
-      which rules never reach) changes an imported row afterwards.
+      which rules never reach) changes an imported row afterwards. One exception is
+      kept as a person's: "apply to similar" and bulk changes act on look-alikes
+      together, and a look-alike that already held the chosen category was not
+      written, so left no trace. Where a person did change a row of the same merchant
+      to the same category, its untouched look-alikes are taken to be theirs too.
     * imported rows with a category and no score: the demo loader's, and the other half
       of a transfer whose first half was deleted, left in Internal transfers. An import
       always scores the categories it sets, and a person's choice through the app is
@@ -188,6 +188,8 @@ def _mark_automatic_categories(db: Engine) -> None:
         "is_transfer",
         "confidence",
         "source",
+        "merchant",
+        "raw_description",
         "created_at",
         "updated_at",
     }
@@ -197,26 +199,44 @@ def _mark_automatic_categories(db: Engine) -> None:
         rows = conn.execute(
             select(
                 Transaction.id,
+                Transaction.household_id,
+                Transaction.category_id,
+                Transaction.category_locked,
                 Transaction.confidence,
+                Transaction.source,
+                Transaction.merchant,
+                Transaction.raw_description,
                 Transaction.created_at,
                 Transaction.updated_at,
             ).where(
                 Transaction.category_id.is_not(None),
-                Transaction.category_locked.is_(False),
                 Transaction.is_transfer.is_(False),
                 or_(
-                    and_(
-                        Transaction.confidence >= PERSON_CONFIDENCE,
-                        Transaction.source.in_(("import", "manual")),
-                    ),
+                    Transaction.confidence >= PERSON_CONFIDENCE,
                     and_(Transaction.confidence.is_(None), Transaction.source == "import"),
                 ),
             )
         ).all()
+
+        def untouched(r: Row[Any]) -> bool:
+            return bool(r.updated_at - r.created_at < UNTOUCHED)
+
+        def look_alike(r: Row[Any]) -> tuple[str, str, str]:
+            return (r.household_id, r.merchant or r.raw_description, r.category_id)
+
+        chosen = {look_alike(r) for r in rows if r.confidence is not None and not untouched(r)}
         ids = [
             r.id
             for r in rows
-            if r.confidence is None or r.updated_at - r.created_at < _UNTOUCHED
+            if not r.category_locked
+            and (
+                (r.confidence is None)
+                or (
+                    r.source in ("import", "manual")
+                    and untouched(r)
+                    and look_alike(r) not in chosen
+                )
+            )
         ]
         for start in range(0, len(ids), 500):
             conn.execute(

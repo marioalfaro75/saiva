@@ -17,7 +17,13 @@ from .. import models, schemas
 from ..db import get_db
 from ..deps import get_current_user, optional_period, require_writer
 from ..services import periods, transfers
-from ..services.categorise import RuleDefinition, build_categoriser, reapply_rules
+from ..services.categorise import (
+    RuleDefinition,
+    build_categoriser,
+    matches,
+    ordered_rules,
+    reapply_rules,
+)
 from ..services.importers import dedup_hash
 from ..services.merchants import normalise_merchant
 from ..services.transfers import detect_transfers
@@ -453,12 +459,21 @@ def recategorise(
     if payload.make_rule and payload.category_id:
         rule = _rule_from_scope(t, payload.scope, payload.pattern)
         if rule is not None:
+            # Made from this transaction, it has to apply to this transaction: if an
+            # existing rule would take it first, the new one goes ahead of that rule.
+            # At the usual priority an older rule always wins a tie, and "always do this"
+            # would silently never happen.
+            priority = schemas.RuleCreate.default_priority()
+            rules = ordered_rules(db, user.household_id)
+            first = next((r for r in rules if matches(r.match_type, r.pattern, t)), None)
+            if first is not None and first.category_id != payload.category_id:
+                priority = min(priority, first.priority - 1)
             made = models.CategorisationRule(
                 household_id=user.household_id,
                 match_type=rule[0],
                 pattern=rule[1].lower(),
                 category_id=payload.category_id,
-                priority=schemas.RuleCreate.default_priority(),
+                priority=priority,
                 source="user",
             )
             db.add(made)

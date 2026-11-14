@@ -367,9 +367,12 @@ def update_rule(
     data = payload.model_dump(exclude_unset=True)
     if data.get("category_id") is not None:
         _check_category(db, data["category_id"], user.household_id)
-    _check_pattern(
-        data.get("match_type") or rule.match_type, data.get("pattern") or rule.pattern
-    )
+    # Only an edit to the pattern or how it matches is judged: a rule saved before
+    # patterns were checked must still be switchable off, or movable, without a fix.
+    if data.get("match_type") is not None or data.get("pattern") is not None:
+        _check_pattern(
+            data.get("match_type") or rule.match_type, data.get("pattern") or rule.pattern
+        )
     before = RuleDefinition.of(rule)
     for key, value in data.items():
         # An explicit null is "leave it": these columns are not nullable.

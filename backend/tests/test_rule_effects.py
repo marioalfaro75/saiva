@@ -550,3 +550,127 @@ def test_on_upgrade_old_guesses_and_unscored_imports_become_automatic(
         # Bookkeeping, not a change anyone made: the row's "last changed" is left alone.
         marked = db.get(models.Transaction, old_guess)
         assert marked is not None and marked.updated_at == made
+
+
+# --------------------------------------------------------------------------------------
+# Found in the second review
+# --------------------------------------------------------------------------------------
+
+
+def test_transfer_detection_marks_what_it_files_so_a_release_can_undo_it(
+    auth_client: TestClient,
+) -> None:
+    # A person filed this leg as Coffee (1.0); detection then moved it to Internal
+    # transfers but kept the 1.0, so once released it read as a person's choice of
+    # Internal transfers and stayed there, out of every rule's reach.
+    everyday = create_account(auth_client)["id"]
+    savings = create_account(auth_client, name="Savings", type_="savings")["id"]
+    coffee, internal = _cat(auth_client, "Coffee"), _cat(auth_client, "Internal transfers")
+    out_id = _add(auth_client, everyday, "TRANSFER TO SAVINGS 77", cents=-50000)
+    in_id = _add(auth_client, savings, "TRANSFER FROM EVERYDAY 77", cents=50000)
+    _choose(auth_client, in_id, coffee)
+
+    assert auth_client.post("/api/transactions/detect-transfers").status_code == 200
+    assert _state(in_id) == (internal, ML_MAX_CONFIDENCE)
+
+    auth_client.delete(f"/api/transactions/{out_id}")
+    assert _state(in_id) == (None, None)
+
+
+def test_on_upgrade_look_alikes_of_a_persons_change_stay_theirs(auth_client: TestClient) -> None:
+    # "Apply to similar" and bulk changes write only the rows whose value changes; a
+    # look-alike already holding the chosen category keeps no trace of the choice.
+    account = create_account(auth_client)["id"]
+    coffee, takeaway = _cat(auth_client, "Coffee"), _cat(auth_client, "Takeaway")
+    changed = _add(auth_client, account, "ZEBRA CAFE 1")
+    sibling = _add(auth_client, account, "ZEBRA CAFE 2")
+    other_category = _add(auth_client, account, "ZEBRA CAFE 3")
+    other_merchant = _add(auth_client, account, "OKAPI BAR 1")
+    with SessionLocal() as db:
+        rows = {t.id: t for t in db.execute(select(models.Transaction)).scalars()}
+        made = rows[changed].created_at
+        for txn_id, merchant, category, touched in (
+            (changed, "Zebra Cafe", coffee, made + dt.timedelta(days=1)),
+            (sibling, "Zebra Cafe", coffee, made),
+            (other_category, "Zebra Cafe", takeaway, made),
+            (other_merchant, "Okapi Bar", coffee, made),
+        ):
+            t = rows[txn_id]
+            t.merchant, t.category_id, t.confidence, t.source = merchant, category, 1.0, "import"
+            t.created_at, t.updated_at = made, touched
+        db.commit()
+
+    _mark_automatic_categories(engine)
+
+    assert _state(changed) == (coffee, 1.0)
+    assert _state(sibling) == (coffee, 1.0)
+    assert _state(other_category) == (takeaway, ML_MAX_CONFIDENCE)
+    assert _state(other_merchant) == (coffee, ML_MAX_CONFIDENCE)
+
+
+def test_removing_a_rule_spares_an_old_guess_it_is_younger_than(auth_client: TestClient) -> None:
+    # An older release stored a guess of exactly 0.99 -- a rule's mark. A rule made after
+    # the row arrived, that never had to change it, did not file it.
+    account = create_account(auth_client)["id"]
+    coffee = _cat(auth_client, "Coffee")
+    old_guess = _add(auth_client, account, "ZEBRA CAFE 1")
+    with SessionLocal() as db:
+        t = db.get(models.Transaction, old_guess)
+        assert t is not None
+        t.category_id, t.confidence = coffee, RULE_CONFIDENCE
+        db.flush()
+        t.updated_at = t.created_at
+        db.commit()
+    rule = _rule(auth_client, "zebra cafe", coffee)
+    # ... while one the rule filed as it arrived is the rule's to take back.
+    filed_on_arrival = _add(auth_client, account, "ZEBRA CAFE 2")
+    assert _state(filed_on_arrival) == (coffee, RULE_CONFIDENCE)
+
+    resp = auth_client.delete(f"/api/rules/{rule['id']}").json()
+
+    assert resp == {"categorised": 0, "uncategorised": 1}
+    assert _state(old_guess) == (coffee, RULE_CONFIDENCE)
+    assert _state(filed_on_arrival) == (None, None)
+
+
+def test_a_rule_made_from_the_dialog_goes_ahead_of_an_older_rule_that_would_win(
+    auth_client: TestClient,
+) -> None:
+    account = create_account(auth_client)["id"]
+    coffee, takeaway = _cat(auth_client, "Coffee"), _cat(auth_client, "Takeaway")
+    older = _rule(auth_client, "zebra", coffee)
+    txn = _add(auth_client, account, "ZEBRA CAFE")
+    resp = auth_client.post(
+        f"/api/transactions/{txn}/recategorise",
+        json={"category_id": takeaway, "scope": "none", "make_rule": True},
+    )
+    assert resp.status_code == 200, resp.text
+    made = next(r for r in auth_client.get("/api/rules").json() if r["id"] != older["id"])
+    assert made["priority"] < older["priority"]
+
+    later = _add(auth_client, account, "ZEBRA CAFE")
+    assert _state(later)[0] == takeaway
+
+
+def test_a_rule_saved_before_patterns_were_checked_can_still_be_switched_off(
+    auth_client: TestClient,
+) -> None:
+    coffee, takeaway = _cat(auth_client, "Coffee"), _cat(auth_client, "Takeaway")
+    with SessionLocal() as db:
+        household = db.execute(select(models.Household.id)).scalar_one()
+        broken = models.CategorisationRule(
+            household_id=household,
+            match_type="regex",
+            pattern="zebra(",
+            category_id=coffee,
+            priority=10,
+            source="user",
+        )
+        db.add(broken)
+        db.commit()
+        rule_id = broken.id
+    patch = lambda body: auth_client.patch(f"/api/rules/{rule_id}", json=body)  # noqa: E731
+    assert patch({"is_active": False}).status_code == 200
+    assert patch({"category_id": takeaway}).status_code == 200
+    assert patch({"pattern": "zebra(("}).status_code == 422
+    assert patch({"pattern": "^zebra"}).status_code == 200

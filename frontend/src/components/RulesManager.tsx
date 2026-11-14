@@ -198,9 +198,13 @@ export function RulesManager({ categories, onFlash }: Props) {
         onFlash(`Rule updated. ${describeEffect(change)}`);
       }
     },
-    onError: (_error, { id, patch }) => {
+    onError: (error, { id, patch }) => {
       settleEdit(id, patch);
-      onFlash("That change to the rule wasn't saved.");
+      onFlash(
+        error instanceof ApiError && error.status === 422
+          ? `That change to the rule wasn't saved. ${error.message}`
+          : "That change to the rule wasn't saved.",
+      );
     },
   });
   const remove = useMutation({

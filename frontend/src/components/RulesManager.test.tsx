@@ -422,3 +422,21 @@ describe("found in review", () => {
     ).toBeInTheDocument();
   });
 });
+
+describe("found in the second review", () => {
+  it("says why an edit was refused", async () => {
+    vi.spyOn(api, "rules").mockResolvedValue([MINE]);
+    vi.spyOn(api, "updateRule").mockRejectedValue(
+      new ApiError(422, "That isn't a valid regular expression."),
+    );
+    show();
+    const how = await screen.findByRole("combobox", { name: "How “campos” matches" });
+    fireEvent.change(how, { target: { value: "regex" } });
+    await waitFor(() =>
+      expect(flash).toHaveBeenCalledWith(
+        "That change to the rule wasn't saved. That isn't a valid regular expression.",
+      ),
+    );
+    expect(how).toHaveValue("contains");
+  });
+});
