@@ -130,3 +130,27 @@ def detect_transfers(
 
     db.commit()
     return linked
+
+
+def release(db: Session, t: models.Transaction) -> None:
+    """Make `t` an ordinary transaction again: its other half was deleted, or a person
+    said it is not a transfer.
+
+    Transfer detection filed it under Internal transfers, which is now wrong, and left
+    no mark that it did: so it goes back to Uncategorised, for review and for rules,
+    instead of sitting in Internal transfers looking like a choice someone made. A
+    category a person set (1.0) or locked stays.
+    """
+    t.is_transfer = False
+    t.transfer_group_id = None
+    if t.category_id is None or t.category_locked or (t.confidence or 0) >= 1.0:
+        return
+    transfer_category_id = db.execute(
+        select(models.Category.id).where(
+            models.Category.household_id == t.household_id,
+            models.Category.system_key == TRANSFER_CATEGORY,
+        )
+    ).scalar_one_or_none()
+    if t.category_id == transfer_category_id:
+        t.category_id = None
+        t.confidence = None

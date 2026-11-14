@@ -2,7 +2,7 @@ import { useEffect, useId, useMemo, useState } from "react";
 import { keepPreviousData, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
 import { TABLE_MIN, TableWrap } from "../table/TableWrap";
-import { api } from "../api/client";
+import { api, ApiError } from "../api/client";
 import { FilterRow, FilterToggle } from "../table/FilterRow";
 import { SortHeader } from "../table/SortHeader";
 import type { ColumnSpec } from "../table/sorting";
@@ -164,6 +164,11 @@ export function RulesManager({ categories, onFlash }: Props) {
         `Rule created. ${describeEffect(rule, { movedTo: categoryNames.get(rule.category_id) })}`,
       );
     },
+    onError: (error) => {
+      onFlash(
+        error instanceof ApiError ? `Rule not created. ${error.message}` : "Rule not created.",
+      );
+    },
   });
   // Edits not yet confirmed by the server, shown in the row meanwhile: a checkbox that
   // does not tick until the server answers reads as one that did not take. Local state,
@@ -200,6 +205,7 @@ export function RulesManager({ categories, onFlash }: Props) {
   });
   const remove = useMutation({
     mutationFn: (rule: Rule) => api.deleteRule(rule.id),
+    onError: () => onFlash("The rule wasn't deleted."),
     onSuccess: (effect, rule) => {
       qc.setQueryData<Rule[]>(["rules"], (list) => list?.filter((r) => r.id !== rule.id));
       refresh();
@@ -278,7 +284,9 @@ export function RulesManager({ categories, onFlash }: Props) {
                 : preview.data
                   ? previewSummary(preview.data, categoryName)
                   : preview.isError
-                    ? "Couldn't check that pattern."
+                    ? preview.error instanceof ApiError && preview.error.status === 422
+                      ? preview.error.message
+                      : "Couldn't check that pattern."
                     : ""}
           </span>
           <button className="btn btn-primary" disabled={!canCreate} onClick={() => create.mutate()}>
@@ -300,7 +308,13 @@ export function RulesManager({ categories, onFlash }: Props) {
           <p className="muted">No rules of your own yet. Make one above.</p>
         )}
         {own.length > 0 && (
-          <RuleTable rules={own} tableId="rules" highlightId={newRuleId} {...tableProps} />
+          <RuleTable
+            rules={own}
+            tableId="rules"
+            label="Your rules"
+            highlightId={newRuleId}
+            {...tableProps}
+          />
         )}
       </div>
 
@@ -314,7 +328,13 @@ export function RulesManager({ categories, onFlash }: Props) {
             The rules the app starts with. Where one of yours matches the same transaction,
             yours wins.
           </p>
-          <RuleTable rules={builtIn} tableId="rules-built-in" highlightId={null} {...tableProps} />
+          <RuleTable
+            rules={builtIn}
+            tableId="rules-built-in"
+            label="Built-in rules"
+            highlightId={null}
+            {...tableProps}
+          />
         </details>
       )}
     </div>
@@ -383,6 +403,7 @@ const RULE_LABELS = {
 function RuleTable({
   rules,
   tableId,
+  label,
   highlightId,
   categories,
   categoryNames,
@@ -391,6 +412,7 @@ function RuleTable({
 }: {
   rules: Rule[];
   tableId: string;
+  label: string;
   highlightId: string | null;
   categories: Category[];
   categoryNames: Map<string, string>;
@@ -410,12 +432,14 @@ function RuleTable({
   const table = useTable(rules, columns, { id: tableId });
 
   return (
-    <>
+    // One group per list, so its Filter button and filter fields are announced as
+    // belonging to it: the tab shows two of each.
+    <div role="group" aria-label={label}>
       <div className="spread">
         <span />
         <FilterToggle table={table} />
       </div>
-      <TableWrap min={TABLE_MIN.rules} label="Categorisation rules">
+      <TableWrap min={TABLE_MIN.rules} label={`${label}, table`}>
         <table>
           <thead>
             <tr>
@@ -498,6 +522,6 @@ function RuleTable({
           </tbody>
         </table>
       </TableWrap>
-    </>
+    </div>
   );
 }

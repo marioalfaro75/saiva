@@ -11,12 +11,15 @@ learner's guesses and other rules' work -- and never one a person chose or locke
 
 from __future__ import annotations
 
+import datetime as dt
+
 from conftest import create_account
 from fastapi.testclient import TestClient
 from sqlalchemy import select
 
 from app import models
-from app.db import SessionLocal
+from app.db import SessionLocal, engine
+from app.dbinit import _mark_automatic_categories
 from app.services.categorise import (
     ML_MAX_CONFIDENCE,
     RULE_CONFIDENCE,
@@ -28,13 +31,20 @@ from app.services.ml import NaiveBayesCategoriser
 GUESS = 0.7  # a confidence only the learner produces
 
 
-def _add(client: TestClient, account_id: str, desc: str, date: str = "2025-06-01", **extra):  # type: ignore[no-untyped-def]
+def _add(  # type: ignore[no-untyped-def]
+    client: TestClient,
+    account_id: str,
+    desc: str,
+    date: str = "2025-06-01",
+    cents: int = -1000,
+    **extra,
+):
     resp = client.post(
         "/api/transactions",
         json={
             "account_id": account_id,
             "txn_date": date,
-            "amount_cents": -1000,
+            "amount_cents": cents,
             "description": desc,
             **extra,
         },
@@ -358,3 +368,185 @@ def test_a_guess_never_scores_like_a_rule_or_a_person() -> None:
 
     assert result.source == "ml"
     assert result.confidence <= ML_MAX_CONFIDENCE < RULE_CONFIDENCE
+
+
+# --------------------------------------------------------------------------------------
+# Found in review
+# --------------------------------------------------------------------------------------
+
+
+def test_a_new_rule_leaves_what_an_earlier_rule_wins_where_it_is(auth_client: TestClient) -> None:
+    # An older rule that never filed a row (before this release a rule only filled blanks,
+    # and only on "Apply now") still goes first. Saving a new rule used to hand such a row
+    # to the older rule -- moving it somewhere the preview never mentioned -- and the
+    # message then said it had moved to the NEW rule's category.
+    account = create_account(auth_client)["id"]
+    coffee, groceries = _cat(auth_client, "Coffee"), _cat(auth_client, "Supermarkets")
+    _rule(auth_client, "zebra", groceries)  # older
+    guessed = _add(auth_client, account, "ZEBRA CAFE 1")
+    _set(guessed, category_id=coffee, confidence=GUESS)
+    blank = _add(auth_client, account, "ZEBRA CAFE 2")
+    _set(blank, category_id=None, confidence=None)
+
+    p = auth_client.post(
+        "/api/rules/preview",
+        json={"match_type": "contains", "pattern": "zebra cafe", "category_id": coffee},
+    ).json()
+    assert {r["id"]: r["outcome"] for r in p["rows"]} == {guessed: "same", blank: "other_rule"}
+
+    made = _rule(auth_client, "zebra cafe", coffee)
+
+    assert (made["categorised"], made["uncategorised"]) == (0, 0)
+    assert _state(guessed) == (coffee, GUESS)
+    assert _state(blank) == (None, None)
+
+
+def test_deleting_a_rule_leaves_a_guess_it_never_filed(auth_client: TestClient) -> None:
+    account = create_account(auth_client)["id"]
+    coffee, groceries = _cat(auth_client, "Coffee"), _cat(auth_client, "Supermarkets")
+    _rule(auth_client, "zebra", groceries)  # older, wins
+    rule = _rule(auth_client, "zebra cafe", coffee)
+    guessed = _add(auth_client, account, "ZEBRA CAFE 1")
+    _set(guessed, category_id=coffee, confidence=GUESS)
+
+    resp = auth_client.delete(f"/api/rules/{rule['id']}").json()
+
+    assert resp == {"categorised": 0, "uncategorised": 0}
+    assert _state(guessed) == (coffee, GUESS)
+
+
+def test_a_pattern_that_can_never_match_is_refused_everywhere(auth_client: TestClient) -> None:
+    coffee = _cat(auth_client, "Coffee")
+    bad = {"match_type": "regex", "pattern": "campos("}
+    assert auth_client.post("/api/rules/preview", json=bad).status_code == 422
+    made = auth_client.post("/api/rules", json={**bad, "category_id": coffee})
+    assert made.status_code == 422
+    assert "regular expression" in made.json()["detail"]
+
+    rule = _rule(auth_client, "campos", coffee)
+    assert (
+        auth_client.patch(
+            f"/api/rules/{rule['id']}", json={"match_type": "regex", "pattern": "(("}
+        ).status_code
+        == 422
+    )
+    # Switching an existing pattern to regex is checked against that pattern too.
+    bracket = _rule(auth_client, "[x", coffee)
+    assert (
+        auth_client.patch(f"/api/rules/{bracket['id']}", json={"match_type": "regex"}).status_code
+        == 422
+    )
+    assert (
+        auth_client.post(
+            "/api/rules", json={"match_type": "regex", "pattern": "^campos", "category_id": coffee}
+        ).status_code
+        == 201
+    )
+
+
+def test_demo_data_is_marked_automatic_so_rules_can_re_file_it(auth_client: TestClient) -> None:
+    assert auth_client.post("/api/admin/seed-demo").status_code in (200, 201)
+    with SessionLocal() as db:
+        scores = {
+            t.confidence
+            for t in db.execute(select(models.Transaction)).scalars()
+            if t.category_id is not None and not t.is_transfer
+        }
+    assert scores == {ML_MAX_CONFIDENCE}
+
+    takeaway = _cat(auth_client, "Takeaway")
+    p = auth_client.post(
+        "/api/rules/preview",
+        json={"match_type": "contains", "pattern": "coffee", "category_id": takeaway},
+    ).json()
+    assert p["matched"] > 0
+    assert p["kept"] == 0
+
+
+def test_the_other_half_of_a_deleted_transfer_leaves_internal_transfers(
+    auth_client: TestClient,
+) -> None:
+    everyday = create_account(auth_client)["id"]
+    savings = create_account(auth_client, name="Savings", type_="savings")["id"]
+    out_id = _add(auth_client, everyday, "TRANSFER TO SAVINGS 99", cents=-50000)
+    in_id = _add(auth_client, savings, "TRANSFER FROM EVERYDAY 99", cents=50000)
+    assert auth_client.post("/api/transactions/detect-transfers").status_code == 200
+    internal = _cat(auth_client, "Internal transfers")
+    with SessionLocal() as db:
+        legs = [db.get(models.Transaction, i) for i in (out_id, in_id)]
+        assert all(t is not None and t.is_transfer for t in legs), "pair should be detected"
+        assert all(t is not None and t.category_id == internal for t in legs)
+
+    assert auth_client.delete(f"/api/transactions/{out_id}").status_code == 204
+
+    assert _state(in_id) == (None, None)
+    with SessionLocal() as db:
+        survivor = db.get(models.Transaction, in_id)
+        assert survivor is not None and survivor.is_transfer is False
+
+
+def test_unticking_transfer_takes_it_out_of_internal_transfers_unless_a_person_chose_it(
+    auth_client: TestClient,
+) -> None:
+    account = create_account(auth_client)["id"]
+    internal = _cat(auth_client, "Internal transfers")
+    detected = _add(auth_client, account, "ZEBRA SWEEP 1")
+    _set(detected, is_transfer=True, category_id=internal, confidence=None)
+    chosen = _add(auth_client, account, "ZEBRA SWEEP 2")
+    _choose(auth_client, chosen, internal)
+    _set(chosen, is_transfer=True)
+
+    for txn in (detected, chosen):
+        resp = auth_client.patch(f"/api/transactions/{txn}", json={"is_transfer": False})
+        assert resp.status_code == 200, resp.text
+
+    assert _state(detected) == (None, None)
+    assert _state(chosen) == (internal, 1.0)
+
+
+def test_on_upgrade_old_guesses_and_unscored_imports_become_automatic(
+    auth_client: TestClient,
+) -> None:
+    # Before guesses were capped, a confident one was stored as exactly 1.0 -- a person's
+    # mark -- and the demo loader and transfer detection stored categories with no score,
+    # which also reads as a person's. Rules would never re-file any of them.
+    account = create_account(auth_client)["id"]
+    coffee = _cat(auth_client, "Coffee")
+    old_guess = _add(auth_client, account, "ZEBRA CAFE 1")
+    edited_since = _add(auth_client, account, "ZEBRA CAFE 2")
+    person = _add(auth_client, account, "ZEBRA CAFE 3")
+    unscored_import = _add(auth_client, account, "ZEBRA CAFE 4")
+    added_by_hand = _add(auth_client, account, "ZEBRA CAFE 5", category_id=coffee)
+    locked = _add(auth_client, account, "ZEBRA CAFE 6")
+    with SessionLocal() as db:
+        rows = {t.id: t for t in db.execute(select(models.Transaction)).scalars()}
+        made = rows[old_guess].created_at
+        for txn_id, confidence, source, touched in (
+            (old_guess, 1.0, "import", made),
+            (edited_since, 1.0, "import", made + dt.timedelta(days=3)),
+            (person, 1.0, "import", made + dt.timedelta(minutes=5)),
+            (unscored_import, None, "import", made),
+            (added_by_hand, None, "manual", made),
+            (locked, 1.0, "import", made),
+        ):
+            t = rows[txn_id]
+            t.category_id, t.confidence, t.source = coffee, confidence, source
+            t.created_at = made
+            t.updated_at = touched
+        rows[locked].category_locked = True
+        db.commit()
+
+    _mark_automatic_categories(engine)
+    _mark_automatic_categories(engine)  # and again: a second start changes nothing more
+
+    assert _state(old_guess) == (coffee, ML_MAX_CONFIDENCE)
+    assert _state(unscored_import) == (coffee, ML_MAX_CONFIDENCE)
+    # Touched since import: a person may have chosen it, so it stays a person's.
+    assert _state(edited_since) == (coffee, 1.0)
+    assert _state(person) == (coffee, 1.0)
+    assert _state(added_by_hand) == (coffee, None)
+    assert _state(locked) == (coffee, 1.0)
+    with SessionLocal() as db:
+        # Bookkeeping, not a change anyone made: the row's "last changed" is left alone.
+        marked = db.get(models.Transaction, old_guess)
+        assert marked is not None and marked.updated_at == made

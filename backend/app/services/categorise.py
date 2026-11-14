@@ -201,6 +201,7 @@ def _rule_scope(db: Session, household_id: str) -> list[models.Transaction]:
 class RuleDefinition:
     """What a rule matches and where it files, captured before an edit changes it."""
 
+    rule_id: str
     match_type: str
     pattern: str
     category_id: str
@@ -208,7 +209,19 @@ class RuleDefinition:
 
     @classmethod
     def of(cls, rule: models.CategorisationRule) -> RuleDefinition:
-        return cls(rule.match_type, rule.pattern, rule.category_id, rule.is_active)
+        return cls(rule.id, rule.match_type, rule.pattern, rule.category_id, rule.is_active)
+
+
+def pattern_problem(match_type: str, pattern: str) -> str | None:
+    """Why a pattern can never match, or None. Only a regular expression can be
+    malformed; one that is would be saved and then silently match nothing, forever."""
+    if match_type != "regex":
+        return None
+    try:
+        regex.compile(pattern, regex.IGNORECASE)
+    except regex.error as exc:
+        return f"That isn't a valid regular expression ({exc})."
+    return None
 
 
 @dataclass
@@ -229,42 +242,47 @@ def reapply_rules(
     before: RuleDefinition | None,
     after: RuleDefinition | None,
 ) -> RuleEffect:
-    """Bring transactions in line with the household's rules after one rule changed.
+    """Bring transactions in line with one rule's change: made, edited, switched off or
+    on, or deleted. `before` is the rule as it was (None for a new rule), `after` as it
+    is now (None once deleted); the change itself must already be flushed.
 
-    `before` is the rule as it was (None for a new rule), `after` as it is now (None once
-    deleted); the change itself must already be flushed. Only the transactions the change
-    can reach are looked at: those the rule matches now, and those it matched before and
-    filed where it filed them. Each is given what the full, current rule list says --
-    the first rule that matches -- or, if no rule does and a rule had filed it, goes back
-    to Uncategorised. Blank transactions no rule matches, and the learner's guesses, are
-    left as they are: no rule was involved in them.
+    It moves only what this rule decides, so the change does what its preview said:
+
+    * a transaction the rule now matches, and wins -- no earlier rule matches it -- is
+      filed in the rule's category. One an earlier rule wins is left where it is: that
+      rule's business, not this change's.
+    * a transaction the rule had filed -- matched by it before, in its category, with a
+      rule's mark -- and no longer wins goes to whichever rule wins it now, or back to
+      Uncategorised if none does.
+
+    Nothing a person chose or locked is touched, and neither is a transfer or part of a
+    split. A guess the rule never took over stays a guess.
     """
-
-    def matched_now(t: models.Transaction) -> bool:
-        return after is not None and after.is_active and matches(after.match_type, after.pattern, t)
-
-    def filed_by_it_before(t: models.Transaction) -> bool:
-        return (
+    rules = ordered_rules(db, household_id)
+    changed = after.rule_id if after is not None and after.is_active else None
+    effect = RuleEffect()
+    for t in _rule_scope(db, household_id):
+        matched_now = (
+            after is not None and after.is_active and matches(after.match_type, after.pattern, t)
+        )
+        filed_by_it = (
             before is not None
             and before.is_active
+            and set_by_rule(t)
             and t.category_id == before.category_id
             and matches(before.match_type, before.pattern, t)
         )
-
-    touched = [t for t in _rule_scope(db, household_id) if matched_now(t) or filed_by_it_before(t)]
-
-    rules = ordered_rules(db, household_id)
-    effect = RuleEffect()
-    for t in touched:
-        if not rules_may_change(t):
+        if not (matched_now or filed_by_it) or not rules_may_change(t):
             continue
         winner = _first_match(rules, t)
+        if not filed_by_it and (winner is None or winner.id != changed):
+            continue
         if winner is not None:
             if t.category_id != winner.category_id:
                 effect.categorised += 1
             t.category_id = winner.category_id
             t.confidence = RULE_CONFIDENCE
-        elif set_by_rule(t):
+        else:
             t.category_id = None
             t.confidence = None
             effect.uncategorised += 1
@@ -301,11 +319,12 @@ def preview_rule(
     priority: int = USER_RULE_PRIORITY,
 ) -> RulePreview:
     """What a rule not yet made would do: every transaction it matches, newest first,
-    each with its outcome, decided exactly as reapply_rules would decide it.
+    each with its outcome -- the same decision reapply_rules makes when it is saved.
 
     A new rule is tried after every existing rule of the same or a lower priority
-    number (oldest first among equals), so one of those can take a transaction first.
-    Without a category chosen yet, a transaction the rule would set is a "change".
+    number (oldest first among equals). Where one of those matches too, it wins and the
+    transaction stays where it is ("other_rule"). Without a category chosen yet, a
+    transaction the rule would set is a "change".
     """
     ahead = [r for r in ordered_rules(db, household_id) if r.priority <= priority]
     matched = sorted(

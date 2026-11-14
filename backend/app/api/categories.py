@@ -11,7 +11,13 @@ from sqlalchemy.orm import InstrumentedAttribute, Session
 from .. import models, schemas
 from ..db import get_db
 from ..deps import get_current_user, require_writer
-from ..services.categorise import RuleDefinition, RuleEffect, preview_rule, reapply_rules
+from ..services.categorise import (
+    RuleDefinition,
+    RuleEffect,
+    pattern_problem,
+    preview_rule,
+    reapply_rules,
+)
 
 router = APIRouter(tags=["categories"])
 
@@ -262,6 +268,7 @@ def create_rule(
     db: Session = Depends(get_db),
 ) -> schemas.RuleChangeOut:
     _check_category(db, payload.category_id, user.household_id)
+    _check_pattern(payload.match_type, payload.pattern)
     rule = models.CategorisationRule(
         household_id=user.household_id, source="user", **payload.model_dump()
     )
@@ -291,6 +298,7 @@ def preview_rule_endpoint(
 ) -> schemas.RulePreviewOut:
     if payload.category_id is not None:
         _check_category(db, payload.category_id, user.household_id)
+    _check_pattern(payload.match_type, payload.pattern)
     result = preview_rule(
         db,
         user.household_id,
@@ -335,6 +343,12 @@ def preview_rule_endpoint(
     )
 
 
+def _check_pattern(match_type: str, pattern: str) -> None:
+    problem = pattern_problem(match_type, pattern)
+    if problem is not None:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, problem)
+
+
 def _owned_rule(db: Session, rule_id: str, household_id: str) -> models.CategorisationRule:
     rule = db.get(models.CategorisationRule, rule_id)
     if rule is None or rule.household_id != household_id:
@@ -353,6 +367,9 @@ def update_rule(
     data = payload.model_dump(exclude_unset=True)
     if data.get("category_id") is not None:
         _check_category(db, data["category_id"], user.household_id)
+    _check_pattern(
+        data.get("match_type") or rule.match_type, data.get("pattern") or rule.pattern
+    )
     before = RuleDefinition.of(rule)
     for key, value in data.items():
         # An explicit null is "leave it": these columns are not nullable.

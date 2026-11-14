@@ -2,7 +2,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-import { api } from "../api/client";
+import { api, ApiError } from "../api/client";
 import type { Category, Rule, RulePreview, RulePreviewRow } from "../api/types";
 import { RulesManager } from "./RulesManager";
 
@@ -357,5 +357,68 @@ describe("the lists", () => {
     ) as HTMLElement;
     fireEvent.click(within(row).getByRole("button", { name: "Delete" }));
     expect(deleteRule).not.toHaveBeenCalled();
+  });
+});
+
+describe("found in review", () => {
+  it("shows why a pattern can't be used, and not the last list as if it were current", async () => {
+    vi.spyOn(api, "rules").mockResolvedValue([]);
+    vi.spyOn(api, "previewRule")
+      .mockResolvedValueOnce(preview([row({ description: "Campos Coffee" })]))
+      .mockRejectedValue(
+        new ApiError(422, "That isn't a valid regular expression (missing ), unterminated subpattern)."),
+      );
+    show();
+    typePattern("campos");
+    await screen.findByRole("region", { name: "Transactions this rule catches" });
+
+    typePattern("campos(");
+
+    await waitFor(() =>
+      expect(status()).toHaveTextContent("That isn't a valid regular expression"),
+    );
+    expect(screen.queryByRole("region", { name: "Transactions this rule catches" })).toBeNull();
+  });
+
+  it("says when a rule couldn't be made, and why", async () => {
+    vi.spyOn(api, "rules").mockResolvedValue([]);
+    vi.spyOn(api, "previewRule").mockResolvedValue(preview([]));
+    vi.spyOn(api, "createRule").mockRejectedValue(
+      new ApiError(422, "That isn't a valid regular expression."),
+    );
+    show();
+    typePattern("((");
+    chooseCategory("Coffee");
+    fireEvent.click(screen.getByRole("button", { name: "Create rule" }));
+    await waitFor(() =>
+      expect(flash).toHaveBeenCalledWith(
+        "Rule not created. That isn't a valid regular expression.",
+      ),
+    );
+    expect(matchesField()).toHaveValue("((");
+  });
+
+  it("says when a rule couldn't be deleted", async () => {
+    vi.spyOn(api, "rules").mockResolvedValue([MINE]);
+    vi.spyOn(window, "confirm").mockReturnValue(true);
+    vi.spyOn(api, "deleteRule").mockRejectedValue(new Error("down"));
+    show();
+    const row = (await within(yourRules()).findByRole("textbox", { name: /campos/ })).closest(
+      "tr",
+    ) as HTMLElement;
+    fireEvent.click(within(row).getByRole("button", { name: "Delete" }));
+    await waitFor(() => expect(flash).toHaveBeenCalledWith("The rule wasn't deleted."));
+  });
+
+  it("names each list, so its table and Filter button are told apart", async () => {
+    vi.spyOn(api, "rules").mockResolvedValue([BUILT_IN, MINE]);
+    show();
+    const mine = await screen.findByRole("group", { name: "Your rules" });
+    expect(within(mine).getByRole("region", { name: "Your rules, table" })).toBeInTheDocument();
+    expect(within(mine).getByRole("button", { name: "Filter" })).toBeInTheDocument();
+    const builtIn = screen.getByRole("group", { name: "Built-in rules", hidden: true });
+    expect(
+      within(builtIn).getByRole("region", { name: "Built-in rules, table", hidden: true }),
+    ).toBeInTheDocument();
   });
 });

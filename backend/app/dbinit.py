@@ -29,12 +29,13 @@ import sys
 
 from alembic import command
 from alembic.config import Config
-from sqlalchemy import inspect, update
+from sqlalchemy import and_, inspect, or_, select, update
 from sqlalchemy.engine import URL, Engine
 
 from .db import engine
-from .models import Category
+from .models import Category, Transaction
 from .schema_state import SchemaState, ahead_warning, alembic_config, read_schema_state
+from .services.categorise import ML_MAX_CONFIDENCE, PERSON_CONFIDENCE
 
 BASELINE_REVISION = "0001"
 
@@ -122,6 +123,7 @@ def main(db: Engine | None = None, cfg: Config | None = None) -> SchemaState:
             cfg.attributes.pop("connection", None)
     if not state.is_ahead:
         _record_category_keys(db)
+        _mark_automatic_categories(db)
     return state
 
 
@@ -148,6 +150,81 @@ def _record_category_keys(db: Engine) -> None:
             .where(Category.is_system.is_(True), Category.system_key.is_(None))
             .values(system_key=Category.name)
         )
+
+
+# How long after a transaction was created an untouched row can still show a change:
+# created_at and updated_at are two clock reads at insert, microseconds apart.
+_UNTOUCHED = dt.timedelta(seconds=2)
+
+
+def _mark_automatic_categories(db: Engine) -> None:
+    """Mark categories no person chose as automatic, so rules may re-file them.
+
+    Rules leave alone a category a person chose, read from its confidence: 1.0 is a
+    person's, and no score at all is treated as one too. Two kinds of older row look
+    like that and are not:
+
+    * the learner's guesses from before guesses were capped below 1.0. A confident
+      guess for a regular merchant was stored as exactly 1.0. One that nothing has
+      touched since it was imported was never a person's choice: a person's change
+      moves updated_at, and nothing but a person (or transfer detection, on transfers,
+      which rules never reach) changes an imported row afterwards.
+    * imported rows with a category and no score: the demo loader's, and the other half
+      of a transfer whose first half was deleted, left in Internal transfers. An import
+      always scores the categories it sets, and a person's choice through the app is
+      1.0, so an imported row with a category and no score was never chosen.
+
+    Both become ordinary guesses (ML_MAX_CONFIDENCE). Runs at every start and only ever
+    finds rows written by an older release, so after the first it changes nothing.
+    """
+    inspector = inspect(db)
+    if "transactions" not in inspector.get_table_names():
+        return
+    # Skipped, like _record_category_keys, when the table is an older shape than this
+    # code reads -- an older image's migrations under it, or a test standing in for one.
+    needed = {
+        "category_id",
+        "category_locked",
+        "is_transfer",
+        "confidence",
+        "source",
+        "created_at",
+        "updated_at",
+    }
+    if not needed <= {c["name"] for c in inspector.get_columns("transactions")}:
+        return
+    with db.begin() as conn:
+        rows = conn.execute(
+            select(
+                Transaction.id,
+                Transaction.confidence,
+                Transaction.created_at,
+                Transaction.updated_at,
+            ).where(
+                Transaction.category_id.is_not(None),
+                Transaction.category_locked.is_(False),
+                Transaction.is_transfer.is_(False),
+                or_(
+                    and_(
+                        Transaction.confidence >= PERSON_CONFIDENCE,
+                        Transaction.source.in_(("import", "manual")),
+                    ),
+                    and_(Transaction.confidence.is_(None), Transaction.source == "import"),
+                ),
+            )
+        ).all()
+        ids = [
+            r.id
+            for r in rows
+            if r.confidence is None or r.updated_at - r.created_at < _UNTOUCHED
+        ]
+        for start in range(0, len(ids), 500):
+            conn.execute(
+                update(Transaction)
+                .where(Transaction.id.in_(ids[start : start + 500]))
+                # updated_at kept: this is bookkeeping, not a change anyone made.
+                .values(confidence=ML_MAX_CONFIDENCE, updated_at=Transaction.updated_at)
+            )
 
 
 def _migrate(db: Engine, cfg: Config, tables: set[str]) -> SchemaState:

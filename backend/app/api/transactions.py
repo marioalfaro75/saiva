@@ -16,7 +16,7 @@ from sqlalchemy.sql.elements import ColumnElement
 from .. import models, schemas
 from ..db import get_db
 from ..deps import get_current_user, optional_period, require_writer
-from ..services import periods
+from ..services import periods, transfers
 from ..services.categorise import RuleDefinition, build_categoriser, reapply_rules
 from ..services.importers import dedup_hash
 from ..services.merchants import normalise_merchant
@@ -295,7 +295,10 @@ def update_txn(
 ) -> schemas.TransactionOut:
     t = _get_owned(db, txn_id, user.household_id)
     for key, value in payload.model_dump(exclude_unset=True).items():
-        setattr(t, key, value)
+        if key == "is_transfer" and value is False and t.is_transfer:
+            transfers.release(db, t)
+        else:
+            setattr(t, key, value)
     db.commit()
     db.refresh(t)
     return _to_out(t, _cat_names(db, user.household_id), _acct_names(db, user.household_id))
@@ -558,8 +561,7 @@ def delete_txn(
             .scalars()
             .all()
         ):
-            other.is_transfer = False
-            other.transfer_group_id = None
+            transfers.release(db, other)
     db.delete(t)
     db.commit()
     return Response(status_code=status.HTTP_204_NO_CONTENT)
