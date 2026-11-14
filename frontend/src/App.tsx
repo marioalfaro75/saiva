@@ -9,6 +9,7 @@ import { Alerts } from "./pages/Alerts";
 import { Benchmarks } from "./pages/Benchmarks";
 import { Bills } from "./pages/Bills";
 import { Budgets } from "./pages/Budgets";
+import { Categories } from "./pages/Categories";
 import { Forecast } from "./pages/Forecast";
 import { Goals } from "./pages/Goals";
 import { ImportPage } from "./pages/Import";
@@ -39,6 +40,7 @@ export default function App() {
           <Route path="/advisor" element={<Advisor />} />
           <Route path="/transactions" element={<Transactions />} />
           <Route path="/accounts" element={<Accounts />} />
+          <Route path="/categories" element={<Categories />} />
           <Route path="/budgets" element={<Budgets />} />
           <Route path="/bills" element={<Bills />} />
           <Route path="/forecast" element={<Forecast />} />
