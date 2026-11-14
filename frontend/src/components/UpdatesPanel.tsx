@@ -267,6 +267,13 @@ export function UpdatesPanel() {
     // that we could not ask.
     !recheck.isError;
 
+  // Whether THIS page is older than the version the box now runs -- the only case in
+  // which reloading changes anything. The success notice used to offer "Reload to use it"
+  // for as long as the last run was a success, which is to say for ever: reloading
+  // re-read the same record and the button came straight back. Same test as the
+  // version line above and the reload banner in Layout.tsx.
+  const pageIsStale = !!data && SPA_VERSION !== data.current_version;
+
   return (
     <div className="card">
       <h2>Software updates</h2>
@@ -279,7 +286,14 @@ export function UpdatesPanel() {
         ) : null}
       </p>
 
-      {summary && (
+      {summary && summary.tone === "good" && !pageIsStale ? (
+        // A success this page already reflects is history, not news: one quiet line and
+        // nothing to press. Failures and rollbacks keep the full notice, always.
+        <p className="muted" style={{ fontSize: "0.9em" }}>
+          Last update: {summary.title}
+          {run.data?.finished_at ? ` · finished ${run.data.finished_at}` : null}
+        </p>
+      ) : summary ? (
         <div className={`notice notice-${summary.tone}`}>
           <strong>{summary.title}</strong>
           <div>{summary.detail}</div>
@@ -300,7 +314,7 @@ export function UpdatesPanel() {
             </button>
           )}
         </div>
-      )}
+      ) : null}
 
       {run.isError && !superseded && (
         <div className="notice notice-warn">
