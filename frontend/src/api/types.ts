@@ -50,6 +50,25 @@ export interface Category {
   color: string | null;
   is_system: boolean;
   sort: number;
+  /** The built-in name it was created with; kept through renames. Null for the household's own. */
+  system_key?: string | null;
+  /** The app files transactions into it itself: it can be renamed but not removed. */
+  protected?: boolean;
+}
+
+/** What removing a category would affect. */
+export interface CategoryUsage {
+  transactions: number;
+  rules: number;
+  budgets: number;
+  subcategories: number;
+}
+
+export interface CategoryRemoved {
+  moved_transactions: number;
+  moved_rules: number;
+  removed_rules: number;
+  removed_budgets: number;
 }
 
 export interface Transaction {

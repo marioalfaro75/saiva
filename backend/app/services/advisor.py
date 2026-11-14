@@ -172,10 +172,11 @@ def _previous_window(start: dt.date, end: dt.date) -> tuple[dt.date, dt.date]:
     return prev_end - span, prev_end
 
 
-def _is_uncategorised(t: models.Transaction, names: dict[str, str]) -> bool:
+def _is_uncategorised(t: models.Transaction, uncategorised_ids: set[str]) -> bool:
     # A row can be uncategorised either by having no category at all or by sitting in
-    # the seeded "Uncategorised" bucket; both mean the same thing to the user.
-    return t.category_id is None or names.get(t.category_id) == UNCATEGORISED
+    # the seeded "Uncategorised" bucket; both mean the same thing to the user. The bucket
+    # is found by its key, since the household may have renamed it.
+    return t.category_id is None or t.category_id in uncategorised_ids
 
 
 def build_context(
@@ -195,14 +196,15 @@ def build_context(
         window = periods.resolve(household, f"fy:{fy_start.year}", today=today)
     start, end, label = window.start, window.end, window.label
 
-    names = {
-        c.id: c.name
-        for c in db.execute(
-            select(models.Category).where(models.Category.household_id == household.id)
-        )
-        .scalars()
-        .all()
-    }
+    # The "Uncategorised" bucket by key, not name: the household may have renamed it.
+    uncategorised_ids = set(
+        db.execute(
+            select(models.Category.id).where(
+                models.Category.household_id == household.id,
+                models.Category.system_key == UNCATEGORISED,
+            )
+        ).scalars()
+    )
     txns = _spendable_leaves(db, household.id, start, end)
     s = summary(db, household, "custom", start, end)
     cb = category_breakdown(db, household, "custom", start, end)
@@ -261,7 +263,7 @@ def build_context(
                 "names are not available in this privacy mode."
             )
 
-    uncat = [t for t in txns if _is_uncategorised(t, names) and t.amount_cents < 0]
+    uncat = [t for t in txns if _is_uncategorised(t, uncategorised_ids) and t.amount_cents < 0]
     if uncat:
         total = sum(-t.amount_cents for t in uncat)
         lines.append(

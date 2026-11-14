@@ -6,6 +6,29 @@ All notable changes to Saiva are documented here. The project follows
 ## [Unreleased]
 
 
+## [0.17.4] — 2026-11-14
+
+Apply it with **Update now** in Settings.
+
+### Added
+
+- **Add, rename and remove categories** — in Settings → Categories. Groups fold open to
+  show their categories, with a box to find one. **Rename** anything, the built-in ones
+  included. **Remove** tells you first what uses the category — its transactions, rules
+  and budget — and asks where the transactions should go (another category, or
+  Uncategorised); its rules move with them, and its budget is removed. **Add** a category
+  to any group, or add a new group. Two categories can't be removed because the app files
+  into them itself — *Internal transfers* and *Uncategorised* — but they can be renamed.
+  Read-only members see the list without the buttons.
+
+### Changed
+
+- Renaming a category is now only a label. Transfer detection, the automatic
+  categoriser, the advisor and the benchmarks used to find their built-in categories by
+  name, so a rename would have quietly switched them off; they now use a fixed key the
+  rename doesn't touch. The update fills that key in on first start.
+
+
 ## [0.17.3] — 2026-11-14
 
 Apply it with **Update now** in Settings.

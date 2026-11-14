@@ -221,20 +221,21 @@ def run(
         return f"Spending by merchant in {window.label}:\n" + "\n".join(rows)
 
     if name == "list_transactions":
-        names = {
-            c.id: c.name
-            for c in db.execute(
-                select(models.Category).where(models.Category.household_id == household.id)
-            )
-            .scalars()
-            .all()
-        }
+        # The "Uncategorised" bucket by key, not name: the household may have renamed it.
+        uncategorised_ids = set(
+            db.execute(
+                select(models.Category.id).where(
+                    models.Category.household_id == household.id,
+                    models.Category.system_key == UNCATEGORISED,
+                )
+            ).scalars()
+        )
         rows_in = [t for t in txns if t.amount_cents < 0]
         if args.get("uncategorised_only"):
             rows_in = [
                 t
                 for t in rows_in
-                if t.category_id is None or names.get(t.category_id) == UNCATEGORISED
+                if t.category_id is None or t.category_id in uncategorised_ids
             ]
         if not rows_in:
             return f"No matching transactions in {window.label}."

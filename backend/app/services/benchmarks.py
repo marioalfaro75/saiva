@@ -57,13 +57,18 @@ def _equivalence_factor(adults: int, children: int) -> float:
     return 1.0 + 0.5 * (adults - 1) + 0.3 * max(children, 0)
 
 
-def _root_name(category: models.Category, by_id: dict[str, models.Category]) -> str:
+def _root_key(category: models.Category, by_id: dict[str, models.Category]) -> str | None:
+    """The built-in group a category rolls up to, by key -- the benchmark it is compared to.
+
+    By key rather than name, so a renamed "Groceries" is still compared with groceries.
+    None for a group the household created: there is no benchmark for it to meet.
+    """
     seen: set[str] = set()
     current = category
     while current.parent_id and current.parent_id in by_id and current.id not in seen:
         seen.add(current.id)
         current = by_id[current.parent_id]
-    return current.name
+    return current.system_key
 
 
 def _your_weekly_by_category(db: Session, household_id: str, today: dt.date) -> dict[str, int]:
@@ -88,7 +93,9 @@ def _your_weekly_by_category(db: Session, household_id: str, today: dt.date) -> 
         category = by_id.get(t.category_id) if t.category_id else None
         if category is None:
             continue
-        root = _root_name(category, by_id)
+        root = _root_key(category, by_id)
+        if root is None:
+            continue
         totals[root] = totals.get(root, 0) + (-t.amount_cents)
     n = len(months) or 1  # average over the months that actually have data
     return {name: round(total / n / WEEKS_PER_MONTH) for name, total in totals.items()}

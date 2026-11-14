@@ -22,3 +22,7 @@ ROLE_RANK = {"viewer": 0, "adult": 1, "owner": 2}
 
 UNCATEGORISED = "Uncategorised"
 TRANSFER_CATEGORY = "Internal transfers"
+# Built-in categories the app itself files transactions into, so the household may
+# rename them but not remove them: transfer detection needs somewhere to put transfers,
+# and the categoriser somewhere to put what it cannot place. Matched on system_key.
+PROTECTED_CATEGORY_KEYS = frozenset({UNCATEGORISED, TRANSFER_CATEGORY})

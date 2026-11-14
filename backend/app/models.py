@@ -21,6 +21,7 @@ from sqlalchemy import (
 )
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
+from .constants import PROTECTED_CATEGORY_KEYS
 from .db import Base
 
 
@@ -114,6 +115,15 @@ class Category(Base, TimestampMixin):
     color: Mapped[str | None] = mapped_column(String(9), nullable=True)
     is_system: Mapped[bool] = mapped_column(Boolean, default=False)
     sort: Mapped[int] = mapped_column(Integer, default=0)
+    # The name a built-in category was created with, which survives the household
+    # renaming it. Code that must find a particular built-in category matches on this,
+    # never on `name`. None for categories the household created itself.
+    system_key: Mapped[str | None] = mapped_column(String(80), nullable=True)
+
+    @property
+    def protected(self) -> bool:
+        """The app files transactions into this one itself, so it cannot be removed."""
+        return self.system_key in PROTECTED_CATEGORY_KEYS
 
 
 class CategorisationRule(Base, TimestampMixin):

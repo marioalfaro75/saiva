@@ -85,7 +85,8 @@ def detect_transfers(
     transfer_category_id = db.execute(
         select(models.Category.id).where(
             models.Category.household_id == household_id,
-            models.Category.name == TRANSFER_CATEGORY,
+            # By key, not name: the household may rename "Internal transfers".
+            models.Category.system_key == TRANSFER_CATEGORY,
         )
     ).scalar_one_or_none()
 
