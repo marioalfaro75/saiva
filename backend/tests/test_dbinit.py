@@ -632,6 +632,8 @@ def test_a_start_applies_rules_made_before_rules_applied_themselves(cold_start: 
         household = models.Household(name="Smith Family")
         db.add(household)
         db.flush()
+        # A household from before the update: this code creates them already marked.
+        household.rules_applied_at = None
         account = models.Account(household_id=household.id, name="Everyday", type="everyday")
         loan = models.Category(
             household_id=household.id, name="Car Loan repayments", kind="expense"

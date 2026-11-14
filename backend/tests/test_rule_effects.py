@@ -816,3 +816,117 @@ def test_a_failure_applying_old_rules_never_stops_a_start(
     monkeypatch.undo()
     _apply_rules_once(engine)  # ... and the next start does it
     assert _state(blank) == (loan, RULE_CONFIDENCE)
+
+
+# --------------------------------------------------------------------------------------
+# Found in review of the one-time sweep
+# --------------------------------------------------------------------------------------
+
+
+def test_uncategorised_picked_by_a_person_stays_that_way(auth_client: TestClient) -> None:
+    # Picking "Uncategorised" is a choice: a starter rule had filed this as Fuel, the
+    # person said no. Neither the sweep nor a later rule change may put it back.
+    account = create_account(auth_client)["id"]
+    fuel = _cat(auth_client, "Fuel")
+    txn = _add(auth_client, account, "SHELLHARBOUR CITY COUNCIL RATES")
+    assert _state(txn)[0] == fuel, "the starter rule 'shell' files it"
+    resp = auth_client.post(
+        f"/api/transactions/{txn}/recategorise", json={"category_id": None, "scope": "none"}
+    )
+    assert resp.status_code == 200, resp.text
+    assert _state(txn) == (None, 1.0)
+
+    _not_yet_applied()
+    _apply_rules_once(engine)
+    assert _state(txn) == (None, 1.0)
+
+    p = auth_client.post(
+        "/api/rules/preview",
+        json={"match_type": "contains", "pattern": "shellharbour", "category_id": fuel},
+    ).json()
+    assert p["rows"][0]["outcome"] == "kept"
+    made = _rule(auth_client, "shellharbour", fuel)
+    assert made["categorised"] == 0
+    assert _state(txn) == (None, 1.0)
+
+
+def test_the_sweep_leaves_a_blank_someone_made_before_clearing_was_recorded(
+    auth_client: TestClient,
+) -> None:
+    account = create_account(auth_client)["id"]
+    loan = _cat(auth_client, "Loan repayments")
+    cleared = _add(auth_client, account, "By Authority To Vw")
+    never_touched = _add(auth_client, account, "By Authority To Vw")
+    with SessionLocal() as db:
+        for txn_id, gap in ((cleared, dt.timedelta(days=2)), (never_touched, dt.timedelta(0))):
+            t = db.get(models.Transaction, txn_id)
+            assert t is not None
+            t.category_id, t.confidence = None, None
+            db.flush()
+            t.updated_at = t.created_at + gap
+        db.commit()
+    _old_rule("By Authority To Vw", loan)
+    _not_yet_applied()
+
+    _apply_rules_once(engine)
+
+    assert _state(cleared) == (None, None)
+    assert _state(never_touched) == (loan, RULE_CONFIDENCE)
+
+
+def test_a_household_made_after_the_update_is_not_swept_later(auth_client: TestClient) -> None:
+    # The sweep catches up households that predate it; one made now has nothing to
+    # catch up on, and an unprompted re-file at some later restart is the last thing
+    # it should get.
+    with SessionLocal() as db:
+        assert db.execute(select(models.Household.rules_applied_at)).scalar_one() is not None
+    account = create_account(auth_client)["id"]
+    loan = _cat(auth_client, "Loan repayments")
+    blank = _add(auth_client, account, "By Authority To Vw")
+    _old_rule("By Authority To Vw", loan)
+
+    _apply_rules_once(engine)
+
+    assert _state(blank) == (None, None)
+
+
+def test_a_slow_regular_expression_cannot_hold_up_the_sweep(
+    auth_client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # One that runs out of time costs its full timeout on every row it is tried on: over
+    # a few thousand rows, longer than an update waits for the app to come up.
+    from app.services import categorise
+
+    account = create_account(auth_client)["id"]
+    coffee = _cat(auth_client, "Coffee")
+    rows = [_add(auth_client, account, f"ZEBRA CAFE {i}") for i in range(12)]
+    slow = r"(\w+\s*)+(?:zz){e<=1}$"
+    with SessionLocal() as db:
+        household = db.execute(select(models.Household.id)).scalar_one()
+        db.add(
+            models.CategorisationRule(
+                household_id=household,
+                match_type="regex",
+                pattern=slow,
+                category_id=coffee,
+                priority=5,
+                source="user",
+            )
+        )
+        db.commit()
+    _old_rule("zebra cafe", coffee)
+    tries: list[str] = []
+    real = categorise._regex_search
+
+    def counting(pattern: str, subject: str) -> bool | None:
+        tries.append(pattern)
+        return None if pattern == slow else real(pattern, subject)
+
+    monkeypatch.setattr(categorise, "_regex_search", counting)
+    with SessionLocal() as db:
+        effect = apply_all_rules(db, household)
+        db.commit()
+
+    assert tries.count(slow) == 3
+    assert effect.categorised == len(rows)
+    assert all(_state(t) == (coffee, RULE_CONFIDENCE) for t in rows)

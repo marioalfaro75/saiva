@@ -62,7 +62,8 @@ def _match(match_type: str, pattern: str, description: str, merchant: str | None
 _REGEX_TIMEOUT_SECONDS = 0.1
 
 
-def _regex_matches(pattern: str, subject: str) -> bool:
+def _regex_search(pattern: str, subject: str) -> bool | None:
+    """Whether the pattern matches, or None if it ran out of time deciding."""
     try:
         return (
             regex.search(
@@ -73,9 +74,13 @@ def _regex_matches(pattern: str, subject: str) -> bool:
     except regex.error:
         return False
     except TimeoutError:
-        # Treated as "no match" rather than an error: one pathological rule should not
-        # fail an entire import, and the rule simply stops being useful.
-        return False
+        return None
+
+
+def _regex_matches(pattern: str, subject: str) -> bool:
+    # A timeout is "no match" rather than an error: one pathological rule should not
+    # fail an entire import, and the rule simply stops being useful.
+    return bool(_regex_search(pattern, subject))
 
 
 class Categoriser:
@@ -162,10 +167,13 @@ def matches(match_type: str, pattern: str, txn: models.Transaction) -> bool:
 
 
 def set_by_person(t: models.Transaction) -> bool:
-    """A category someone chose: through the app (1.0), or with no score at all -- a
-    transaction added by hand with its category, or data that predates scores. Rules
+    """A category someone chose: through the app (1.0) -- "Uncategorised" included, which
+    is stored as no category with a person's 1.0 -- or a category with no score at all:
+    a transaction added by hand with its category, or data that predates scores. Rules
     never replace one; treating an unknown origin as a person's choice errs that way."""
-    return t.category_id is not None and (t.confidence is None or t.confidence >= PERSON_CONFIDENCE)
+    if t.confidence is not None and t.confidence >= PERSON_CONFIDENCE:
+        return True
+    return t.category_id is not None and t.confidence is None
 
 
 def set_by_rule(t: models.Transaction) -> bool:
@@ -318,6 +326,22 @@ def reapply_rules(
     return effect
 
 
+_SWEEP_TIMEOUTS_ALLOWED = 3
+
+
+def _cleared_by_a_person_long_ago(t: models.Transaction) -> bool:
+    """A blank someone made, before clearing was recorded as a person's choice.
+
+    Before this release, picking "Uncategorised" stored no category and no score -- the
+    same as a transaction imported with nothing to file it under. The difference is that
+    a person's change moved updated_at: a blank that has changed since it was created
+    was cleared by someone (or by a rule, or transfer detection, letting it go), and the
+    one-time sweep leaves it blank rather than second-guess them. Blanks never touched
+    since import are the ones no rule ever got to, and are filed.
+    """
+    return t.category_id is None and t.updated_at - t.created_at >= UNTOUCHED
+
+
 def apply_all_rules(db: Session, household_id: str) -> RuleEffect:
     """File every transaction rules may change in its first matching rule's category.
 
@@ -334,10 +358,34 @@ def apply_all_rules(db: Session, household_id: str) -> RuleEffect:
     effect = RuleEffect()
     if not rules:
         return effect
+    # This runs before the app serves, over every transaction at once. A regular
+    # expression that runs out of time costs its full timeout on every row it is tried
+    # on -- minutes, over a few thousand, enough to fail an update's health wait and
+    # roll it back, every time. One that keeps timing out is dropped for the rest of the
+    # sweep: a timeout already counts as "no match", so the outcome is what an import
+    # would have given, without paying for it on every row.
+    timeouts: Counter[str] = Counter()
+
+    def first_match(t: models.Transaction) -> models.CategorisationRule | None:
+        combined = f"{t.raw_description} {t.merchant or ''}".lower()
+        for r in rules:
+            if r.match_type != "regex":
+                if matches(r.match_type, r.pattern, t):
+                    return r
+                continue
+            if timeouts[r.id] >= _SWEEP_TIMEOUTS_ALLOWED:
+                continue
+            hit = _regex_search(r.pattern, combined)
+            if hit is None:
+                timeouts[r.id] += 1
+            elif hit:
+                return r
+        return None
+
     for t in _rule_scope(db, household_id):
-        if not rules_may_change(t):
+        if not rules_may_change(t) or _cleared_by_a_person_long_ago(t):
             continue
-        winner = _first_match(rules, t)
+        winner = first_match(t)
         if winner is None:
             continue
         if t.category_id != winner.category_id:

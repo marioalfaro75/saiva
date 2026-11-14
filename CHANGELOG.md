@@ -17,6 +17,8 @@ Apply it with **Update now** in Settings.
   the transactions already there — and *Apply now* was gone, so nothing would. The
   update applies all your rules once, on first start. Categories you chose yourself, or
   locked, are left as they are.
+- Choosing **Uncategorised** for a transaction is now remembered as your choice, so no
+  rule puts a category back on it.
 
 ## [0.17.5] — 2026-11-14
 

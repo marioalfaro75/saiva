@@ -62,7 +62,12 @@ class Household(Base, TimestampMixin):
 
     # When dbinit applied the household's rules to every transaction they may change:
     # once, for rules made before rules took effect by themselves. See dbinit.
-    rules_applied_at: Mapped[dt.datetime | None] = mapped_column(DateTime, nullable=True)
+    # Set when a household is created by this code (nothing to catch up on); NULL only
+    # on households that predate it, or that an older image created after a rollback.
+    # A Python-side default, not a server one: the migration only adds the column.
+    rules_applied_at: Mapped[dt.datetime | None] = mapped_column(
+        DateTime, nullable=True, default=dt.datetime.utcnow
+    )
 
     users: Mapped[list[User]] = relationship(back_populates="household")
 
