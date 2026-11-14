@@ -117,7 +117,8 @@ def build_categoriser(db: Session, household_id: str) -> Categoriser:
     uncategorised_id = db.execute(
         select(models.Category.id).where(
             models.Category.household_id == household_id,
-            models.Category.name == UNCATEGORISED,
+            # By key, not name: the household may rename "Uncategorised".
+            models.Category.system_key == UNCATEGORISED,
         )
     ).scalar_one_or_none()
 

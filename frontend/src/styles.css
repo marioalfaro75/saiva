@@ -1275,3 +1275,95 @@ tr:has(+ .match-tr) > td {
     padding-bottom: 11px;
   }
 }
+
+/* ---- Settings → Categories --------------------------------------------------------- */
+.cat-groups {
+  display: grid;
+  gap: 6px;
+  margin-top: 4px;
+}
+.cat-group {
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--surface);
+}
+.cat-group-summary {
+  padding: 10px 12px;
+  cursor: pointer;
+}
+section.cat-group .cat-group-summary {
+  cursor: default;
+}
+.cat-group-name {
+  font-weight: 600;
+}
+.cat-group-body {
+  padding: 4px 12px 10px;
+  border-top: 1px solid var(--border);
+}
+.cat-row {
+  padding: 6px 0;
+  border-bottom: 1px solid var(--border);
+}
+.cat-row-line {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.cat-row-actions {
+  display: inline-flex;
+  gap: 6px;
+}
+.cat-row-actions .btn,
+.cat-add {
+  padding: 4px 10px;
+  font-size: 13px;
+}
+.cat-row-form {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+.cat-row-form input {
+  flex: 1 1 180px;
+  width: auto;
+}
+.cat-row-error {
+  flex-basis: 100%;
+}
+.cat-add {
+  margin-top: 6px;
+}
+.cat-remove {
+  margin: 8px 0 4px;
+  padding: 10px 12px;
+  border: 1px solid var(--negative);
+  border-radius: 9px;
+  background: var(--surface-2);
+}
+.cat-remove-effects {
+  margin: 4px 0 10px 18px;
+  padding: 0;
+  color: var(--muted);
+}
+.cat-remove-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.btn-danger {
+  background: transparent;
+  border-color: var(--negative);
+  color: var(--negative);
+}
+.btn-danger:hover:not(:disabled) {
+  background: var(--negative);
+  color: #fff;
+}
+.cat-add-group,
+.cat-add-group-form {
+  margin-top: 12px;
+}

@@ -136,14 +136,40 @@ class CategoryOut(BaseModel):
     color: str | None
     is_system: bool
     sort: int
+    # The built-in name this category was created with, kept through renames.
+    system_key: str | None = None
+    # The app files transactions into it itself, so it can be renamed but not removed.
+    protected: bool = False
 
 
 class CategoryCreate(BaseModel):
     name: str = Field(min_length=1, max_length=80)
     parent_id: str | None = None
+    # Ignored for a category inside a group: it takes its group's kind, so an "income"
+    # group cannot quietly contain an expense category.
     kind: Literal["income", "expense", "transfer", "savings"] = "expense"
     icon: str | None = None
     color: str | None = None
+
+
+class CategoryRename(BaseModel):
+    name: str = Field(min_length=1, max_length=80)
+
+
+class CategoryUsage(BaseModel):
+    """What removing a category would affect, so the page can say so before it happens."""
+
+    transactions: int
+    rules: int
+    budgets: int
+    subcategories: int
+
+
+class CategoryRemoved(BaseModel):
+    moved_transactions: int
+    moved_rules: int
+    removed_rules: int
+    removed_budgets: int
 
 
 # --------------------------------------------------------------------------- rules

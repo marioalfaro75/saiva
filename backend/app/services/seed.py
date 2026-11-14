@@ -48,7 +48,7 @@ def seed_household_defaults(db: Session, household: models.Household) -> None:
     for parent in DEFAULT_TAXONOMY:
         p = models.Category(
             household_id=household.id, name=parent["name"], kind=parent["kind"],
-            is_system=True, sort=sort,
+            is_system=True, sort=sort, system_key=parent["name"],
         )
         sort += 1
         db.add(p)
@@ -57,7 +57,7 @@ def seed_household_defaults(db: Session, household: models.Household) -> None:
         for child in parent["children"]:
             c = models.Category(
                 household_id=household.id, name=child, parent_id=p.id,
-                kind=parent["kind"], is_system=True, sort=sort,
+                kind=parent["kind"], is_system=True, sort=sort, system_key=child,
             )
             sort += 1
             db.add(c)

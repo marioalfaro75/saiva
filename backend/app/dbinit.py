@@ -29,10 +29,11 @@ import sys
 
 from alembic import command
 from alembic.config import Config
-from sqlalchemy import inspect
+from sqlalchemy import inspect, update
 from sqlalchemy.engine import URL, Engine
 
 from .db import engine
+from .models import Category
 from .schema_state import SchemaState, ahead_warning, alembic_config, read_schema_state
 
 BASELINE_REVISION = "0001"
@@ -116,9 +117,37 @@ def main(db: Engine | None = None, cfg: Config | None = None) -> SchemaState:
         # and reported on, which is what makes the four-way decision below trustworthy.
         cfg.attributes["connection"] = conn
         try:
-            return _migrate(db, cfg, tables)
+            state = _migrate(db, cfg, tables)
         finally:
             cfg.attributes.pop("connection", None)
+    if not state.is_ahead:
+        _record_category_keys(db)
+    return state
+
+
+def _record_category_keys(db: Engine) -> None:
+    """Give each built-in category its system_key, once, before the app serves anything.
+
+    Revision 0013 only adds the column, because a migration may not touch a row. This
+    fills it, and on the first start of the release that added it, a built-in category's
+    name is exactly its key: nothing could rename a category before that release. After
+    that it only ever fills an EMPTY key -- a household created by an older image after a
+    rollback, say -- so a later rename can never be mistaken for the original name.
+
+    Skipped when the table or the column is not there -- an older image's migrations
+    under this code, or a test standing in for the upgrade -- never a real deployment.
+    """
+    inspector = inspect(db)
+    if "categories" not in inspector.get_table_names():
+        return
+    if "system_key" not in {c["name"] for c in inspector.get_columns("categories")}:
+        return
+    with db.begin() as conn:
+        conn.execute(
+            update(Category)
+            .where(Category.is_system.is_(True), Category.system_key.is_(None))
+            .values(system_key=Category.name)
+        )
 
 
 def _migrate(db: Engine, cfg: Config, tables: set[str]) -> SchemaState:

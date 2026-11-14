@@ -9,6 +9,8 @@ import type {
   Budget,
   Category,
   CategoryBreakdown,
+  CategoryRemoved,
+  CategoryUsage,
   ChatMessage,
   Forecast,
   ForecastAdjustment,
@@ -29,15 +31,15 @@ import type {
   ResolvedPeriod,
   Rule,
   RulePreview,
-  UpcomingBills,
   SavingsGoal,
   SetupBody,
   SniffResult,
   Summary,
   Transaction,
   TransactionList,
-  TxnGroups,
   Trend,
+  TxnGroups,
+  UpcomingBills,
   UpdateRun,
   UpdateStatus,
 } from "./types";
@@ -176,6 +178,17 @@ export const api = {
     request<Account>("/accounts", { method: "POST", body: JSON.stringify(body) }),
 
   categories: () => request<Category[]>("/categories"),
+  createCategory: (body: { name: string; parent_id?: string | null; kind?: string }) =>
+    request<Category>("/categories", { method: "POST", body: JSON.stringify(body) }),
+  renameCategory: (id: string, name: string) =>
+    request<Category>(`/categories/${id}`, { method: "PATCH", body: JSON.stringify({ name }) }),
+  categoryUsage: (id: string) => request<CategoryUsage>(`/categories/${id}/usage`),
+  /** Moves its transactions (and rules) to `moveTo`, or uncategorises them when null. */
+  removeCategory: (id: string, moveTo: string | null) =>
+    request<CategoryRemoved>(
+      `/categories/${id}${moveTo ? `?move_to=${encodeURIComponent(moveTo)}` : ""}`,
+      { method: "DELETE" },
+    ),
 
   rules: () => request<Rule[]>("/rules"),
   createRule: (body: {
