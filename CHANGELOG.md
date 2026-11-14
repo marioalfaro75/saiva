@@ -6,6 +6,29 @@ All notable changes to Saiva are documented here. The project follows
 ## [Unreleased]
 
 
+## [0.17.3] — 2026-11-14
+
+Apply it with **Update now** in Settings.
+
+### Added
+
+- **Find a category by typing.** Every category field — on a transaction, in the categorise
+  window, the filter, bulk changes, group review, rules, budgets and the forecast — was one
+  flat list of 78 categories with no sign of which group each belonged to. Now you can type:
+  it matches the category *and* its group, anywhere in the word, so "groc" finds
+  Supermarkets and Butcher/Greengrocer and "fuel" finds Transport › Fuel. Without typing,
+  the list is grouped under its headings, and your last five picks sit at the top. Arrow
+  keys, Enter and Esc work, and so does a phone.
+
+### Fixed
+
+- **The categorise window lost what you were doing when the page behind it refreshed.**
+  A background refresh moved the cursor out of the window and back, which could close a
+  list you had open and wipe what you had typed.
+- **Clicking the dimmed background with a list open** now closes just the list, not the
+  whole window.
+
+
 ## [0.17.2] — 2026-11-14
 
 Apply it with **Update now** in Settings. The new Backups wording appears after the update
