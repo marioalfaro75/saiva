@@ -14,6 +14,8 @@ import {
 import { api } from "../api/client";
 import { formatCents, formatDate } from "../format";
 import { usePeriod } from "../period/context";
+import type { Category } from "../api/types";
+import { CategoryPicker } from "../components/CategoryPicker";
 import { PageHead } from "../components/PageHead";
 
 const HORIZONS = [
@@ -39,6 +41,9 @@ function Stat({ label, value, cls, sub }: { label: string; value: string; cls?: 
   );
 }
 
+/** The scenario trims spending, so only expense subcategories can be cut. */
+const isExpenseSubcategory = (c: Category) => c.parent_id !== null && c.kind === "expense";
+
 export function Forecast() {
   const { period } = usePeriod();
   const [days, setDays] = useState(90);
@@ -57,7 +62,6 @@ export function Forecast() {
     enabled: scenarioOn,
   });
 
-  const expenseCats = (categories.data ?? []).filter((c) => c.parent_id && c.kind === "expense");
   const view = scenarioOn && scenario.data ? scenario.data : base.data;
 
   const chart = (base.data?.points ?? []).map((p, i) => ({
@@ -153,18 +157,16 @@ export function Forecast() {
           See the effect of trimming a category's spending across the forecast.
         </p>
         <div className="toolbar" style={{ marginBottom: 0 }}>
-          <select
+          <CategoryPicker
             className="pill-select"
+            aria-label="Category"
+            categories={categories.data ?? []}
+            selectable={isExpenseSubcategory}
             value={categoryId}
-            onChange={(e) => setCategoryId(e.target.value)}
-          >
-            <option value="">Choose a category…</option>
-            {expenseCats.map((c) => (
-              <option key={c.id} value={c.id}>
-                {c.name}
-              </option>
-            ))}
-          </select>
+            onChange={setCategoryId}
+            placeholder="Choose a category…"
+            emptyLabel="None"
+          />
           <select
             className="pill-select"
             value={cut}

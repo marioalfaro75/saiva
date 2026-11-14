@@ -1,8 +1,13 @@
-import { type RefObject, useEffect, useRef } from "react";
+import { type RefObject, useEffect, useEffectEvent, useRef } from "react";
 
 const FOCUSABLE =
   'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), ' +
   'textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
+
+function isOpenCombobox(target: EventTarget | null): boolean {
+  const el = target as Element | null;
+  return el?.getAttribute?.("role") === "combobox" && el.getAttribute("aria-expanded") === "true";
+}
 
 /**
  * Shared behaviour for anything that opens over the page — the categorise dialog
@@ -18,6 +23,12 @@ export function useDismissable<T extends HTMLElement>(
 ): RefObject<T | null> {
   const ref = useRef<T>(null);
   const returnTo = useRef<Element | null>(null);
+  // The latest onClose, without making the effect below depend on its identity. Callers
+  // pass a fresh arrow on every render, and depending on it re-ran the effect on every
+  // re-render of the page behind the dialog -- each run sending focus back out and in
+  // again. That blurred whatever field was in use, which for a category picker meant
+  // its list closed and the letters typed into it were lost.
+  const close = useEffectEvent(onClose);
 
   useEffect(() => {
     if (!open) return;
@@ -29,9 +40,13 @@ export function useDismissable<T extends HTMLElement>(
     (first ?? panel)?.focus();
 
     const onKeyDown = (e: KeyboardEvent) => {
+      // Escape on an OPEN combobox belongs to the combobox: it closes its own list first.
+      // This listener runs in the capture phase, before the combobox sees the key, so
+      // without this one Escape meant to close a category list closed the whole dialog.
+      if (e.key === "Escape" && isOpenCombobox(e.target)) return;
       if (e.key === "Escape") {
         e.stopPropagation();
-        onClose();
+        close();
         return;
       }
       if (e.key !== "Tab" || !panel) return;
@@ -50,11 +65,23 @@ export function useDismissable<T extends HTMLElement>(
 
     // Remember where the gesture began so a drag ending outside doesn't dismiss.
     let startedOutside = false;
+    // A floating layer -- a picker's list rendered into document.body so a scrolling
+    // table cannot clip it -- is part of whatever opened it, not "outside" the panel.
+    const inside = (target: EventTarget | null) =>
+      !!panel &&
+      (panel.contains(target as Node) ||
+        !!(target as Element | null)?.closest?.("[data-floating-layer]"));
     const onPointerDown = (e: PointerEvent) => {
-      startedOutside = !!panel && !panel.contains(e.target as Node);
+      // A press outside while a picker's list is open closes that list, not the dialog --
+      // the same order Escape follows, and what a native select's popup did with it.
+      if (isOpenCombobox(document.activeElement)) {
+        startedOutside = false;
+        return;
+      }
+      startedOutside = !!panel && !inside(e.target);
     };
     const onPointerUp = (e: PointerEvent) => {
-      if (startedOutside && panel && !panel.contains(e.target as Node)) onClose();
+      if (startedOutside && panel && !inside(e.target)) close();
       startedOutside = false;
     };
 
@@ -73,7 +100,7 @@ export function useDismissable<T extends HTMLElement>(
       // Send focus back where it came from, so dismissing doesn't lose the user's place.
       (returnTo.current as HTMLElement | null)?.focus?.();
     };
-  }, [open, onClose]);
+  }, [open]);
 
   return ref;
 }

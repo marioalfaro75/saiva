@@ -1,8 +1,9 @@
-import { useId, useMemo, useState } from "react";
+import { useId, useState } from "react";
 
 import { useDismissable } from "../hooks/useDismissable";
 
 import type { Category, RecategoriseScope, Transaction } from "../api/types";
+import { CategoryPicker } from "./CategoryPicker";
 
 interface Props {
   txn: Transaction;
@@ -27,7 +28,6 @@ const SCOPE_LABELS: Record<RecategoriseScope, string> = {
 
 export function CategoriseDialog({ txn, categories, busy, onClose, onSubmit }: Props) {
   const fid = useId();
-  const subcategories = useMemo(() => categories.filter((c) => c.parent_id), [categories]);
   const [categoryId, setCategoryId] = useState(txn.category_id ?? "");
   const [scope, setScope] = useState<RecategoriseScope>("none");
   const [pattern, setPattern] = useState(txn.merchant ?? txn.raw_description);
@@ -53,18 +53,13 @@ export function CategoriseDialog({ txn, categories, busy, onClose, onSubmit }: P
 
         <div className="field">
           <label htmlFor={`${fid}-category`}>Category</label>
-          <select
+          <CategoryPicker
             id={`${fid}-category`}
+            categories={categories}
             value={categoryId}
-            onChange={(e) => setCategoryId(e.target.value)}
-          >
-            <option value="">Uncategorised</option>
-            {subcategories.map((c) => (
-              <option key={c.id} value={c.id}>
-                {c.name}
-              </option>
-            ))}
-          </select>
+            onChange={setCategoryId}
+            emptyLabel="Uncategorised"
+          />
         </div>
 
         <div className="field">

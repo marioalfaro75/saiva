@@ -4,6 +4,7 @@ import { Link } from "react-router-dom";
 
 import { api } from "../api/client";
 import type { Budget, Category } from "../api/types";
+import { CategoryPicker } from "../components/CategoryPicker";
 import { EmptyState } from "../components/EmptyState";
 import { dollarsToCents, formatCents, formatPct } from "../format";
 import { usePeriod } from "../period/context";
@@ -15,26 +16,12 @@ const PERIODS = [
   { value: "annual", label: "Annual" },
 ];
 
-interface CategoryOption {
-  id: string;
-  label: string;
-}
-
-/** Expense categories as a flat, parent-then-children list, minus ones already budgeted. */
-function buildCategoryOptions(categories: Category[], taken: Set<string>): CategoryOption[] {
-  const expense = categories.filter((c) => c.kind === "expense");
-  const parents = expense.filter((c) => c.parent_id === null).sort((a, b) => a.sort - b.sort);
-  const childrenOf = (id: string) =>
-    expense.filter((c) => c.parent_id === id).sort((a, b) => a.sort - b.sort);
-
-  const options: CategoryOption[] = [];
-  for (const parent of parents) {
-    if (!taken.has(parent.id)) options.push({ id: parent.id, label: parent.name });
-    for (const child of childrenOf(parent.id)) {
-      if (!taken.has(child.id)) options.push({ id: child.id, label: `— ${child.name}` });
-    }
-  }
-  return options;
+/**
+ * What a new budget may be set on: any expense category, a whole group included, that
+ * is not budgeted already. The picker shows a group as "Groceries (whole group)".
+ */
+function budgetableIn(taken: Set<string>): (c: Category) => boolean {
+  return (c) => c.kind === "expense" && !taken.has(c.id);
 }
 
 function BudgetCard({
@@ -165,10 +152,7 @@ export function Budgets() {
     () => new Set((budgets.data ?? []).map((b) => b.category_id)),
     [budgets.data],
   );
-  const options = useMemo(
-    () => buildCategoryOptions(categories.data ?? [], taken),
-    [categories.data, taken],
-  );
+  const budgetable = useMemo(() => budgetableIn(taken), [taken]);
 
   const [categoryId, setCategoryId] = useState("");
   const [period, setPeriod] = useState("monthly");
@@ -241,19 +225,15 @@ export function Budgets() {
           <div className="row">
             <div className="field">
               <label htmlFor={`${fid}-category`}>Category</label>
-              <select
+              <CategoryPicker
                 id={`${fid}-category`}
+                categories={categories.data ?? []}
+                selectable={budgetable}
                 value={categoryId}
-                onChange={(e) => setCategoryId(e.target.value)}
+                onChange={setCategoryId}
+                placeholder="Choose a category…"
                 required
-              >
-                <option value="">Choose a category…</option>
-                {options.map((o) => (
-                  <option key={o.id} value={o.id}>
-                    {o.label}
-                  </option>
-                ))}
-              </select>
+              />
             </div>
             <div className="field">
               <label htmlFor={`${fid}-period`}>Period</label>
@@ -291,7 +271,9 @@ export function Budgets() {
           >
             Add budget
           </button>
-          {options.length === 0 && categories.data && categories.data.length > 0 && (
+          {categories.data &&
+            categories.data.length > 0 &&
+            !categories.data.some(budgetable) && (
             <p className="muted" style={{ marginTop: 8 }}>
               Every expense category already has a budget — thorough!
             </p>

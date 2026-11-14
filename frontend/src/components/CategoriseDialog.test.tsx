@@ -47,6 +47,31 @@ function open(onClose = vi.fn()) {
 }
 
 describe("CategoriseDialog", () => {
+  it("applies the category typed in, when Apply is clicked straight after typing", () => {
+    // Found in review. The dialog focuses the category field on open; typing "fuel"
+    // highlights Fuel; the click on Apply blurs the field first. The first version of the
+    // picker dropped the typed match on that blur, so Apply sent the OLD category (here,
+    // none) -- with "All from this merchant", to every transaction from the merchant.
+    const cats = [
+      { id: "p2", name: "Transport", parent_id: null, kind: "expense", sort: 1 },
+      { id: "c2", name: "Fuel", parent_id: "p2", kind: "expense", sort: 2 },
+      { id: "c3", name: "Parking", parent_id: "p2", kind: "expense", sort: 3 },
+    ] as unknown as Category[];
+    const onSubmit = vi.fn();
+    render(<CategoriseDialog txn={TXN} categories={cats} onClose={vi.fn()} onSubmit={onSubmit} />);
+    const field = screen.getByRole("combobox", { name: "Category" });
+    fireEvent.focus(field);
+    fireEvent.change(field, { target: { value: "fuel" } });
+
+    const apply = screen.getByRole("button", { name: "Apply" });
+    fireEvent.mouseDown(apply);
+    fireEvent.blur(field);
+    fireEvent.click(apply);
+
+    expect(onSubmit).toHaveBeenCalledWith(expect.objectContaining({ category_id: "c2" }));
+  });
+
+
   it("is announced as a modal dialog with a name", () => {
     open();
     const dialog = screen.getByRole("dialog");
