@@ -8,6 +8,7 @@ import { SortHeader } from "../table/SortHeader";
 import type { ColumnSpec } from "../table/sorting";
 import { useTable } from "../table/useTable";
 import type { Category, MatchType, Rule } from "../api/types";
+import { CategoryPicker } from "./CategoryPicker";
 
 const MATCH_TYPES: MatchType[] = ["contains", "starts_with", "equals", "merchant", "regex"];
 
@@ -37,7 +38,6 @@ export function RulesManager({ categories, onFlash }: Props) {
   const fid = useId();
   const qc = useQueryClient();
   const rules = useQuery({ queryKey: ["rules"], queryFn: api.rules });
-  const subcategories = useMemo(() => categories.filter((c) => c.parent_id), [categories]);
   const categoryNames = useMemo(
     () => new Map(categories.map((c) => [c.id, c.name])),
     [categories],
@@ -134,18 +134,13 @@ export function RulesManager({ categories, onFlash }: Props) {
           </div>
           <div>
             <label htmlFor={`${fid}-category`}>Category</label>
-            <select
+            <CategoryPicker
               id={`${fid}-category`}
+              categories={categories}
               value={categoryId}
-              onChange={(e) => setCategoryId(e.target.value)}
-            >
-              <option value="">Choose…</option>
-              {subcategories.map((c) => (
-                <option key={c.id} value={c.id}>
-                  {c.name}
-                </option>
-              ))}
-            </select>
+              onChange={setCategoryId}
+              placeholder="Choose…"
+            />
           </div>
         </div>
         <div className="spread" style={{ marginTop: 12 }}>
@@ -247,19 +242,13 @@ export function RulesManager({ categories, onFlash }: Props) {
                       />
                     </td>
                     <td>
-                      <select
+                      <CategoryPicker
                         className="pill-select"
+                        aria-label="Category"
+                        categories={categories}
                         value={r.category_id}
-                        onChange={(e) =>
-                          update.mutate({ id: r.id, patch: { category_id: e.target.value } })
-                        }
-                      >
-                        {subcategories.map((c) => (
-                          <option key={c.id} value={c.id}>
-                            {c.name}
-                          </option>
-                        ))}
-                      </select>
+                        onChange={(id) => update.mutate({ id: r.id, patch: { category_id: id } })}
+                      />
                     </td>
                     <td className="muted">{r.source}</td>
                     <td className="actions">

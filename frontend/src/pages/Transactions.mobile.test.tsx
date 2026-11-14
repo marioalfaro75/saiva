@@ -89,7 +89,14 @@ const showList = async () => {
   );
   await screen.findByText("Woolworths");
   await screen.findAllByRole("option", { name: "Everyday" });
-  await screen.findAllByRole("option", { name: "Supermarkets" });
+  // The categories query has landed once a row's picker can offer one. A picker builds
+  // its options only while open (a native select kept them in the page all the time),
+  // so open one, wait for the category, and close it again untouched.
+  const picker = (await screen.findAllByRole("combobox", { name: "Category" }))[0];
+  fireEvent.click(picker);
+  await screen.findByRole("option", { name: "Supermarkets" });
+  fireEvent.keyDown(picker, { key: "Escape" });
+  fireEvent.blur(picker);
   await waitFor(() => expect(urlsFetched()).toContain("/api/periods/resolve"));
   return result;
 };

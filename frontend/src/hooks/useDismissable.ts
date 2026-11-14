@@ -4,6 +4,11 @@ const FOCUSABLE =
   'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), ' +
   'textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
 
+function isOpenCombobox(target: EventTarget | null): boolean {
+  const el = target as Element | null;
+  return el?.getAttribute?.("role") === "combobox" && el.getAttribute("aria-expanded") === "true";
+}
+
 /**
  * Shared behaviour for anything that opens over the page — the categorise dialog
  * today, the navigation drawer next.
@@ -29,6 +34,10 @@ export function useDismissable<T extends HTMLElement>(
     (first ?? panel)?.focus();
 
     const onKeyDown = (e: KeyboardEvent) => {
+      // Escape on an OPEN combobox belongs to the combobox: it closes its own list first.
+      // This listener runs in the capture phase, before the combobox sees the key, so
+      // without this one Escape meant to close a category list closed the whole dialog.
+      if (e.key === "Escape" && isOpenCombobox(e.target)) return;
       if (e.key === "Escape") {
         e.stopPropagation();
         onClose();
@@ -50,11 +59,17 @@ export function useDismissable<T extends HTMLElement>(
 
     // Remember where the gesture began so a drag ending outside doesn't dismiss.
     let startedOutside = false;
+    // A floating layer -- a picker's list rendered into document.body so a scrolling
+    // table cannot clip it -- is part of whatever opened it, not "outside" the panel.
+    const inside = (target: EventTarget | null) =>
+      !!panel &&
+      (panel.contains(target as Node) ||
+        !!(target as Element | null)?.closest?.("[data-floating-layer]"));
     const onPointerDown = (e: PointerEvent) => {
-      startedOutside = !!panel && !panel.contains(e.target as Node);
+      startedOutside = !!panel && !inside(e.target);
     };
     const onPointerUp = (e: PointerEvent) => {
-      if (startedOutside && panel && !panel.contains(e.target as Node)) onClose();
+      if (startedOutside && panel && !inside(e.target)) onClose();
       startedOutside = false;
     };
 

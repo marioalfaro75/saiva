@@ -10,6 +10,7 @@ import type { ColumnSpec } from "../table/sorting";
 import { useServerTable } from "../table/useServerTable";
 import { useTable } from "../table/useTable";
 import { CategoriseDialog } from "../components/CategoriseDialog";
+import { CategoryPicker } from "../components/CategoryPicker";
 import { RulesManager } from "../components/RulesManager";
 import { matchesAtMount, PHONE, useMediaQuery } from "../hooks/useMediaQuery";
 import { FilterFields, SortChips } from "../table/MobileControls";
@@ -165,7 +166,7 @@ export function Transactions() {
     },
   });
 
-  const subcategories = (categories.data ?? []).filter((c) => c.parent_id);
+  const allCategories = categories.data ?? [];
   const totalPages = txns.data ? Math.max(1, Math.ceil(txns.data.total / txns.data.page_size)) : 1;
   const pageItems = txns.data?.items ?? [];
   const allOnPageSelected = pageItems.length > 0 && pageItems.every((t) => selected.has(t.id));
@@ -185,14 +186,8 @@ export function Transactions() {
       return next;
     });
 
-  const categoryOptions = subcategories.map((c) => (
-    <option key={c.id} value={c.id}>
-      {c.name}
-    </option>
-  ));
-
   // One definition per interactive control, laid out two ways below: a table on a
-  // wide screen, a stack of cards on a phone. Two copies of a `<select>` wired to a
+  // wide screen, a stack of cards on a phone. Two copies of a picker wired to a
   // mutation is exactly the kind of thing that drifts.
   const pickBox = (t: Transaction) => (
     <input
@@ -204,15 +199,14 @@ export function Transactions() {
     />
   );
   const categoryPicker = (t: Transaction) => (
-    <select
+    <CategoryPicker
       className="pill-select"
       aria-label="Category"
+      categories={allCategories}
       value={t.category_id ?? ""}
-      onChange={(e) => quickCat.mutate({ id: t.id, categoryId: e.target.value })}
-    >
-      <option value="">Uncategorised</option>
-      {categoryOptions}
-    </select>
+      onChange={(id) => quickCat.mutate({ id: t.id, categoryId: id })}
+      emptyLabel="Uncategorised"
+    />
   );
   const rowActions = (t: Transaction) => (
     <>
@@ -295,17 +289,17 @@ export function Transactions() {
                     </option>
                   ))}
                 </select>
-                <select
+                <CategoryPicker
                   className="pill-select"
+                  aria-label="Filter by category"
+                  categories={allCategories}
                   value={categoryId}
-                  onChange={(e) => {
+                  onChange={(id) => {
                     setPage(1);
-                    setCategoryId(e.target.value);
+                    setCategoryId(id);
                   }}
-                >
-                  <option value="">All categories</option>
-                  {categoryOptions}
-                </select>
+                  emptyLabel="All categories"
+                />
                 <label
                   className="muted"
                   style={{ display: "flex", alignItems: "center", gap: 6, margin: 0 }}
@@ -465,14 +459,14 @@ export function Transactions() {
               {selected.size > 0 && (
                 <div className="bulk-bar">
                   <strong>{selected.size} selected</strong>
-                  <select
+                  <CategoryPicker
                     className="pill-select"
+                    aria-label="Category for the selected transactions"
+                    categories={allCategories}
                     value={bulkCat}
-                    onChange={(e) => setBulkCat(e.target.value)}
-                  >
-                    <option value="">Set category…</option>
-                    {categoryOptions}
-                  </select>
+                    onChange={setBulkCat}
+                    placeholder="Set category…"
+                  />
                   <button
                     className="btn btn-primary"
                     disabled={!bulkCat || bulkApply.isPending}
@@ -552,18 +546,17 @@ export function Transactions() {
                         <td className="num">{g.count}</td>
                         <td className="num">{formatCents(g.total_cents)}</td>
                         <td>
-                          <select
+                          <CategoryPicker
                             className="pill-select"
+                            aria-label="Category for this group"
+                            categories={allCategories}
                             value=""
                             disabled={groupApply.isPending}
-                            onChange={(e) => {
-                              if (e.target.value)
-                                groupApply.mutate({ sampleId: g.sample_id, categoryId: e.target.value });
+                            onChange={(id) => {
+                              if (id) groupApply.mutate({ sampleId: g.sample_id, categoryId: id });
                             }}
-                          >
-                            <option value="">Choose…</option>
-                            {categoryOptions}
-                          </select>
+                            placeholder="Choose…"
+                          />
                         </td>
                       </tr>
                     ))}
