@@ -906,6 +906,62 @@ test_status_prints_the_last_run() {
 }
 
 # ======================================================================================
+# fetch: the first thing an update does, and the one step nothing tested
+# ======================================================================================
+
+# Two commits that are nothing to do with the release history, for a tag to point at.
+# An empty-tree commit with a distinct message is a distinct commit, and since neither is
+# HEAD, nothing that reads "what version is this box on" can be confused by them.
+stray_commit() { # WORK MESSAGE -> sha
+  local tree
+  tree="$(git -C "$1" hash-object -t tree /dev/null)"
+  git -C "$1" commit-tree "$tree" -m "$2"
+}
+
+test_a_tag_moved_upstream_does_not_block_every_update() {
+  # Happened on a real box. Its checkout had an old v0.5.0; GitHub's v0.5.0 pointed
+  # somewhere else; and `git fetch --tags` refuses to clobber a local tag, so it exited
+  # non-zero -- every fetch failed, so every update failed, and under --quiet git printed
+  # nothing at all about why. The update blamed the network, which was fine.
+  new_sandbox moved-tag; local work="$WORK"
+  add_release "$work"
+  local theirs ours
+  theirs="$(stray_commit "$work" "where origin's v0.5.0 points now")"
+  ours="$(stray_commit "$work" "where this box's old copy points")"
+  git -C "$work" -c push.negotiate=false push --quiet origin "$theirs:refs/tags/v0.5.0"
+  git -C "$work" tag v0.5.0 "$ours"
+  seed_env "$work" SAIVA_SITE_ADDRESS=https://192.168.0.11 SAIVA_BIND_ADDR=0.0.0.0
+  site_up
+  run_deploy "$work" --apply-release
+
+  assert_eq "0" "$RC" "one stale tag blocked the whole update: $OUT"
+  assert_eq "$(git -C "$work" rev-parse 'v1.1.0^{commit}')" "$(git -C "$work" rev-parse HEAD)" \
+    "the tree did not move to the release"
+  assert_eq "$theirs" "$(git -C "$work" rev-parse v0.5.0)" \
+    "the box must follow the tag as origin has it"
+}
+
+test_a_failed_fetch_says_what_git_said() {
+  # "Check the box's network" was the whole message on a box whose network was fine.
+  # git's own words are what tell a stale tag from a dead network from a wrong URL.
+  new_sandbox fetch-error; local work="$WORK"
+  add_release "$work"
+  seed_env "$work" SAIVA_SITE_ADDRESS=https://192.168.0.11
+  site_up
+  git -C "$work" remote set-url origin "$SANDBOX_ROOT/no-such-repo.git"
+  run_deploy "$work" --apply-release
+
+  [ "$RC" != "0" ] || fail_test "a fetch that cannot work must fail the run"
+  # The STATUS RECORD, not just the terminal. Pressing Update now shows the owner this
+  # record and nothing else -- git's stderr went to run.log, and the record said only
+  # "check the box's network". A terminal run already showed git's fatal errors; the
+  # button never did.
+  assert_contains "$(status_json)" "does not appear to be a git repository" \
+    "the record Settings shows after Update now must carry git's own reason"
+  assert_contains "$(status_json)" "nothing has been changed" "and the reassurance with it"
+}
+
+# ======================================================================================
 
 for t in $(declare -F | awk '{print $3}' | sed -n 's/^test_//p'); do run_test "$t"; done
 
