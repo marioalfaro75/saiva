@@ -20,6 +20,14 @@ os.environ["RATE_LIMIT_LOGIN_PER_MINUTE"] = "1000"
 os.environ["RATE_LIMIT_IMPORT_PER_MINUTE"] = "10000"
 os.environ["RATE_LIMIT_AI_PER_MINUTE"] = "10000"
 os.environ["RATE_LIMIT_REPORT_PER_MINUTE"] = "10000"
+# The host's state directory, pinned to an empty directory that nothing populates.
+# Without this the suite reads whatever SAIVA_UPDATE_DIR happens to be set to in the
+# ambient environment -- and production sets it -- so a real backup record on the
+# machine running the tests makes backup alerts appear in tests about budgets and
+# bills. An empty directory is the honest default: no record and no drop-box is the
+# state where this box says nothing at all. Tests that are ABOUT the state directory
+# point it somewhere of their own.
+os.environ["SAIVA_UPDATE_DIR"] = tempfile.mkdtemp()
 
 import datetime as dt  # noqa: E402
 from collections.abc import Iterator  # noqa: E402

@@ -151,11 +151,17 @@ def request_backup(requested_by: str) -> str:
     request_id = f"{dt.datetime.now(dt.UTC).strftime('%Y%m%dT%H%M%S%fZ')}-{os.getpid()}"
     # Written then renamed, so the host's path unit cannot fire on a half-written file.
     tmp = drop_box / f".{request_id}.tmp"
-    tmp.write_text(
-        f"requested_at={request_id} requested_by={requested_by}\n", encoding="utf-8"
-    )
+    tmp.write_text(f"requested_at={request_id} requested_by={requested_by}\n", encoding="utf-8")
     tmp.replace(drop_box / request_id)
     return request_id
+
+
+def _unreadable_record() -> dict[str, Any]:
+    """The record for "the file is there and cannot be read as one".
+
+    A fresh dict each call: callers treat what they get back as theirs.
+    """
+    return {"phase": "unreadable", "message": "the backup record could not be read"}
 
 
 def read_backup_status() -> dict[str, Any] | None:
@@ -173,8 +179,16 @@ def read_backup_status() -> dict[str, Any] | None:
     except FileNotFoundError:
         return None
     except Exception:  # noqa: BLE001 - a malformed record must not break the settings page
-        return {"phase": "unreadable", "message": "the backup record could not be read"}
-    return payload if isinstance(payload, dict) else None
+        return _unreadable_record()
+    if isinstance(payload, dict):
+        return payload
+    # Valid JSON that is not an object: `[]`, `"x"`, `3`, `null`. The file IS there and
+    # cannot be read as a record, which is the `unreadable` answer and emphatically not
+    # "there has never been a backup". Returning None here told the owner "Nothing has
+    # been backed up yet" about a box that may have months of backups behind it, and the
+    # alerts feed escalates that same sentence to an `alert`. To anyone reading, a parse
+    # error and a parsed non-object are the same fact: nothing here can read the record.
+    return _unreadable_record()
 
 
 def _pending_request() -> bool:
@@ -190,8 +204,13 @@ def _pending_request() -> bool:
         return False
 
 
-def backup_in_progress() -> bool:
+def backup_in_progress(status: dict[str, Any] | None = None) -> bool:
     """True while a request is queued or a run is genuinely under way.
+
+    `status` lets a caller that has already read the record hand it over rather than
+    making this open the file a second time. The alerts feed reads the record exactly
+    once per run, on purpose -- every household in one run must be told the same thing
+    about the box -- and that invariant has a test.
 
     Deliberately not "while the record says running", for the reason STALE_RUN_AFTER
     exists. Note which way the unknowns fall: a `running` with no parseable start time is
@@ -202,7 +221,8 @@ def backup_in_progress() -> bool:
     """
     if _pending_request():
         return True
-    status = read_backup_status() or {}
+    if status is None:
+        status = read_backup_status() or {}
     if status.get("phase") not in ACTIVE_PHASES:
         return False
     started = status.get("started_at")
