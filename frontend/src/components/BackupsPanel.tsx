@@ -423,7 +423,22 @@ function retainedLine(data: BackupStatus): string {
       : `${data.backup_count} nightly dump${data.backup_count === "1" ? "" : "s"} kept`,
   );
   if (data.kept) parts.push(`retention ${data.kept}`);
-  if (data.oldest_at) parts.push(`oldest ${data.oldest_at}`);
+  // The copies taken before an update or a restore. Nothing prunes them, and they are what
+  // "oldest" usually points at: without naming them, "1 nightly dump kept · oldest
+  // 2026-07-17" read as one backup four months old, on a box backed up that morning.
+  const others = data.other_count;
+  if (others && others !== "0") {
+    parts.push(
+      `plus ${others} safety cop${others === "1" ? "y" : "ies"} made before updates or restores`,
+    );
+  }
+  if (data.oldest_at) {
+    // A record from before the host counted those copies cannot say which kind the oldest
+    // is, so it says no more than it knows.
+    const label =
+      others === null ? "oldest dump on the box" : others === "0" ? "oldest" : "oldest of all";
+    parts.push(`${label} ${data.oldest_at}`);
+  }
   if (data.pruned && data.pruned !== "0") parts.push(`${data.pruned} pruned on the last run`);
   return parts.join(" · ");
 }

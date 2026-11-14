@@ -442,6 +442,7 @@ assert_eq "rows_checked" "$TOTAL_ROWS" "$(sf rows_checked)"
 assert_eq "exit_code"   "0"            "$(sf exit_code)"
 assert_eq "dump_revision reads alembic_version out of the dump" "0003" "$(sf dump_revision)"
 assert_eq "backup_count" "1"           "$(sf backup_count)"
+assert_eq "other_count with no safety copies yet" "0" "$(sf other_count)"
 assert_eq "kept"         "14"          "$(sf kept)"
 assert_eq "offsite with no destination configured" "off" "$(sf offsite)"
 
@@ -826,6 +827,10 @@ assert_eq "the 2020 premigrate dump is untouched, six years old" "1" \
   "$(listed_dumps | grep -c '^saiva-20200101-010101-premigrate\.sql\.gz$' || true)"
 assert_eq "the 2020 prerestore dump is untouched too" "1" \
   "$(listed_dumps | grep -c '^saiva-20200102-020202-prerestore\.sql\.gz$' || true)"
+# Counted and RECORDED, not only logged: oldest_at is now 2020 because of these two, and a
+# page that cannot say they exist reads that date as a six-year-old nightly.
+assert_eq "other_count records the safety copies the prune leaves alone" "2" "$(sf other_count)"
+assert_eq "and oldest_at is the oldest of ALL of them" "2020-01-01 01:01:01 UTC" "$(sf oldest_at)"
 
 # --- 9. the prune never removes a file whose name it did not write -----------------------
 #

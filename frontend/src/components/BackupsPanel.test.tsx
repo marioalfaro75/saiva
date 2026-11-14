@@ -46,6 +46,7 @@ const HEALTHY: BackupStatus = {
   offsite_at: iso(9 * HOURS),
   offsite_message: "/mnt/backups/saiva: copied, to nfs4 -- off this machine",
   backup_count: "14",
+  other_count: "0",
   oldest_at: "2026-10-27T02:37:00Z",
   kept: "14",
   pruned: "1",
@@ -579,5 +580,39 @@ describe("the shape of the retained set", () => {
 
     expect(await screen.findByText(/14 nightly dumps kept/i)).toBeInTheDocument();
     expect(screen.getByText(/1 pruned on the last run/i)).toBeInTheDocument();
+  });
+
+  it("names the safety copies, so the oldest date is not read as a nightly", async () => {
+    // Found on the real box: "1 nightly dump kept · retention 14 · oldest 2026-07-17", on a
+    // box backed up that morning. The July dump was a copy taken before an update.
+    show({
+      backup_count: "1",
+      kept: "14",
+      other_count: "4",
+      oldest_at: "2026-07-17 09:13:18 UTC",
+      pruned: "0",
+    });
+
+    const line = await screen.findByText(/1 nightly dump kept/i);
+    expect(line).toHaveTextContent(/plus 4 safety copies made before updates or restores/i);
+    expect(line).toHaveTextContent(/oldest of all 2026-07-17 09:13:18 UTC/);
+  });
+
+  it("calls it plain 'oldest' when every dump on the box is a nightly", async () => {
+    show({ backup_count: "3", other_count: "0", oldest_at: "2026-11-12 02:37:00 UTC" });
+
+    const line = await screen.findByText(/3 nightly dumps kept/i);
+    expect(line).toHaveTextContent(/· oldest 2026-11-12 02:37:00 UTC/);
+    expect(line).not.toHaveTextContent(/safety cop/i);
+  });
+
+  it("does not guess what the oldest dump is when the host did not count the others", async () => {
+    // A record written before the host counted safety copies: the date is real, but which
+    // kind of dump it belongs to is not known, so the label claims neither.
+    show({ backup_count: "1", other_count: null, oldest_at: "2026-07-17 09:13:18 UTC" });
+
+    const line = await screen.findByText(/1 nightly dump kept/i);
+    expect(line).toHaveTextContent(/oldest dump on the box 2026-07-17 09:13:18 UTC/);
+    expect(line).not.toHaveTextContent(/oldest of all/i);
   });
 });

@@ -1145,6 +1145,10 @@ survey_dumps() {
   ' "$BACKUP_MOUNT")" || return 0
   read -r nightly other oldest <<<"$line"
   status_set backup_count "${nightly:-0}"
+  # Recorded, not just logged: oldest_at is the oldest of ALL of them, so a page that knew
+  # only the nightly count said "1 nightly dump kept · oldest 2026-07-17" -- which reads as
+  # one four-month-old backup -- on a box whose July dump was a safety copy.
+  status_set other_count "${other:-0}"
   [ "${oldest:--}" = "-" ] || status_set oldest_at "$(stamp_from_name "$oldest")"
   status_flush
   log "  In ${SOURCE_LABEL}: ${nightly:-0} nightly, ${other:-0} premigrate/prerestore (never pruned)."

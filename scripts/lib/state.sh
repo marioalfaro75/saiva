@@ -206,7 +206,7 @@ SAIVA_BACKUP_STATUS_FIELDS=(
   dump_name dump_bytes dump_revision verified verify_message rows_checked
   last_success_at last_verified_at
   offsite offsite_target offsite_at offsite_message
-  backup_count oldest_at kept pruned
+  backup_count other_count oldest_at kept pruned
 )
 
 _render_status() { # FIELD... -> JSON on stdout

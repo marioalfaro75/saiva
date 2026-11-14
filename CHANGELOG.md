@@ -6,6 +6,25 @@ All notable changes to Saiva are documented here. The project follows
 ## [Unreleased]
 
 
+## [0.17.2] — 2026-11-14
+
+Apply it with **Update now** in Settings. The new Backups wording appears after the update
+and the next backup run, because the count it needs is written by the backup itself.
+
+### Fixed
+
+- **The Backups card's "oldest" date no longer reads as a nightly backup.** It said
+  *"1 nightly dump kept · oldest 2026-07-17"* on a box backed up that morning: the date
+  came from a safety copy taken before an update, which the card never mentioned. It now
+  says *"plus 4 safety copies made before updates or restores · oldest of all …"*.
+
+### Changed
+
+- Routine dependency updates: the libraries the web page is built and tested with
+  (`@tanstack/react-query`, `vite`, `@vitejs/plugin-react`, `vitest`, `eslint`), and the
+  GitHub Actions used to build and publish releases. Neither changes what the app does.
+
+
 ## [0.17.1] — 2026-11-14
 
 Apply it with **Update now** in Settings, or `make update` on the box. Everything in it was

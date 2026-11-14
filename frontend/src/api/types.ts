@@ -671,6 +671,7 @@ export interface BackupStatus {
   offsite_at: string | null;
   offsite_message: string | null;
   backup_count: string | null;
+  other_count: string | null;
   oldest_at: string | null;
   kept: string | null;
   pruned: string | null;
