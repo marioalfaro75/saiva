@@ -1367,3 +1367,51 @@ section.cat-group .cat-group-summary {
 .cat-add-group-form {
   margin-top: 12px;
 }
+
+/* ---- Rules: what a rule catches, before it is made ---- */
+.rule-preview {
+  margin-top: 12px;
+  transition: opacity 0.12s ease;
+}
+/* The previous answer, kept on screen while the next one is fetched. */
+.rule-preview.is-stale {
+  opacity: 0.5;
+}
+.rule-preview-scroll {
+  max-height: 320px;
+  overflow: auto;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+.rule-preview-scroll table {
+  margin: 0;
+}
+.rule-preview-scroll thead th {
+  position: sticky;
+  top: 0;
+  background: var(--surface);
+  z-index: 1;
+}
+.rule-outcome {
+  white-space: nowrap;
+}
+.rule-outcome-change .rule-outcome {
+  color: var(--accent);
+}
+.rule-outcome-same .rule-outcome,
+.rule-outcome-kept .rule-outcome,
+.rule-outcome-locked .rule-outcome,
+.rule-outcome-other_rule .rule-outcome {
+  color: var(--muted);
+}
+/* The rule just made, picked out for a moment so it can be seen arriving. */
+tr.rule-new > td {
+  background: rgba(45, 212, 191, 0.12);
+  transition: background 0.6s ease;
+}
+.rules-builtin > summary {
+  cursor: pointer;
+}
+.rules-builtin[open] > summary {
+  margin-bottom: 8px;
+}

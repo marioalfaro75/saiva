@@ -141,10 +141,13 @@ def test_rule_preview_and_apply_backfill(auth_client: TestClient) -> None:
 
     rule = _make_rule(auth_client, "zunko", streaming)
     assert rule.status_code == 201
-    applied = auth_client.post(f"/api/rules/{rule.json()['id']}/apply").json()
-    assert applied["updated"] == 2
+    # Making the rule files what it matches; it does not wait for "Apply" or an import.
+    assert rule.json()["categorised"] == 2
     items = auth_client.get("/api/transactions", params={"q": "zunko"}).json()["items"]
     assert all(i["category_name"] == "Streaming" for i in items)
+    # Applying again finds nothing left to do.
+    applied = auth_client.post(f"/api/rules/{rule.json()['id']}/apply").json()
+    assert applied["updated"] == 0
 
 
 def test_backfill_skips_locked_and_categorised(auth_client: TestClient) -> None:
@@ -155,8 +158,7 @@ def test_backfill_skips_locked_and_categorised(auth_client: TestClient) -> None:
     auth_client.patch(f"/api/transactions/{locked_txn['id']}", json={"category_locked": True})
 
     rule = _make_rule(auth_client, "zonk", streaming).json()
-    applied = auth_client.post(f"/api/rules/{rule['id']}/apply").json()
-    assert applied["updated"] == 1  # only the unlocked one
+    assert rule["categorised"] == 1  # only the unlocked one
 
     items = _items_by_id(auth_client, "zonk")
     assert items[plain["id"]]["category_name"] == "Streaming"

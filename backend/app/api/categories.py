@@ -4,14 +4,14 @@ from __future__ import annotations
 
 import unicodedata
 
-from fastapi import APIRouter, Depends, HTTPException, Response, status
+from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy import ColumnElement, delete, func, select, update
 from sqlalchemy.orm import InstrumentedAttribute, Session
 
 from .. import models, schemas
 from ..db import get_db
 from ..deps import get_current_user, require_writer
-from ..services.categorise import apply_rule_to_existing, preview_rule
+from ..services.categorise import RuleDefinition, RuleEffect, preview_rule, reapply_rules
 
 router = APIRouter(tags=["categories"])
 
@@ -255,20 +255,32 @@ def list_rules(
     )
 
 
-@router.post("/rules", response_model=schemas.RuleOut, status_code=status.HTTP_201_CREATED)
+@router.post("/rules", response_model=schemas.RuleChangeOut, status_code=status.HTTP_201_CREATED)
 def create_rule(
     payload: schemas.RuleCreate,
     user: models.User = Depends(require_writer),
     db: Session = Depends(get_db),
-) -> models.CategorisationRule:
+) -> schemas.RuleChangeOut:
     _check_category(db, payload.category_id, user.household_id)
     rule = models.CategorisationRule(
         household_id=user.household_id, source="user", **payload.model_dump()
     )
     db.add(rule)
+    db.flush()
+    # A rule takes effect when it is made, on the transactions already there -- not
+    # only on the next import. The preview said what it would do; this does it.
+    effect = reapply_rules(db, user.household_id, None, RuleDefinition.of(rule))
     db.commit()
     db.refresh(rule)
-    return rule
+    return _change_out(rule, effect)
+
+
+def _change_out(rule: models.CategorisationRule, effect: RuleEffect) -> schemas.RuleChangeOut:
+    return schemas.RuleChangeOut(
+        **schemas.RuleOut.model_validate(rule).model_dump(),
+        categorised=effect.categorised,
+        uncategorised=effect.uncategorised,
+    )
 
 
 @router.post("/rules/preview", response_model=schemas.RulePreviewOut)
@@ -277,10 +289,50 @@ def preview_rule_endpoint(
     user: models.User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> schemas.RulePreviewOut:
-    matched, fillable, samples = preview_rule(
-        db, user.household_id, payload.match_type, payload.pattern
+    if payload.category_id is not None:
+        _check_category(db, payload.category_id, user.household_id)
+    result = preview_rule(
+        db,
+        user.household_id,
+        payload.match_type,
+        payload.pattern,
+        payload.category_id,
+        priority=schemas.RuleCreate.default_priority(),
     )
-    return schemas.RulePreviewOut(matched=matched, fillable=fillable, samples=samples)
+    names = dict(
+        db.execute(
+            select(models.Category.id, models.Category.name).where(
+                models.Category.household_id == user.household_id
+            )
+        )
+        .tuples()
+        .all()
+    )
+    rows = [
+        schemas.RulePreviewRow(
+            id=r.txn.id,
+            txn_date=r.txn.txn_date,
+            description=r.txn.merchant or r.txn.raw_description,
+            amount_cents=r.txn.amount_cents,
+            category_id=r.txn.category_id,
+            category_name=names.get(r.txn.category_id) if r.txn.category_id else None,
+            outcome=r.outcome,
+            other_rule_pattern=r.other_rule.pattern if r.other_rule else None,
+            other_rule_category_name=names.get(r.other_rule.category_id) if r.other_rule else None,
+        )
+        for r in result.rows
+    ]
+    return schemas.RulePreviewOut(
+        matched=result.matched,
+        fillable=result.fillable,
+        samples=result.samples,
+        will_change=result.outcomes["change"],
+        already=result.outcomes["same"],
+        locked=result.outcomes["locked"],
+        kept=result.outcomes["kept"],
+        other_rule=result.outcomes["other_rule"],
+        rows=rows,
+    )
 
 
 def _owned_rule(db: Session, rule_id: str, household_id: str) -> models.CategorisationRule:
@@ -290,22 +342,29 @@ def _owned_rule(db: Session, rule_id: str, household_id: str) -> models.Categori
     return rule
 
 
-@router.patch("/rules/{rule_id}", response_model=schemas.RuleOut)
+@router.patch("/rules/{rule_id}", response_model=schemas.RuleChangeOut)
 def update_rule(
     rule_id: str,
     payload: schemas.RuleUpdate,
     user: models.User = Depends(require_writer),
     db: Session = Depends(get_db),
-) -> models.CategorisationRule:
+) -> schemas.RuleChangeOut:
     rule = _owned_rule(db, rule_id, user.household_id)
     data = payload.model_dump(exclude_unset=True)
     if data.get("category_id") is not None:
         _check_category(db, data["category_id"], user.household_id)
+    before = RuleDefinition.of(rule)
     for key, value in data.items():
-        setattr(rule, key, value)
+        # An explicit null is "leave it": these columns are not nullable.
+        if value is not None:
+            setattr(rule, key, value)
+    db.flush()
+    # Editing, switching off and switching on are all a change in what the rule files:
+    # what it no longer catches goes back, and what it newly catches is filed.
+    effect = reapply_rules(db, user.household_id, before, RuleDefinition.of(rule))
     db.commit()
     db.refresh(rule)
-    return rule
+    return _change_out(rule, effect)
 
 
 @router.post("/rules/{rule_id}/apply", response_model=schemas.CountOut)
@@ -315,21 +374,22 @@ def apply_rule(
     db: Session = Depends(get_db),
 ) -> schemas.CountOut:
     rule = _owned_rule(db, rule_id, user.household_id)
-    updated = apply_rule_to_existing(
-        db, user.household_id, rule.match_type, rule.pattern, rule.category_id
-    )
-    return schemas.CountOut(updated=updated)
+    effect = reapply_rules(db, user.household_id, None, RuleDefinition.of(rule))
+    db.commit()
+    return schemas.CountOut(updated=effect.categorised)
 
 
-@router.delete("/rules/{rule_id}", status_code=status.HTTP_204_NO_CONTENT)
+@router.delete("/rules/{rule_id}", response_model=schemas.RuleEffectOut)
 def delete_rule(
     rule_id: str,
     user: models.User = Depends(require_writer),
     db: Session = Depends(get_db),
-) -> Response:
-    rule = db.get(models.CategorisationRule, rule_id)
-    if rule is None or rule.household_id != user.household_id:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, "Rule not found")
+) -> schemas.RuleEffectOut:
+    rule = _owned_rule(db, rule_id, user.household_id)
+    before = RuleDefinition.of(rule)
     db.delete(rule)
+    db.flush()
+    # What the rule filed goes back to Uncategorised, unless another rule catches it.
+    effect = reapply_rules(db, user.household_id, before, None)
     db.commit()
-    return Response(status_code=status.HTTP_204_NO_CONTENT)
+    return schemas.RuleEffectOut(categorised=effect.categorised, uncategorised=effect.uncategorised)

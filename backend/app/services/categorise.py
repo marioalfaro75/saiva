@@ -3,6 +3,8 @@ learning ML categoriser (R12). Low-confidence results route to the review queue.
 
 from __future__ import annotations
 
+from collections import Counter
+from collections.abc import Sequence
 from dataclasses import dataclass
 
 import regex
@@ -14,6 +16,19 @@ from ..constants import UNCATEGORISED
 from .ml import NaiveBayesCategoriser
 
 ML_THRESHOLD = 0.55
+
+# What a transaction's confidence says about who set its category. A rule writes exactly
+# RULE_CONFIDENCE and a person exactly 1.0 (the recategorise and bulk endpoints), so the
+# learner's own score is kept below both: without that cap a confident guess would be
+# indistinguishable from a rule's work or a person's choice, and a rule change would undo
+# a guess -- or never touch one -- for no visible reason.
+RULE_CONFIDENCE = 0.99
+ML_MAX_CONFIDENCE = 0.98
+PERSON_CONFIDENCE = 1.0
+
+# Where a rule made from the Rules form or the categorise dialog sits: ahead of the
+# built-in starter rules (50), so a household's own rule wins where the two overlap.
+USER_RULE_PRIORITY = 10
 
 
 @dataclass
@@ -76,27 +91,43 @@ class Categoriser:
     def categorise(self, description: str, merchant: str | None = None) -> CategoryResult:
         for match_type, pattern, category_id in self.rules:
             if _match(match_type, pattern, description, merchant):
-                return CategoryResult(category_id, 0.99, "rule")
+                return CategoryResult(category_id, RULE_CONFIDENCE, "rule")
 
         predicted, confidence = self.ml.predict(f"{description} {merchant or ''}")
         if predicted and confidence >= ML_THRESHOLD:
-            return CategoryResult(predicted, round(confidence, 3), "ml")
+            return CategoryResult(predicted, round(min(confidence, ML_MAX_CONFIDENCE), 3), "ml")
         return CategoryResult(None, 0.0, "none")
 
 
-def build_categoriser(db: Session, household_id: str) -> Categoriser:
-    rules = (
+def ordered_rules(db: Session, household_id: str) -> list[models.CategorisationRule]:
+    """A household's active rules in the order they are tried; the first match wins.
+
+    Priority first, then age, then id. Two rules at the same priority used to be tried in
+    whatever order the database returned them, so which of two overlapping rules won
+    could differ between an import and a later re-run. Oldest first: a new rule fills in
+    around the rules already there instead of quietly taking transactions from them.
+    """
+    return list(
         db.execute(
-            select(models.CategorisationRule).where(
+            select(models.CategorisationRule)
+            .where(
                 models.CategorisationRule.household_id == household_id,
                 models.CategorisationRule.is_active.is_(True),
+            )
+            .order_by(
+                models.CategorisationRule.priority,
+                models.CategorisationRule.created_at,
+                models.CategorisationRule.id,
             )
         )
         .scalars()
         .all()
     )
+
+
+def build_categoriser(db: Session, household_id: str) -> Categoriser:
     rule_tuples = [
-        (r.match_type, r.pattern, r.category_id) for r in sorted(rules, key=lambda r: r.priority)
+        (r.match_type, r.pattern, r.category_id) for r in ordered_rules(db, household_id)
     ]
 
     labelled = db.execute(
@@ -129,17 +160,34 @@ def matches(match_type: str, pattern: str, txn: models.Transaction) -> bool:
     return _match(match_type, pattern, txn.raw_description, txn.merchant)
 
 
-def apply_rule_to_existing(
-    db: Session, household_id: str, match_type: str, pattern: str, category_id: str
-) -> int:
-    """Backfill a rule over existing rows: fills only blank, unlocked transactions —
-    never overrides a category the user already set, and skips exempted rows."""
-    candidates = (
+def set_by_person(t: models.Transaction) -> bool:
+    """A category someone chose: through the app (1.0), or with no score at all -- a
+    transaction added by hand with its category, or data that predates scores. Rules
+    never replace one; treating an unknown origin as a person's choice errs that way."""
+    return t.category_id is not None and (t.confidence is None or t.confidence >= PERSON_CONFIDENCE)
+
+
+def set_by_rule(t: models.Transaction) -> bool:
+    return t.category_id is not None and t.confidence == RULE_CONFIDENCE
+
+
+def rules_may_change(t: models.Transaction) -> bool:
+    """Rules decide blank and automatic categories only: never a locked row, a person's
+    choice, a transfer (filed by transfer detection), or one part of a split."""
+    return (
+        not t.category_locked
+        and not t.is_transfer
+        and t.split_parent_id is None
+        and not set_by_person(t)
+    )
+
+
+def _rule_scope(db: Session, household_id: str) -> list[models.Transaction]:
+    """Every transaction a rule can be asked about: transfers and split parts excluded."""
+    return list(
         db.execute(
             select(models.Transaction).where(
                 models.Transaction.household_id == household_id,
-                models.Transaction.category_id.is_(None),
-                models.Transaction.category_locked.is_(False),
                 models.Transaction.is_transfer.is_(False),
                 models.Transaction.split_parent_id.is_(None),
             )
@@ -147,32 +195,148 @@ def apply_rule_to_existing(
         .scalars()
         .all()
     )
-    updated = 0
-    for t in candidates:
-        if matches(match_type, pattern, t):
-            t.category_id = category_id
-            t.confidence = 0.99
-            updated += 1
-    db.commit()
-    return updated
+
+
+@dataclass(frozen=True)
+class RuleDefinition:
+    """What a rule matches and where it files, captured before an edit changes it."""
+
+    match_type: str
+    pattern: str
+    category_id: str
+    is_active: bool = True
+
+    @classmethod
+    def of(cls, rule: models.CategorisationRule) -> RuleDefinition:
+        return cls(rule.match_type, rule.pattern, rule.category_id, rule.is_active)
+
+
+@dataclass
+class RuleEffect:
+    categorised: int = 0  # moved into a rule's category
+    uncategorised: int = 0  # a rule's category taken away, with no other rule to take over
+
+
+def _first_match(
+    rules: Sequence[models.CategorisationRule], t: models.Transaction
+) -> models.CategorisationRule | None:
+    return next((r for r in rules if matches(r.match_type, r.pattern, t)), None)
+
+
+def reapply_rules(
+    db: Session,
+    household_id: str,
+    before: RuleDefinition | None,
+    after: RuleDefinition | None,
+) -> RuleEffect:
+    """Bring transactions in line with the household's rules after one rule changed.
+
+    `before` is the rule as it was (None for a new rule), `after` as it is now (None once
+    deleted); the change itself must already be flushed. Only the transactions the change
+    can reach are looked at: those the rule matches now, and those it matched before and
+    filed where it filed them. Each is given what the full, current rule list says --
+    the first rule that matches -- or, if no rule does and a rule had filed it, goes back
+    to Uncategorised. Blank transactions no rule matches, and the learner's guesses, are
+    left as they are: no rule was involved in them.
+    """
+
+    def matched_now(t: models.Transaction) -> bool:
+        return after is not None and after.is_active and matches(after.match_type, after.pattern, t)
+
+    def filed_by_it_before(t: models.Transaction) -> bool:
+        return (
+            before is not None
+            and before.is_active
+            and t.category_id == before.category_id
+            and matches(before.match_type, before.pattern, t)
+        )
+
+    touched = [t for t in _rule_scope(db, household_id) if matched_now(t) or filed_by_it_before(t)]
+
+    rules = ordered_rules(db, household_id)
+    effect = RuleEffect()
+    for t in touched:
+        if not rules_may_change(t):
+            continue
+        winner = _first_match(rules, t)
+        if winner is not None:
+            if t.category_id != winner.category_id:
+                effect.categorised += 1
+            t.category_id = winner.category_id
+            t.confidence = RULE_CONFIDENCE
+        elif set_by_rule(t):
+            t.category_id = None
+            t.confidence = None
+            effect.uncategorised += 1
+    return effect
+
+
+# What a prospective rule would do to one transaction it matches.
+OUTCOMES = ("change", "same", "locked", "kept", "other_rule")
+
+
+@dataclass
+class PreviewRow:
+    txn: models.Transaction
+    outcome: str
+    other_rule: models.CategorisationRule | None = None
+
+
+@dataclass
+class RulePreview:
+    matched: int
+    fillable: int
+    samples: list[str]
+    outcomes: Counter[str]
+    rows: list[PreviewRow]
 
 
 def preview_rule(
-    db: Session, household_id: str, match_type: str, pattern: str, sample_limit: int = 6
-) -> tuple[int, int, list[str]]:
-    """Return (matched, fillable, sample descriptions) for a prospective rule."""
-    rows = (
-        db.execute(
-            select(models.Transaction).where(
-                models.Transaction.household_id == household_id,
-                models.Transaction.is_transfer.is_(False),
-                models.Transaction.split_parent_id.is_(None),
-            )
-        )
-        .scalars()
-        .all()
+    db: Session,
+    household_id: str,
+    match_type: str,
+    pattern: str,
+    category_id: str | None = None,
+    row_limit: int = 100,
+    priority: int = USER_RULE_PRIORITY,
+) -> RulePreview:
+    """What a rule not yet made would do: every transaction it matches, newest first,
+    each with its outcome, decided exactly as reapply_rules would decide it.
+
+    A new rule is tried after every existing rule of the same or a lower priority
+    number (oldest first among equals), so one of those can take a transaction first.
+    Without a category chosen yet, a transaction the rule would set is a "change".
+    """
+    ahead = [r for r in ordered_rules(db, household_id) if r.priority <= priority]
+    matched = sorted(
+        (t for t in _rule_scope(db, household_id) if matches(match_type, pattern, t)),
+        key=lambda t: (t.txn_date, t.id),
+        reverse=True,
     )
-    matched = [t for t in rows if matches(match_type, pattern, t)]
-    fillable = sum(1 for t in matched if t.category_id is None and not t.category_locked)
-    samples = [(t.merchant or t.raw_description) for t in matched[:sample_limit]]
-    return len(matched), fillable, samples
+    rows: list[PreviewRow] = []
+    for t in matched:
+        if category_id is not None and t.category_id == category_id:
+            rows.append(PreviewRow(t, "same"))
+        elif t.category_locked:
+            rows.append(PreviewRow(t, "locked"))
+        elif set_by_person(t):
+            rows.append(PreviewRow(t, "kept"))
+        elif (first := _first_match(ahead, t)) is not None:
+            rows.append(PreviewRow(t, "other_rule", first))
+        else:
+            rows.append(PreviewRow(t, "change"))
+
+    samples: list[str] = []
+    for t in matched:
+        name = t.merchant or t.raw_description
+        if name not in samples:
+            samples.append(name)
+        if len(samples) == 6:
+            break
+    return RulePreview(
+        matched=len(matched),
+        fillable=sum(1 for t in matched if t.category_id is None and not t.category_locked),
+        samples=samples,
+        outcomes=Counter(r.outcome for r in rows),
+        rows=rows[:row_limit],
+    )

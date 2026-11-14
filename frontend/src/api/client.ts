@@ -30,6 +30,8 @@ import type {
   RecurringOut,
   ResolvedPeriod,
   Rule,
+  RuleChange,
+  RuleEffect,
   RulePreview,
   SavingsGoal,
   SetupBody,
@@ -196,7 +198,7 @@ export const api = {
     pattern: string;
     category_id: string;
     priority?: number;
-  }) => request<Rule>("/rules", { method: "POST", body: JSON.stringify(body) }),
+  }) => request<RuleChange>("/rules", { method: "POST", body: JSON.stringify(body) }),
   updateRule: (
     id: string,
     patch: {
@@ -206,11 +208,9 @@ export const api = {
       priority?: number;
       is_active?: boolean;
     },
-  ) => request<Rule>(`/rules/${id}`, { method: "PATCH", body: JSON.stringify(patch) }),
-  deleteRule: (id: string) => request<void>(`/rules/${id}`, { method: "DELETE" }),
-  applyRule: (id: string) =>
-    request<{ updated: number }>(`/rules/${id}/apply`, { method: "POST" }),
-  previewRule: (body: { match_type: MatchType; pattern: string }) =>
+  ) => request<RuleChange>(`/rules/${id}`, { method: "PATCH", body: JSON.stringify(patch) }),
+  deleteRule: (id: string) => request<RuleEffect>(`/rules/${id}`, { method: "DELETE" }),
+  previewRule: (body: { match_type: MatchType; pattern: string; category_id?: string }) =>
     request<RulePreview>("/rules/preview", { method: "POST", body: JSON.stringify(body) }),
 
   insights: (period?: string) => request<Insights>(`/insights${qs({ period })}`),

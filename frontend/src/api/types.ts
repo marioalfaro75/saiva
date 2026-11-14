@@ -109,11 +109,43 @@ export interface Rule {
   is_active: boolean;
 }
 
+/** What a rule would do to one transaction it matches. */
+export type RuleOutcome = "change" | "same" | "locked" | "kept" | "other_rule";
+
+export interface RulePreviewRow {
+  id: string;
+  txn_date: string;
+  description: string;
+  amount_cents: number;
+  category_id: string | null;
+  category_name: string | null;
+  outcome: RuleOutcome;
+  other_rule_pattern: string | null;
+  other_rule_category_name: string | null;
+}
+
 export interface RulePreview {
   matched: number;
   fillable: number;
   samples: string[];
+  will_change: number;
+  already: number;
+  locked: number;
+  kept: number;
+  other_rule: number;
+  /** Newest first, capped; `matched` is the full count. */
+  rows: RulePreviewRow[];
 }
+
+/** What saving or deleting a rule did to transactions. */
+export interface RuleEffect {
+  /** Moved into a rule's category. */
+  categorised: number;
+  /** A rule's category taken away, with no other rule to take over. */
+  uncategorised: number;
+}
+
+export type RuleChange = Rule & RuleEffect;
 
 export interface TxnGroup {
   key: string;

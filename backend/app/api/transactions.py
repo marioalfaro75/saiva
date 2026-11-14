@@ -17,7 +17,7 @@ from .. import models, schemas
 from ..db import get_db
 from ..deps import get_current_user, optional_period, require_writer
 from ..services import periods
-from ..services.categorise import build_categoriser
+from ..services.categorise import RuleDefinition, build_categoriser, reapply_rules
 from ..services.importers import dedup_hash
 from ..services.merchants import normalise_merchant
 from ..services.transfers import detect_transfers
@@ -450,16 +450,22 @@ def recategorise(
     if payload.make_rule and payload.category_id:
         rule = _rule_from_scope(t, payload.scope, payload.pattern)
         if rule is not None:
-            db.add(
-                models.CategorisationRule(
-                    household_id=user.household_id,
-                    match_type=rule[0],
-                    pattern=rule[1].lower(),
-                    category_id=payload.category_id,
-                    priority=10,
-                    source="user",
-                )
+            made = models.CategorisationRule(
+                household_id=user.household_id,
+                match_type=rule[0],
+                pattern=rule[1].lower(),
+                category_id=payload.category_id,
+                priority=schemas.RuleCreate.default_priority(),
+                source="user",
             )
+            db.add(made)
+            db.flush()
+            # The same as a rule made on the Rules tab: it files what it matches now.
+            # The rows set above are a person's choice, which no rule replaces, so they
+            # are not counted twice.
+            updated += reapply_rules(
+                db, user.household_id, None, RuleDefinition.of(made)
+            ).categorised
 
     db.commit()
     db.refresh(t)

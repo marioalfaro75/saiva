@@ -184,6 +184,10 @@ class RuleCreate(BaseModel):
     category_id: str
     priority: int = 10  # user rules win over system starter rules (priority 50)
 
+    @classmethod
+    def default_priority(cls) -> int:
+        return int(cls.model_fields["priority"].default)
+
 
 class RuleUpdate(BaseModel):
     match_type: _MatchType | None = None
@@ -196,12 +200,39 @@ class RuleUpdate(BaseModel):
 class RulePreviewRequest(BaseModel):
     match_type: _MatchType = "contains"
     pattern: str = Field(min_length=1, max_length=200)
+    # Optional: without it the preview still lists what the rule catches, and can only
+    # say a transaction would be set, not whether it is already in that category.
+    category_id: str | None = None
+
+
+RuleOutcome = Literal["change", "same", "locked", "kept", "other_rule"]
+
+
+class RulePreviewRow(BaseModel):
+    id: str
+    txn_date: dt.date
+    description: str
+    amount_cents: int
+    category_id: str | None
+    category_name: str | None
+    # change: the rule would file it (in the chosen category); same: already there;
+    # locked / kept: locked, or a category a person chose -- rules never replace those;
+    # other_rule: an earlier rule matches it too, and goes first.
+    outcome: RuleOutcome
+    other_rule_pattern: str | None = None
+    other_rule_category_name: str | None = None
 
 
 class RulePreviewOut(BaseModel):
     matched: int  # all transactions the rule matches
-    fillable: int  # of those, how many are blank + unlocked (a backfill would set)
-    samples: list[str]
+    fillable: int  # of those, how many are blank + unlocked
+    samples: list[str]  # distinct names, newest first
+    will_change: int = 0
+    already: int = 0
+    locked: int = 0
+    kept: int = 0
+    other_rule: int = 0
+    rows: list[RulePreviewRow] = []  # newest first, capped; `matched` is the full count
 
 
 class RuleOut(BaseModel):
@@ -213,6 +244,17 @@ class RuleOut(BaseModel):
     priority: int
     source: str
     is_active: bool
+
+
+class RuleEffectOut(BaseModel):
+    """What a rule change did to transactions."""
+
+    categorised: int = 0  # moved into a rule's category
+    uncategorised: int = 0  # a rule's category taken away, no other rule to take over
+
+
+class RuleChangeOut(RuleOut, RuleEffectOut):
+    """A created or edited rule, with what saving it did to transactions."""
 
 
 # ------------------------------------------------------------------------- imports
