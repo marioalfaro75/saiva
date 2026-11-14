@@ -43,7 +43,12 @@ def _rename(client: TestClient, category_id: str, name: str):  # type: ignore[no
 def _txn(client: TestClient, account_id: str, cents: int, desc: str, date: str) -> dict:
     resp = client.post(
         "/api/transactions",
-        json={"account_id": account_id, "txn_date": date, "amount_cents": cents, "description": desc},
+        json={
+            "account_id": account_id,
+            "txn_date": date,
+            "amount_cents": cents,
+            "description": desc,
+        },
     )
     assert resp.status_code == 201, resp.text
     return resp.json()
@@ -180,7 +185,9 @@ def test_a_group_the_household_created_has_no_benchmark_to_meet(
     groceries = _by_name(auth_client, "Groceries")
     assert _rename(auth_client, groceries["id"], "Food shopping").status_code == 200
     mine = auth_client.post("/api/categories", json={"name": "Groceries"}).json()
-    child = auth_client.post("/api/categories", json={"name": "Market", "parent_id": mine["id"]}).json()
+    child = auth_client.post(
+        "/api/categories", json={"name": "Market", "parent_id": mine["id"]}
+    ).json()
     account = create_account(auth_client)
     last_month = (today.replace(day=1) - dt.timedelta(days=10)).isoformat()
     spend = _txn(auth_client, account["id"], -5000, "FARMERS MARKET", last_month)
@@ -224,7 +231,8 @@ def test_the_advisor_still_sees_uncategorised_spending_after_the_bucket_is_renam
 def test_a_new_category_takes_its_groups_kind(auth_client: TestClient) -> None:
     income = _by_name(auth_client, "Income")
     resp = auth_client.post(
-        "/api/categories", json={"name": "Side hustle", "parent_id": income["id"], "kind": "expense"}
+        "/api/categories",
+        json={"name": "Side hustle", "parent_id": income["id"], "kind": "expense"},
     )
 
     assert resp.status_code == 201, resp.text
@@ -235,9 +243,13 @@ def test_a_new_category_takes_its_groups_kind(auth_client: TestClient) -> None:
 
 def test_a_new_category_goes_last(auth_client: TestClient) -> None:
     pets = _by_name(auth_client, "Pets")
-    created = auth_client.post("/api/categories", json={"name": "Pet insurance", "parent_id": pets["id"]})
+    created = auth_client.post(
+        "/api/categories", json={"name": "Pet insurance", "parent_id": pets["id"]}
+    )
 
-    assert created.json()["sort"] > max(c["sort"] for c in _categories(auth_client) if c["id"] != created.json()["id"])
+    assert created.json()["sort"] > max(
+        c["sort"] for c in _categories(auth_client) if c["id"] != created.json()["id"]
+    )
 
 
 def test_a_new_group_can_be_added(auth_client: TestClient) -> None:
@@ -276,9 +288,12 @@ def _coffee_with_everything(client: TestClient) -> tuple[dict, list[dict], dict,
     ]
     _put_in(client, [t["id"] for t in txns], coffee["id"])
     rule = client.post(
-        "/api/rules", json={"match_type": "contains", "pattern": "CAMPOS", "category_id": coffee["id"]}
+        "/api/rules",
+        json={"match_type": "contains", "pattern": "CAMPOS", "category_id": coffee["id"]},
     ).json()
-    budget = client.post("/api/budgets", json={"category_id": coffee["id"], "limit_cents": 5000}).json()
+    budget = client.post(
+        "/api/budgets", json={"category_id": coffee["id"], "limit_cents": 5000}
+    ).json()
     return coffee, txns, rule, budget
 
 
@@ -371,12 +386,18 @@ def test_moving_to_itself_or_to_a_category_that_does_not_exist_is_refused(
 ) -> None:
     coffee = _by_name(auth_client, "Coffee")
 
-    assert auth_client.delete(
-        f"/api/categories/{coffee['id']}", params={"move_to": coffee["id"]}
-    ).status_code == 400
-    assert auth_client.delete(
-        f"/api/categories/{coffee['id']}", params={"move_to": "no-such-category"}
-    ).status_code == 400
+    assert (
+        auth_client.delete(
+            f"/api/categories/{coffee['id']}", params={"move_to": coffee["id"]}
+        ).status_code
+        == 400
+    )
+    assert (
+        auth_client.delete(
+            f"/api/categories/{coffee['id']}", params={"move_to": "no-such-category"}
+        ).status_code
+        == 400
+    )
     assert any(c["id"] == coffee["id"] for c in _categories(auth_client)), "nothing was removed"
 
 
@@ -384,7 +405,12 @@ def test_a_viewer_can_neither_rename_nor_remove(auth_client: TestClient) -> None
     coffee = _by_name(auth_client, "Coffee")
     auth_client.post(
         "/api/household/users",
-        json={"name": "Viewer", "email": "viewer@example.com", "password": "viewerpass99", "role": "viewer"},
+        json={
+            "name": "Viewer",
+            "email": "viewer@example.com",
+            "password": "viewerpass99",
+            "role": "viewer",
+        },
     )
     from fastapi.testclient import TestClient as TC
 
@@ -397,7 +423,10 @@ def test_a_viewer_can_neither_rename_nor_remove(auth_client: TestClient) -> None
         )
         viewer.headers["X-CSRF-Token"] = login.json()["csrf_token"]
 
-        assert viewer.patch(f"/api/categories/{coffee['id']}", json={"name": "Caffeine"}).status_code == 403
+        assert (
+            viewer.patch(f"/api/categories/{coffee['id']}", json={"name": "Caffeine"}).status_code
+            == 403
+        )
         assert viewer.delete(f"/api/categories/{coffee['id']}").status_code == 403
         assert viewer.post("/api/categories", json={"name": "Snacks"}).status_code == 403
 
@@ -484,6 +513,5 @@ def test_a_name_cannot_hide_behind_characters_that_print_as_nothing(
     assert auth_client.post("/api/categories", json={"name": "Fu\u0000el"}).status_code == 409
     # The seeded "Restaurants/Cafés", typed with a combining accent instead.
     assert (
-        auth_client.post("/api/categories", json={"name": "Restaurants/Cafés"}).status_code
-        == 409
+        auth_client.post("/api/categories", json={"name": "Restaurants/Cafés"}).status_code == 409
     )
