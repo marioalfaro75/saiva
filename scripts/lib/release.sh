@@ -171,11 +171,31 @@ wait_for_site() { # -> 0 when the site answers, within the configured budget
 
 have_git() { git -C "$ROOT" rev-parse --git-dir >/dev/null 2>&1; }
 
+# git's own words from a fetch that gave up, for the message the owner reads. After
+# Update now, the status record is ALL they see -- git's stderr went to run.log -- and
+# that record used to say "check the box's network" whatever had actually happened.
+GIT_FETCH_ERROR=""
+
 git_fetch() {
-  local tries=0
-  until git -C "$ROOT" fetch --tags --prune --quiet origin; do
+  local tries=0 out
+  # --force: the box follows release tags exactly as origin has them. Without it, a tag
+  # that was ever re-pointed upstream makes `fetch --tags` refuse to "clobber" the local
+  # copy and exit non-zero, so ONE stale tag failed every fetch -- and so every update
+  # after it, for good. That happened on a real box, with v0.5.0. It is no new trust:
+  # the very next step checks out whatever origin's newest release tag points at.
+  #
+  # Not --quiet: under --quiet git prints nothing about a rejected ref, which is how that
+  # failure arrived with no explanation at all. Output is kept, and used only on failure.
+  until out="$(git -C "$ROOT" fetch --tags --force --prune origin 2>&1)"; do
     tries=$((tries + 1))
-    [ "$tries" -ge 3 ] && return 1
+    if [ "$tries" -ge 3 ]; then
+      # The first line that is git complaining, not the advice it prints after it.
+      GIT_FETCH_ERROR="$(printf '%s\n' "$out" | grep -E '^(fatal|error):|^ *! ' | head -n 1 || true)"
+      [ -n "$GIT_FETCH_ERROR" ] ||
+        GIT_FETCH_ERROR="$(printf '%s\n' "$out" | grep -v '^[[:space:]]*$' | tail -n 1 || true)"
+      GIT_FETCH_ERROR="$(printf '%s' "$GIT_FETCH_ERROR" | sed 's/^[[:space:]!]*//' || true)"
+      return 1
+    fi
     log "    fetch failed, retrying in $((tries * 2))s"
     sleep $((tries * 2))
   done
@@ -335,8 +355,8 @@ _release_prepare() {
   fi
 
   status_step fetch "fetching releases from origin"
-  git_fetch || fail "could not fetch from origin. Check the box's network, then retry.
-Nothing has been changed."
+  # One line, because fail() records only the first: that line is what Settings shows.
+  git_fetch || fail "could not fetch from origin, so nothing has been changed. git said: ${GIT_FETCH_ERROR:-nothing}"
 
   local target
   target="${TARGET_REF:-$(newest_release_tag)}"
