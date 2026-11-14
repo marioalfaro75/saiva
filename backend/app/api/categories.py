@@ -5,8 +5,8 @@ from __future__ import annotations
 import unicodedata
 
 from fastapi import APIRouter, Depends, HTTPException, Response, status
-from sqlalchemy import Select, delete, func, select, update
-from sqlalchemy.orm import Session
+from sqlalchemy import ColumnElement, delete, func, select, update
+from sqlalchemy.orm import InstrumentedAttribute, Session
 
 from .. import models, schemas
 from ..db import get_db
@@ -100,9 +100,7 @@ def create_category(
             models.Category.household_id == user.household_id
         )
     ).scalar_one_or_none()
-    category = models.Category(
-        household_id=user.household_id, sort=(highest or 0) + 1, **fields
-    )
+    category = models.Category(household_id=user.household_id, sort=(highest or 0) + 1, **fields)
     db.add(category)
     db.commit()
     db.refresh(category)
@@ -213,33 +211,31 @@ def _owned(db: Session, category_id: str, household_id: str) -> models.Category:
 def _usage(db: Session, category: models.Category) -> schemas.CategoryUsage:
     household = category.household_id
 
-    def count(statement: Select[tuple[int]]) -> int:
-        return int(db.execute(statement).scalar_one())
+    # Takes the column and the filters, not a built select(), so the helper's
+    # signature does not depend on how a SQLAlchemy release types select().
+    def count(column: InstrumentedAttribute[str], *conditions: ColumnElement[bool]) -> int:
+        return int(db.execute(select(func.count(column)).where(*conditions)).scalar_one())
 
     return schemas.CategoryUsage(
         transactions=count(
-            select(func.count(models.Transaction.id)).where(
-                models.Transaction.household_id == household,
-                models.Transaction.category_id == category.id,
-            )
+            models.Transaction.id,
+            models.Transaction.household_id == household,
+            models.Transaction.category_id == category.id,
         ),
         rules=count(
-            select(func.count(models.CategorisationRule.id)).where(
-                models.CategorisationRule.household_id == household,
-                models.CategorisationRule.category_id == category.id,
-            )
+            models.CategorisationRule.id,
+            models.CategorisationRule.household_id == household,
+            models.CategorisationRule.category_id == category.id,
         ),
         budgets=count(
-            select(func.count(models.Budget.id)).where(
-                models.Budget.household_id == household,
-                models.Budget.category_id == category.id,
-            )
+            models.Budget.id,
+            models.Budget.household_id == household,
+            models.Budget.category_id == category.id,
         ),
         subcategories=count(
-            select(func.count(models.Category.id)).where(
-                models.Category.household_id == household,
-                models.Category.parent_id == category.id,
-            )
+            models.Category.id,
+            models.Category.household_id == household,
+            models.Category.parent_id == category.id,
         ),
     )
 
