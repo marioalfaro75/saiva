@@ -984,6 +984,9 @@ class BackupStatus(BaseModel):
     # The shape of the retained set, so a volume filling up is visible rather than
     # silently tidied: the prune removes old nightlies and nothing else.
     backup_count: str | None = None
+    # Dumps taken before an update or a restore. Never pruned, and the reason oldest_at
+    # can be far older than any nightly -- so the page has to be able to say they exist.
+    other_count: str | None = None
     oldest_at: str | None = None
     kept: str | None = None
     pruned: str | None = None

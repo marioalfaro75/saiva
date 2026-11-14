@@ -124,7 +124,7 @@ consume_requests() { # DIR -> 0 if a real request was there
 # document that omitted them told the owner there had never been a backup at all.
 # scripts/lib/state.sh declares the same set in SAIVA_BACKUP_STATUS_FIELDS.
 BACKUP_CARRIED_FIELDS="last_success_at last_verified_at offsite offsite_target offsite_at \
-offsite_message backup_count oldest_at"
+offsite_message backup_count other_count oldest_at"
 
 # One `"key": value` line out of an existing status document, with the quotes and the
 # trailing comma left on so it can be re-emitted verbatim. sed rather than a JSON parser
