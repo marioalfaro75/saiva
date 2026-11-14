@@ -33,6 +33,18 @@ Apply it with **Update now** in Settings.
   folded section below. A new rule appears at once, picked out.
 - Rules with the same priority are now always tried oldest first. It used to depend on
   the order the database happened to return them.
+- A rule's pattern that can never match — a regular expression with a typo — is now
+  refused with the reason, instead of being saved and silently doing nothing.
+- A transaction that stops being a transfer (its other half was deleted, or you untick
+  *transfer*) goes back to Uncategorised instead of staying in Internal transfers, unless
+  you put it there yourself.
+
+### Fixed
+
+- Categories filled in automatically by an older version — confident guesses, demo
+  data, and the leftover half of a deleted transfer — were stored in a way that looked
+  like you had chosen them, so rules would never change them. The update marks them as
+  automatic on first start; anything you changed by hand stays yours.
 
 
 ## [0.17.4] — 2026-11-14
