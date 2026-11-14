@@ -41,6 +41,9 @@ Apply it with **Update now** in Settings.
 
 ### Fixed
 
+- A rule made from the categorise window ("always do this for future imports") never
+  applied when an older rule of yours matched the same transaction. It now goes ahead
+  of that rule.
 - Categories filled in automatically by an older version — confident guesses, demo
   data, and the leftover half of a deleted transfer — were stored in a way that looked
   like you had chosen them, so rules would never change them. The update marks them as
