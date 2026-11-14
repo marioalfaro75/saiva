@@ -13,10 +13,12 @@ from __future__ import annotations
 
 import datetime as dt
 
+import pytest
 from conftest import create_account
 from fastapi.testclient import TestClient
 from sqlalchemy import select
 
+from app import dbinit as dbinit_module
 from app import models
 from app.db import SessionLocal, engine
 from app.dbinit import _apply_rules_once, _mark_automatic_categories
@@ -790,3 +792,27 @@ def test_applying_every_rule_files_what_rules_may_change_and_nothing_else(
     assert _state(locked) == (None, None)
     assert _state(transfer) == (None, None)
     assert _state(unmatched) == (takeaway, GUESS)
+
+
+def test_a_failure_applying_old_rules_never_stops_a_start(
+    auth_client: TestClient, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # It runs before the app serves: an error here must not become a crash loop.
+    account = create_account(auth_client)["id"]
+    loan = _cat(auth_client, "Loan repayments")
+    blank = _add(auth_client, account, "By Authority To Vw")
+    _old_rule("By Authority To Vw", loan)
+    _not_yet_applied()
+
+    def broken(*_args: object) -> None:
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(dbinit_module, "apply_all_rules", broken)
+    _apply_rules_once(engine)  # does not raise
+
+    assert "will try again on the next start" in capsys.readouterr().err
+    with SessionLocal() as db:
+        assert db.execute(select(models.Household.rules_applied_at)).scalar_one() is None
+    monkeypatch.undo()
+    _apply_rules_once(engine)  # ... and the next start does it
+    assert _state(blank) == (loan, RULE_CONFIDENCE)

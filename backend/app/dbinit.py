@@ -279,9 +279,22 @@ def _apply_rules_once(db: Engine) -> None:
             .all()
         )
         for household in pending:
-            effect = apply_all_rules(session, household.id)
-            household.rules_applied_at = dt.datetime.utcnow()
-            session.commit()
+            # Never a reason not to start: a failure leaves the household unmarked, to
+            # be tried again on the next start, and the app serves meanwhile -- rules
+            # still apply as they are made and changed.
+            try:
+                effect = apply_all_rules(session, household.id)
+                household.rules_applied_at = dt.datetime.utcnow()
+                session.commit()
+            except Exception as exc:  # noqa: BLE001 - logged, and retried next start
+                session.rollback()
+                print(
+                    f"Saiva: could not apply rules to earlier transactions ({exc!r}); "
+                    "will try again on the next start.",
+                    file=sys.stderr,
+                    flush=True,
+                )
+                continue
             if effect.categorised:
                 print(
                     f"Saiva: applied the household's rules to {effect.categorised} "
