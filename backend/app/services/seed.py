@@ -13,6 +13,7 @@ from sqlalchemy.orm import Session
 
 from .. import models, security
 from ..taxonomy import DEFAULT_TAXONOMY, STARTER_RULES
+from .categorise import ML_MAX_CONFIDENCE
 from .importers import dedup_hash
 from .merchants import normalise_merchant
 from .transfers import detect_transfers
@@ -94,6 +95,9 @@ def _add_txn(
             raw_description=description,
             merchant=normalise_merchant(description),
             category_id=category_id,
+            # Filled in by the demo, not chosen by anyone: marked as an automatic guess,
+            # so rules made while trying the app can re-file it.
+            confidence=ML_MAX_CONFIDENCE if category_id else None,
             source="import",
             dedup_hash=dedup_hash(account_id, date, amount_cents, description),
         )

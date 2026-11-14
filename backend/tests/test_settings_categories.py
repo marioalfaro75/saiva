@@ -39,6 +39,6 @@ def test_create_category_rule_and_delete(auth_client: TestClient) -> None:
     assert rule.status_code == 201
     rule_id = rule.json()["id"]
 
-    assert auth_client.delete(f"/api/rules/{rule_id}").status_code == 204
+    assert auth_client.delete(f"/api/rules/{rule_id}").status_code == 200
     remaining = [r["id"] for r in auth_client.get("/api/rules").json()]
     assert rule_id not in remaining

@@ -6,6 +6,50 @@ All notable changes to Saiva are documented here. The project follows
 ## [Unreleased]
 
 
+## [0.17.5] — 2026-11-14
+
+Apply it with **Update now** in Settings.
+
+### Added
+
+- **See what a rule will catch before you make it.** On Transactions → Rules, typing in
+  *Matches* now lists every transaction the rule would catch — date, description, amount,
+  its category now — and what the rule would do to each: move it to the category you
+  chose, leave it because it's already there, or keep it because you picked its category
+  yourself, it's locked, or another rule takes it first (named).
+- **Categories in the menu**, after Accounts, on a page of its own. It's no longer in
+  Settings.
+
+### Changed
+
+- **Rules now take effect straight away.** Making a rule files the transactions it
+  catches; editing it, switching it off or on, or deleting it re-files them — what it no
+  longer catches goes back to Uncategorised, unless another rule catches it. Each change
+  says what moved. A category you chose yourself, or locked, is never changed by a rule.
+  Before, a new rule did nothing until **Apply now** (which only filled blanks), and
+  deleting one left everything it had filed. **Apply now** is gone, as there's nothing
+  left for it to do.
+- **Your rules** lists only the rules you made; the 56 built-in ones are in their own
+  folded section below. A new rule appears at once, picked out.
+- Rules with the same priority are now always tried oldest first. It used to depend on
+  the order the database happened to return them.
+- A rule's pattern that can never match — a regular expression with a typo — is now
+  refused with the reason, instead of being saved and silently doing nothing.
+- A transaction that stops being a transfer (its other half was deleted, or you untick
+  *transfer*) goes back to Uncategorised instead of staying in Internal transfers, unless
+  you put it there yourself.
+
+### Fixed
+
+- A rule made from the categorise window ("always do this for future imports") never
+  applied when an older rule of yours matched the same transaction. It now goes ahead
+  of that rule.
+- Categories filled in automatically by an older version — confident guesses, demo
+  data, and the leftover half of a deleted transfer — were stored in a way that looked
+  like you had chosen them, so rules would never change them. The update marks them as
+  automatic on first start; anything you changed by hand stays yours.
+
+
 ## [0.17.4] — 2026-11-14
 
 Apply it with **Update now** in Settings.

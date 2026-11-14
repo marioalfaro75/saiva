@@ -7,7 +7,7 @@ import type { Category, CategoryUsage } from "../api/types";
 import { CategoriesManager } from "./CategoriesManager";
 
 /**
- * Settings → Categories. What has to hold: renaming, adding and removing each call the
+ * The Categories page. What has to hold: renaming, adding and removing each call the
  * API with exactly what the person chose; removing says what it will touch BEFORE it
  * happens and lets them choose where the transactions go; the two categories the app
  * files into itself, and a group with categories in it, offer no Remove at all; and a

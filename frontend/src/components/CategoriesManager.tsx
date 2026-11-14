@@ -16,7 +16,7 @@ import { useAuth } from "../auth/AuthContext";
 import { CategoryPicker } from "./CategoryPicker";
 
 /**
- * Settings → Categories: add, rename and remove the categories transactions go in.
+ * The Categories page: add, rename and remove the categories transactions go in.
  *
  * Renaming is a label only -- the app finds the built-in categories it relies on by a
  * key that a rename leaves alone. Removing asks where the category's transactions should
@@ -99,7 +99,6 @@ export function CategoriesManager() {
 
   return (
     <div className="card cat-manager">
-      <h2>Categories</h2>
       <p className="muted">
         The categories your transactions are sorted into.
         {canEdit

@@ -62,6 +62,7 @@ const ROUTES = [
   "/alerts",
   "/transactions",
   "/accounts",
+  "/categories",
   "/budgets",
   "/bills",
   "/forecast",

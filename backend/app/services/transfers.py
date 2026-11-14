@@ -13,6 +13,7 @@ from sqlalchemy.orm import Session
 
 from .. import models
 from ..constants import TRANSFER_CATEGORY
+from .categorise import ML_MAX_CONFIDENCE
 
 # Words a bank actually uses when money moves between your own accounts. Matching one
 # of these is the corroborating evidence a pair needs; equal amounts alone are not.
@@ -122,11 +123,43 @@ def detect_transfers(
                 # A locked category is a decision the user made explicitly.
                 # categorise.py already refuses to overwrite one; this path did not,
                 # so a category someone had pinned was replaced without a word.
-                if transfer_category_id and not t.category_locked:
+                if (
+                    transfer_category_id
+                    and not t.category_locked
+                    and t.category_id != transfer_category_id
+                ):
                     t.category_id = transfer_category_id
+                    # Marked automatic: the score a row carried was for the category
+                    # this replaces, and left as it was a person's 1.0 for Coffee
+                    # would read as a person's choice of Internal transfers.
+                    t.confidence = ML_MAX_CONFIDENCE
             used.update({out.id, inflow.id})
             linked += 2
             break
 
     db.commit()
     return linked
+
+
+def release(db: Session, t: models.Transaction) -> None:
+    """Make `t` an ordinary transaction again: its other half was deleted, or a person
+    said it is not a transfer.
+
+    Transfer detection filed it under Internal transfers, which is now wrong, and left
+    no mark that it did: so it goes back to Uncategorised, for review and for rules,
+    instead of sitting in Internal transfers looking like a choice someone made. A
+    category a person set (1.0) or locked stays.
+    """
+    t.is_transfer = False
+    t.transfer_group_id = None
+    if t.category_id is None or t.category_locked or (t.confidence or 0) >= 1.0:
+        return
+    transfer_category_id = db.execute(
+        select(models.Category.id).where(
+            models.Category.household_id == t.household_id,
+            models.Category.system_key == TRANSFER_CATEGORY,
+        )
+    ).scalar_one_or_none()
+    if t.category_id == transfer_category_id:
+        t.category_id = None
+        t.confidence = None
