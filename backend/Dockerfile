@@ -28,12 +28,24 @@ ENV SAIVA_BUILD=$SAIVA_BUILD
 # must match the postgres:16 server, so we pull it from the PGDG apt repo. The
 # repo codename is derived from the base OS (VERSION_CODENAME) so it always
 # matches — a mismatched codename pulls an incompatible libpq5 and fails.
+#
+# The key fetch retries, and the file is checked before apt is pointed at it.
+# postgresql.org's CDN cut this transfer mid-body on 2026-11-09 (curl exit 18,
+# CURLE_PARTIAL_FILE) and failed an image build that had nothing wrong with it.
+# A truncated key that curl did NOT notice is the worse case: apt would then
+# fail a signature check two steps later, which reads like a tampered repo
+# rather than a short download, so both ends of the armor are checked here.
 RUN . /etc/os-release \
  && apt-get update \
  && apt-get install -y --no-install-recommends curl ca-certificates \
  && install -d /usr/share/postgresql-common/pgdg \
- && curl -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc \
+ && curl -fsSL --retry 5 --retry-all-errors --retry-delay 2 --max-time 120 \
+      https://www.postgresql.org/media/keys/ACCC4CF8.asc \
       -o /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc \
+ && grep -q -- '-----BEGIN PGP PUBLIC KEY BLOCK-----' \
+      /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc \
+ && grep -q -- '-----END PGP PUBLIC KEY BLOCK-----' \
+      /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc \
  && echo "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] http://apt.postgresql.org/pub/repos/apt ${VERSION_CODENAME}-pgdg main" \
       > /etc/apt/sources.list.d/pgdg.list \
  && apt-get update \

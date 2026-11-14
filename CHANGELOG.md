@@ -6,6 +6,31 @@ All notable changes to Saiva are documented here. The project follows
 ## [Unreleased]
 
 
+## [0.17.1] — 2026-11-14
+
+Apply it with **Update now** in Settings, or `make update` on the box. Everything in it was
+found by running 0.17.0 on a real box.
+
+### Added
+
+- **Backup problems now reach you.** A backup that is stale, could not be restored, never
+  ran, or was never copied off the box appears in the alerts feed and the email digest,
+  instead of only on a Settings page you have to open. Each problem is reported once, and
+  again only if it changes or comes back.
+
+### Fixed
+
+- **One old tag could block every update.** If GitHub's copy of a release tag differed from
+  the box's, `git fetch` refused to overwrite it and every update stopped at its first step.
+  The box now follows release tags exactly as GitHub has them. The error said *"check the
+  box's network"* whatever had actually gone wrong; it now says what git said, and so does
+  the status shown after **Update now**.
+- **"Reload to use it" never went away.** After a successful update the button came back
+  on every reload. It now appears only when the open page is older than what the box runs.
+- **`dnspython` 2.9.1 → 2.9.2**, for CVE-2026-128089 (published after 0.17.0). It comes in
+  through `email-validator`, not the app's own code.
+
+
 ## [0.17.0] — 2026-11-09
 
 **This release has to be applied by hand, once.** The version on your box does not contain

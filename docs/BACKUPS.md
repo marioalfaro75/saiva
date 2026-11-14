@@ -32,6 +32,22 @@ sudo ./scripts/backup.sh             # take the first one NOW, don't find out at
 sudo ./scripts/backup.sh --self-check
 ```
 
+**Coming from a version before 0.17.0, the second line will not work**, and it is worth
+knowing why rather than being surprised by it: `make update` is itself part of 0.17.0, so
+on an older box there is no such target and `make` simply says so. That is the one-time
+chicken-and-egg this regime has, and the way through it is to move the checkout by hand
+first:
+
+```bash
+git fetch --tags
+git checkout --detach v0.17.0        # or whichever release you are taking
+sudo ./scripts/install-updater.sh
+make update                          # now it exists, and applies the release properly
+```
+
+From then on `make update` and *Update now* are the only two ways you need, and this
+section's four steps are the whole story.
+
 The last two are the ones people skip. The first proves the whole path works while you are
 sitting there; the second is what tells you the regime is installed, where the copies go,
 and whether anything is wrong.
