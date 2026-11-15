@@ -387,6 +387,33 @@ def _classify_transfers_once(db: Engine) -> None:
                 f"{scan.cash_deposits} cash deposit(s).",
                 flush=True,
             )
+        # Every start, not once: an older image run after a rollback links pairs the old
+        # way, with no kind (a loan repayment left out of spending). One query finds
+        # them, and there are none on almost every start.
+        try:
+            unkinded = (
+                session.execute(
+                    select(Transaction.household_id)
+                    .where(
+                        Transaction.transfer_group_id.is_not(None),
+                        Transaction.transfer_kind.is_(None),
+                    )
+                    .distinct()
+                )
+                .scalars()
+                .all()
+            )
+            for household_id in unkinded:
+                classify_existing(session, household_id)
+            session.commit()
+        except Exception as exc:  # noqa: BLE001 - logged, and retried next start
+            session.rollback()
+            print(
+                f"Saiva: could not classify transfers ({exc!r}); "
+                "will try again on the next start.",
+                file=sys.stderr,
+                flush=True,
+            )
 
 
 def _migrate(db: Engine, cfg: Config, tables: set[str]) -> SchemaState:

@@ -25,6 +25,7 @@ from sqlalchemy.orm import Session
 
 from .. import models
 from ..config import get_settings
+from ..constants import LOAN_ACCOUNT_TYPES
 from . import backups
 from . import forecast as forecast_service
 from . import recurring as recurring_service
@@ -704,6 +705,13 @@ def _candidates(
                 models.Transaction.amount_cents <= -ns.large_txn_threshold_cents,
                 models.Transaction.is_transfer.is_(False),
                 models.Transaction.split_parent_id.is_(None),
+                # A loan's own interest and fees are not spending: the repayment is.
+                models.Transaction.account_id.not_in(
+                    select(models.Account.id).where(
+                        models.Account.household_id == household.id,
+                        models.Account.type.in_(LOAN_ACCOUNT_TYPES),
+                    )
+                ),
             )
         )
         .scalars()

@@ -6,6 +6,11 @@ import { setViewport } from "../setupTests";
 import { renderApp, stubApi } from "../testing/harness";
 import { Transactions } from "./Transactions";
 
+const role = vi.hoisted(() => ({ value: "owner" }));
+vi.mock("../auth/AuthContext", () => ({
+  useAuth: () => ({ me: { user: { role: role.value } } }),
+}));
+
 /**
  * Below 640px the transactions list is a stack of cards rather than a seven-column
  * table. It is the same data and the same controls; these tests pin that the phone

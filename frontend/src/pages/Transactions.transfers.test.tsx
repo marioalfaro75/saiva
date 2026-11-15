@@ -1,10 +1,17 @@
 import { fireEvent, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+import { api, ApiError } from "../api/client";
+
 import { PeriodProvider } from "../period/PeriodProvider";
 import { setViewport } from "../setupTests";
 import { renderApp, stubApi } from "../testing/harness";
 import { Transactions } from "./Transactions";
+
+const role = vi.hoisted(() => ({ value: "owner" }));
+vi.mock("../auth/AuthContext", () => ({
+  useAuth: () => ({ me: { user: { role: role.value } } }),
+}));
 
 /**
  * Transfers on the Transactions page: a linked row says what kind it is and where the money
@@ -106,6 +113,7 @@ const transactionUrls = () =>
     .filter((u) => u.startsWith("/api/transactions?"));
 
 beforeEach(() => {
+  role.value = "owner";
   setViewport(1280);
   stubApi(STUBS);
 });
@@ -170,4 +178,74 @@ describe("Transactions: transfers", () => {
     const dialog = await screen.findByRole("dialog", { name: "Transfer" });
     expect(within(dialog).getByText("Credit card")).toBeInTheDocument();
   });
+
+  it("offers a viewer no way to link or unlink, and still shows what is linked", async () => {
+    role.value = "viewer";
+    await show();
+    await waitFor(() => rowOf("By Authority To Cc"));
+    expect(screen.queryByRole("button", { name: "Transfer link" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Link as a transfer" })).toBeNull();
+    expect(within(rowOf("By Authority To Cc")).getByText("Card payment → Credit card")).toBeInTheDocument();
+  });
+
+  it("gives the Transfers tab a viewer's read-only panel", async () => {
+    role.value = "viewer";
+    await show("/transactions?period=fy:2026&tab=transfers");
+    await screen.findByRole("heading", { name: "To review" });
+    expect(screen.queryByRole("button", { name: "Look again" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Accept" })).toBeNull();
+  });
+
 });
+
+describe("Transactions: the ⋯ window", () => {
+  const openFor = async (text: string) => {
+    await show();
+    await waitFor(() => rowOf(text));
+    fireEvent.click(within(rowOf(text)).getByRole("button", { name: "More actions" }));
+    return screen.findByRole("dialog", { name: "Categorise" });
+  };
+  const calls = () =>
+    vi.mocked(fetch).mock.calls.map((c) => [(c[1] as RequestInit | undefined)?.method ?? "GET", String(c[0])]);
+
+  it("saves a note on its own without re-filing the category", async () => {
+    const dialog = await openFor("Woolworths");
+    fireEvent.change(within(dialog).getByRole("textbox", { name: "Note" }), {
+      target: { value: "Weekly shop" },
+    });
+    fireEvent.click(within(dialog).getByRole("button", { name: "Apply" }));
+
+    expect(await screen.findByText("Note saved")).toBeInTheDocument();
+    expect(calls()).toContainEqual(["PATCH", "/api/transactions/t3"]);
+    expect(calls().some(([, url]) => url.includes("/recategorise"))).toBe(false);
+  });
+
+  it("re-files when the category changed too", async () => {
+    const recategorise = vi
+      .spyOn(api, "recategorise")
+      .mockResolvedValue({ updated_count: 1 } as Awaited<ReturnType<typeof api.recategorise>>);
+    const dialog = await openFor("Woolworths");
+    fireEvent.click(within(dialog).getByLabelText("Lock — exempt from auto-categorisation"));
+    fireEvent.change(within(dialog).getByRole("textbox", { name: "Note" }), {
+      target: { value: "Weekly shop" },
+    });
+    fireEvent.click(within(dialog).getByRole("button", { name: "Apply" }));
+
+    await waitFor(() => expect(recategorise).toHaveBeenCalledWith("t3", expect.objectContaining({ lock: true })));
+    recategorise.mockRestore();
+  });
+
+  it("says when a save was refused, and shows what is there now", async () => {
+    const recategorise = vi
+      .spyOn(api, "recategorise")
+      .mockRejectedValue(new ApiError(400, "Unknown category"));
+    const dialog = await openFor("Woolworths");
+    fireEvent.click(within(dialog).getByLabelText("Lock — exempt from auto-categorisation"));
+    fireEvent.click(within(dialog).getByRole("button", { name: "Apply" }));
+
+    expect(await screen.findByText("Not saved. Unknown category")).toBeInTheDocument();
+    expect(screen.queryByRole("dialog", { name: "Categorise" })).toBeNull();
+    recategorise.mockRestore();
+  });
+});
+

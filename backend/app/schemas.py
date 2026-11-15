@@ -139,6 +139,11 @@ class AccountOut(BaseModel):
     transfer_wording: list[str] = []
 
 
+class AccountUpdateOut(AccountOut):
+    # Linked transfers into the account now counted by its new type.
+    transfers_rekinded: int = 0
+
+
 # ---------------------------------------------------------------------- categories
 
 
@@ -551,6 +556,7 @@ class TransferAcceptOut(BaseModel):
     group: TransferGroupOut
     learned: str | None  # the wording remembered for the receiving account, if any
     learned_for: str | None  # that account's name
+    also_linked: int = 0  # other pairs the learned wording linked straight away
 
 
 class TransactionListOut(BaseModel):

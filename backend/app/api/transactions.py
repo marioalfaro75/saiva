@@ -581,6 +581,7 @@ def split_txn(
             # household's figures with money that never entered or left it.
             is_transfer=parent.is_transfer,
             transfer_group_id=parent.transfer_group_id,
+            transfer_kind=parent.transfer_kind,
             dedup_hash=dedup_hash(
                 parent.account_id, parent.txn_date, s.amount_cents,
                 f"{parent.raw_description}#split{i}",

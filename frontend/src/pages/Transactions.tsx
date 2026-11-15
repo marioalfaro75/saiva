@@ -2,7 +2,8 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
 import { useSearchParams } from "react-router-dom";
 
-import { api } from "../api/client";
+import { api, ApiError } from "../api/client";
+import { useAuth } from "../auth/AuthContext";
 import { usePeriod } from "../period/context";
 import { FilterRow, FilterToggle } from "../table/FilterRow";
 import { SortHeader } from "../table/SortHeader";
@@ -45,6 +46,9 @@ type GroupBy = "merchant" | "description";
 
 export function Transactions() {
   const qc = useQueryClient();
+  const { me } = useAuth();
+  // A viewer can look at links but not make or undo them: the server refuses.
+  const canEdit = me !== null && me.user.role !== "viewer";
   const [searchParams] = useSearchParams();
   // Deep-linkable: the import result links straight to the transfers waiting for review.
   const [tab, setTab] = useState<Tab>(() => {
@@ -140,17 +144,36 @@ export function Transactions() {
   });
   const dialogApply = useMutation({
     mutationFn: async (v: {
-      id: string;
+      txn: Transaction;
       body: Parameters<typeof api.recategorise>[1] & { notes?: string | null };
     }) => {
       const { notes, ...body } = v.body;
-      if (notes !== undefined) await api.updateTransaction(v.id, { notes });
-      return api.recategorise(v.id, body);
+      if (notes !== undefined) await api.updateTransaction(v.txn.id, { notes });
+      // Only a note written: the category is left as it was. Re-filing it under the
+      // same category would record it as a person's choice, which stops transfer
+      // detection and cash deposits from ever placing it.
+      const noteOnly =
+        notes !== undefined &&
+        body.scope === "none" &&
+        !body.make_rule &&
+        body.lock === v.txn.category_locked &&
+        (body.category_id ?? null) === (v.txn.category_id ?? null);
+      return noteOnly ? null : api.recategorise(v.txn.id, body);
     },
     onSuccess: (r) => {
       invalidate();
       setDialogTxn(null);
-      showFlash(`Updated ${r.updated_count} transaction${r.updated_count === 1 ? "" : "s"}`);
+      showFlash(
+        r
+          ? `Updated ${r.updated_count} transaction${r.updated_count === 1 ? "" : "s"}`
+          : "Note saved",
+      );
+    },
+    onError: (e) => {
+      // Part of it may have been saved (the note goes first): show what is there now.
+      invalidate();
+      setDialogTxn(null);
+      showFlash(e instanceof ApiError ? `Not saved. ${e.message}` : "Not saved.");
     },
   });
   const lockToggle = useMutation({
@@ -242,14 +265,16 @@ export function Transactions() {
       >
         {t.category_locked ? "🔒" : "🔓"}
       </button>
-      <button
-        className={`icon-btn ${t.transfer_group_id ? "on" : ""}`}
-        title={t.transfer_group_id ? "Linked transfer: change or unlink" : "Link as a transfer…"}
-        aria-label={t.transfer_group_id ? "Transfer link" : "Link as a transfer"}
-        onClick={() => setTransferTxn(t)}
-      >
-        ⇄
-      </button>
+      {canEdit && (
+        <button
+          className={`icon-btn ${t.transfer_group_id ? "on" : ""}`}
+          title={t.transfer_group_id ? "Linked transfer: change or unlink" : "Link as a transfer…"}
+          aria-label={t.transfer_group_id ? "Transfer link" : "Link as a transfer"}
+          onClick={() => setTransferTxn(t)}
+        >
+          ⇄
+        </button>
+      )}
       <button
         className="icon-btn"
         title="Apply to similar, make a rule, add a note…"
@@ -310,7 +335,7 @@ export function Transactions() {
       {tab === "rules" ? (
         <RulesManager categories={categories.data ?? []} onFlash={showFlash} />
       ) : tab === "transfers" ? (
-        <TransfersPanel onFlash={showFlash} />
+        <TransfersPanel onFlash={showFlash} canEdit={canEdit} />
       ) : (
         <>
           <div className="toolbar">
@@ -655,7 +680,7 @@ export function Transactions() {
           categories={categories.data ?? []}
           busy={dialogApply.isPending}
           onClose={() => setDialogTxn(null)}
-          onSubmit={(body) => dialogApply.mutate({ id: dialogTxn.id, body })}
+          onSubmit={(body) => dialogApply.mutate({ txn: dialogTxn, body })}
         />
       )}
     </div>

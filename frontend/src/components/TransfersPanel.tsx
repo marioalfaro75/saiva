@@ -75,7 +75,8 @@ export function TransfersPanel({ onFlash, canEdit = true }: Props) {
       refresh();
       onFlash(
         r.learned
-          ? `Linked. From now on “${r.learned}” links payments to ${r.learned_for} by itself.`
+          ? `Linked. From now on “${r.learned}” links payments to ${r.learned_for} by itself.` +
+              (r.also_linked ? ` ${r.also_linked} more linked now.` : "")
           : "Linked.",
       );
     },

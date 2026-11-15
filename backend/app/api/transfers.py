@@ -7,7 +7,7 @@ import datetime as dt
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import select
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, aliased
 
 from .. import models, schemas
 from ..db import get_db
@@ -29,20 +29,41 @@ def _owned(db: Session, txn_id: str, household_id: str) -> models.Transaction:
     return t
 
 
-def _group_out(
-    db: Session, household_id: str, group_id: str
-) -> schemas.TransferGroupOut:
-    legs = transfers.group_legs(db, household_id, group_id)
-    cats, accts = _cat_names(db, household_id), _acct_names(db, household_id)
+def _group_view(
+    group_id: str,
+    legs: list[models.Transaction],
+    cats: dict[str, str],
+    accts: dict[str, str],
+) -> schemas.TransferGroupOut | None:
     pair = transfers.outflow_and_inflow(legs)
     if pair is None:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, "Transfer not found")
+        return None
     out, inflow = pair
     return schemas.TransferGroupOut(
         group_id=group_id,
         kind=out.transfer_kind,
         outflow=_to_out(out, cats, accts, inflow),
         inflow=_to_out(inflow, cats, accts, out),
+    )
+
+
+def _group_out(
+    db: Session, household_id: str, group_id: str
+) -> schemas.TransferGroupOut:
+    legs = transfers.group_legs(db, household_id, group_id)
+    view = _group_view(group_id, legs, _cat_names(db, household_id), _acct_names(db, household_id))
+    if view is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Transfer not found")
+    return view
+
+
+def _is_split(db: Session, t: models.Transaction) -> bool:
+    """Split into parts: the parts are what count, so the whole can't be one leg."""
+    return (
+        db.execute(
+            select(models.Transaction.id).where(models.Transaction.split_parent_id == t.id).limit(1)
+        ).first()
+        is not None
     )
 
 
@@ -67,6 +88,11 @@ def _pair(
         )
     if a.split_parent_id or b.split_parent_id:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "Part of a split can't be linked.")
+    if _is_split(db, a) or _is_split(db, b):
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            "A split transaction can't be linked: undo the split first.",
+        )
     return (a, b) if a.amount_cents < 0 else (b, a)
 
 
@@ -103,10 +129,14 @@ def accept(
     transfers.apply_kind(db, out, inflow, kind)
     learned = transfers.learn_wording(destination, out.raw_description) if payload.learn else None
     db.commit()
+    # What the wording now explains is linked at once, rather than leaving the next
+    # suggestion with the same wording to drop off the list without being linked.
+    also = len(transfers.classify_transfers(db, user.household_id).linked) if learned else 0
     return schemas.TransferAcceptOut(
         group=_group_out(db, user.household_id, out.transfer_group_id or ""),
         learned=learned,
         learned_for=destination.name if learned else None,
+        also_linked=also,
     )
 
 
@@ -147,6 +177,7 @@ def link_candidates(
     """What this transaction could be linked to by hand: the other direction, another
     account, not already linked, within two weeks -- equal amounts first."""
     t = _owned(db, txn_id, user.household_id)
+    part = aliased(models.Transaction)  # a split's part: a split whole is not offered
     rows = (
         db.execute(
             select(models.Transaction).where(
@@ -154,6 +185,7 @@ def link_candidates(
                 models.Transaction.account_id != t.account_id,
                 models.Transaction.transfer_group_id.is_(None),
                 models.Transaction.split_parent_id.is_(None),
+                ~select(part.id).where(part.split_parent_id == models.Transaction.id).exists(),
                 models.Transaction.txn_date >= t.txn_date - dt.timedelta(days=14),
                 models.Transaction.txn_date <= t.txn_date + dt.timedelta(days=14),
                 (
@@ -191,6 +223,7 @@ def recent(
             .where(
                 models.Transaction.household_id == user.household_id,
                 models.Transaction.transfer_group_id.is_not(None),
+                models.Transaction.split_parent_id.is_(None),
                 models.Transaction.amount_cents < 0,
             )
             .order_by(models.Transaction.txn_date.desc(), models.Transaction.id.desc())
@@ -199,13 +232,19 @@ def recent(
         .scalars()
         .all()
     )
-    groups: list[schemas.TransferGroupOut] = []
-    for out in outs:
-        try:
-            groups.append(_group_out(db, user.household_id, out.transfer_group_id or ""))
-        except HTTPException:
-            continue
-    return groups
+    group_ids = [o.transfer_group_id for o in outs if o.transfer_group_id]
+    legs: dict[str, list[models.Transaction]] = {g: [] for g in group_ids}
+    if group_ids:
+        for t in db.execute(
+            select(models.Transaction).where(
+                models.Transaction.household_id == user.household_id,
+                models.Transaction.transfer_group_id.in_(group_ids),
+            )
+        ).scalars():
+            legs[t.transfer_group_id or ""].append(t)
+    cats, accts = _cat_names(db, user.household_id), _acct_names(db, user.household_id)
+    views = (_group_view(g, legs[g], cats, accts) for g in group_ids)
+    return [v for v in views if v is not None]
 
 
 @router.post("/{group_id}/unlink", response_model=schemas.CountOut)

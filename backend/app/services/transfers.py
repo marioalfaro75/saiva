@@ -76,20 +76,6 @@ def wording_of(text: str) -> str:
     return " ".join(re.sub(r"[^a-z ]+", " ", text.lower()).split())
 
 
-def looks_like_a_transfer(out: models.Transaction, inflow: models.Transaction) -> bool:
-    """Whether the bank's own wording suggests these two are the same money.
-
-    Equal amounts, different accounts and a few days apart describes an enormous number
-    of ordinary pairs — a rent payment and a salary, a bill and a refund. Linking on
-    that alone marked both legs as internal, removed them from every total the app
-    reports, and did it silently over the household's whole history after each import.
-    """
-    a, b = _text(out), _text(inflow)
-    if any(word in a or word in b for word in TRANSFER_WORDS):
-        return True
-    return SequenceMatcher(None, a, b).ratio() >= DESCRIPTION_SIMILARITY
-
-
 def candidates(
     inflows_by_day: dict[tuple[int, dt.date], list[models.Transaction]],
     out: models.Transaction,
@@ -109,13 +95,18 @@ def candidates(
     return found
 
 
-def kind_for(destination: models.Account) -> str:
-    """What a pair is, by the account the money went into."""
-    if destination.type == "credit_card":
+def kind_for_type(account_type: str) -> str:
+    """What a pair is, by the type of the account the money went into."""
+    if account_type == "credit_card":
         return CARD_PAYMENT
-    if destination.type in LOAN_ACCOUNT_TYPES:
+    if account_type in LOAN_ACCOUNT_TYPES:
         return LOAN_REPAYMENT
     return OWN_ACCOUNTS
+
+
+def kind_for(destination: models.Account) -> str:
+    """What a pair is, by the account the money went into."""
+    return kind_for_type(destination.type)
 
 
 def _account_digits(account: models.Account) -> str | None:
@@ -123,13 +114,27 @@ def _account_digits(account: models.Account) -> str | None:
     return digits[-4:] if len(digits) >= 4 else None
 
 
-def evidence_for(
+def has_phrase(words: str, phrase: str) -> bool:
+    """Whether `phrase` (as wording) is in `words` (as wording) as whole words: "cc" is
+    in "by authority to cc" but not in "account keeping fee"."""
+    key = wording_of(phrase)
+    return bool(key) and f" {key} " in f" {words} "
+
+
+# How strongly the evidence ties the two legs to each other. Wording for this account,
+# its account number, or two descriptions that read alike tie them; a transfer word on
+# both sides nearly does; a word on one side alone ("Payment received" arriving in the
+# card) only says that side is a transfer, not which outflow it is the other half of.
+TIED = 3
+BOTH_SIDES = 2
+ONE_SIDE = 1
+
+
+def _strength(
     out: models.Transaction,
     inflow: models.Transaction,
     accounts: dict[str, models.Account],
-) -> str | None:
-    """Why these two are one amount of money moving, in a few words -- or None when
-    nothing beyond the amount and the dates says so."""
+) -> tuple[int, str] | None:
     source, destination = accounts.get(out.account_id), accounts.get(inflow.account_id)
     out_words, in_words = wording_of(_text(out)), wording_of(_text(inflow))
     sides = [
@@ -142,19 +147,36 @@ def evidence_for(
     ]
     for account, words, _ in sides:
         for phrase in account.transfer_wording or []:
-            if wording_of(phrase) and wording_of(phrase) in words:
-                return f"“{phrase}” is your wording for {account.name}"
+            if has_phrase(words, phrase):
+                return TIED, f"“{phrase}” is your wording for {account.name}"
     for account, _, text in sides:
         digits = _account_digits(account)
         if digits and any(run.endswith(digits) for run in re.findall(r"\d{4,}", text or "")):
-            return f"mentions {account.name}'s account number"
-    if looks_like_a_transfer(out, inflow):
-        return "your bank's transfer wording"
-    if destination is not None:
-        arriving = ARRIVING_WORDS.get(destination.type, ())
-        if any(word in _text(inflow) for word in arriving):
-            return f"a payment arriving in {destination.name}"
+            return TIED, f"mentions {account.name}'s account number"
+    a, b = _text(out), _text(inflow)
+    if SequenceMatcher(None, a, b).ratio() >= DESCRIPTION_SIMILARITY:
+        return TIED, "the two descriptions match"
+    arriving = ARRIVING_WORDS.get(destination.type, ()) if destination is not None else ()
+    out_side = any(word in a for word in TRANSFER_WORDS)
+    in_side = any(word in b for word in (*TRANSFER_WORDS, *arriving))
+    if out_side and in_side:
+        return BOTH_SIDES, "your bank's transfer wording"
+    if out_side or in_side:
+        if not out_side and destination is not None and any(word in b for word in arriving):
+            return ONE_SIDE, f"a payment arriving in {destination.name}"
+        return ONE_SIDE, "your bank's transfer wording"
     return None
+
+
+def evidence_for(
+    out: models.Transaction,
+    inflow: models.Transaction,
+    accounts: dict[str, models.Account],
+) -> str | None:
+    """Why these two are one amount of money moving, in a few words -- or None when
+    nothing beyond the amount and the dates says so."""
+    found = _strength(out, inflow, accounts)
+    return found[1] if found else None
 
 
 @dataclass
@@ -233,6 +255,21 @@ def _income_already(t: models.Transaction, income_ids: set[str]) -> bool:
     return t.category_id in income_ids and (set_by_person(t) or (t.confidence or 0) >= 0.99)
 
 
+def _split_parent_ids(db: Session, household_id: str) -> set[str]:
+    return {
+        pid
+        for (pid,) in db.execute(
+            select(models.Transaction.split_parent_id)
+            .where(
+                models.Transaction.household_id == household_id,
+                models.Transaction.split_parent_id.is_not(None),
+            )
+            .distinct()
+        ).tuples()
+        if pid
+    }
+
+
 def find_pairs(
     db: Session,
     household_id: str,
@@ -242,9 +279,13 @@ def find_pairs(
 ) -> list[Pair]:
     """Every pair not yet linked: the ones with evidence, then the rest for review.
 
-    Deterministic: outflows in date order, each taking the nearest inflow -- with
-    evidence first, then by the fewest days between, then the earlier. A pair a person
-    dismissed is never offered again.
+    The strongest evidence is settled first, across all outflows -- so an outflow in
+    the household's own wording for the card is never beaten to the card's "Payment
+    received" by an earlier outflow that only shares the amount. Evidence on one side
+    alone links only when nothing else could be either half; otherwise it is for a
+    person. Ties go to the fewest days between, then the earlier. A pair a person
+    dismissed is never offered again, and a split transaction is not paired (its parts
+    are what count).
     """
     conditions = [
         models.Transaction.household_id == household_id,
@@ -256,7 +297,12 @@ def find_pairs(
         # Scoped to what an import actually touched, rather than re-deciding the whole
         # history every time. It is also what stops a crafted row reaching back years.
         conditions.append(models.Transaction.txn_date >= since - dt.timedelta(days=window_days))
-    rows = db.execute(select(models.Transaction).where(*conditions)).scalars().all()
+    split = _split_parent_ids(db, household_id)
+    rows = [
+        t
+        for t in db.execute(select(models.Transaction).where(*conditions)).scalars().all()
+        if t.id not in split
+    ]
     accounts = _accounts(db, household_id)
     dismissed = _dismissed(db, household_id)
     income_ids = _income_ids(db, household_id)
@@ -283,47 +329,56 @@ def find_pairs(
         ]
 
     considered = {out.id: options(out) for out in outflows}
+    rivals: dict[str, int] = defaultdict(int)  # inflow id -> outflows that could pair
+    for possible in considered.values():
+        for i in possible:
+            rivals[i.id] += 1
+
+    def days(out: models.Transaction, i: models.Transaction) -> int:
+        return abs((i.txn_date - out.txn_date).days)
+
+    Edge = tuple[
+        tuple[int, int, dt.date, dt.date, str, str],
+        models.Transaction,
+        models.Transaction,
+        str | None,
+    ]
+    sure: list[Edge] = []
+    unsure: list[Edge] = []
+    for out in outflows:
+        for i in considered[out.id]:
+            evidence = _strength(out, i, accounts)
+            strength, why = evidence if evidence is not None else (0, None)
+            rivalled = len(considered[out.id]) > 1 or rivals[i.id] > 1
+            key = (-strength, days(out, i), out.txn_date, i.txn_date, out.id, i.id)
+            if strength > ONE_SIDE or (strength == ONE_SIDE and not rivalled):
+                sure.append((key, out, i, why))
+            elif not _income_already(i, income_ids):
+                # One side's wording, and something else could be either half; or only
+                # the amount and dates: for a person -- the likeliest pairing first.
+                unsure.append((key, out, i, None))
+
     used: set[str] = set()
     pairs: list[Pair] = []
-
-    def gap(out: models.Transaction, i: models.Transaction) -> tuple[int, dt.date, str]:
-        return (abs((i.txn_date - out.txn_date).days), i.txn_date, i.id)
-
-    # Pass 1: pairs with evidence, so a pair the bank's wording ties together is never
-    # lost to a nearer inflow that only shares the amount.
-    for out in outflows:
-        sure = [
-            (gap(out, i), i, why)
-            for i in considered[out.id]
-            if i.id not in used and (why := evidence_for(out, i, accounts)) is not None
-        ]
-        if sure:
-            _, inflow, why = min(sure, key=lambda s: s[0])
-            pairs.append(Pair(out, inflow, kind_for(accounts[inflow.account_id]), why))
-            used.update({out.id, inflow.id})
-    # Pass 2: what is left that agrees on amount and dates only, for a person to decide.
-    for out in outflows:
-        if out.id in used:
-            continue
-        rest = [
-            i
-            for i in considered[out.id]
-            if i.id not in used and not _income_already(i, income_ids)
-        ]
-        if rest:
-            inflow = min(rest, key=lambda i: gap(out, i))
-            pairs.append(Pair(out, inflow, kind_for(accounts[inflow.account_id]), None))
-            used.update({out.id, inflow.id})
+    for edges in (sure, unsure):
+        for _, edge_out, edge_in, edge_why in sorted(edges, key=lambda e: e[0]):
+            if edge_out.id in used or edge_in.id in used:
+                continue
+            pairs.append(
+                Pair(edge_out, edge_in, kind_for(accounts[edge_in.account_id]), edge_why)
+            )
+            used.update({edge_out.id, edge_in.id})
     return pairs
 
 
 def _may_refile(t: models.Transaction, automatic_ids: Iterable[str]) -> bool:
     """Whether linking may set this leg's category: not a locked one, nor one a person
-    chose -- except a category transfer detection itself put there, which older
-    releases left unscored, so it read as a person's."""
+    chose -- except a transfer category left with no score, which older releases wrote
+    when they linked a pair, so it only reads as a person's. A person's own 1.0 choice
+    of Internal transfers is still theirs."""
     if t.category_locked:
         return False
-    return not set_by_person(t) or t.category_id in set(automatic_ids)
+    return not set_by_person(t) or (t.confidence is None and t.category_id in set(automatic_ids))
 
 
 def apply_kind(
@@ -361,6 +416,7 @@ def apply_kind(
         for k in (TRANSFER_CATEGORY, CARD_PAYMENT_CATEGORY, CASH_DEPOSIT_CATEGORY)
         if k in categories
     ]
+    relinking = bool(outflow.transfer_group_id or inflow.transfer_group_id)
     for t in (outflow, inflow):
         t.transfer_group_id = group
         t.transfer_kind = kind
@@ -371,6 +427,18 @@ def apply_kind(
             # this replaces, and a person's 1.0 for Coffee left on it would read as a
             # person's choice of Credit-card payments.
             t.confidence = ML_MAX_CONFIDENCE
+    if relinking:
+        # A leg split after it was linked: its parts are what the totals count, so they
+        # are counted the way the kind now says. Their own categories stay theirs.
+        for part in db.execute(
+            select(models.Transaction).where(
+                models.Transaction.household_id == household_id,
+                models.Transaction.split_parent_id.in_([outflow.id, inflow.id]),
+            )
+        ).scalars():
+            part.transfer_group_id = group
+            part.transfer_kind = kind
+            part.is_transfer = not (kind == LOAN_REPAYMENT and part.split_parent_id == outflow.id)
 
 
 def _file_cash_deposits(
@@ -436,6 +504,15 @@ def classify_transfers(
             scan.linked.append(pair)
         else:
             scan.to_review.append(pair)
+    cash = categories.get(CASH_DEPOSIT_CATEGORY)
+    for pair in scan.to_review:
+        t = pair.inflow
+        # Filed as a cash deposit before its other half was imported: while a person
+        # decides, it is neither. Only the automatic one is offered for review at all: a
+        # person's or a rule's Cash deposit is income already, and never suggested.
+        if cash is not None and t.category_id == cash and not t.category_locked:
+            t.category_id = None
+            t.confidence = None
     db.flush()
     conditions = [
         models.Transaction.household_id == household_id,
@@ -443,7 +520,10 @@ def classify_transfers(
         models.Transaction.transfer_group_id.is_(None),
     ]
     if since is not None:
-        conditions.append(models.Transaction.txn_date >= since - dt.timedelta(days=window_days))
+        # Only rows whose possible other halves the scan saw: an inflow just before
+        # `since` may pair with an outflow the scan never loaded, so it is not known to
+        # have come from nowhere.
+        conditions.append(models.Transaction.txn_date >= since)
     waiting = {p.inflow.id for p in scan.to_review}
     scan.cash_deposits = _file_cash_deposits(
         db,
@@ -477,8 +557,7 @@ def learn_wording(account: models.Account, description: str) -> str | None:
     phrase = " ".join(wording_of(description).split()[:6])
     if len(phrase) < 6 or len(phrase.split()) < 2:
         return None
-    known = [wording_of(p) for p in (account.transfer_wording or [])]
-    if any(k and k in phrase for k in known):
+    if any(has_phrase(phrase, p) for p in (account.transfer_wording or [])):
         return None
     account.transfer_wording = [*(account.transfer_wording or []), phrase]
     return phrase
@@ -500,6 +579,9 @@ def group_legs(db: Session, household_id: str, group_id: str) -> list[models.Tra
 def outflow_and_inflow(
     legs: list[models.Transaction],
 ) -> tuple[models.Transaction, models.Transaction] | None:
+    """The pair's two legs. A leg split after linking shares its group with its parts;
+    the parts are not legs."""
+    legs = [t for t in legs if t.split_parent_id is None]
     outs = [t for t in legs if t.amount_cents < 0]
     ins = [t for t in legs if t.amount_cents > 0]
     if len(outs) == 1 and len(ins) == 1:
@@ -567,6 +649,38 @@ def release(db: Session, t: models.Transaction) -> None:
     if t.category_id in automatic_ids:
         t.category_id = None
         t.confidence = None
+
+
+def rekind_into(db: Session, account: models.Account, old_type: str) -> int:
+    """An account's type changed: the pairs into it that were counted by its old type
+    are counted by its new one -- a "Westpac" loan imported as an everyday account has
+    its repayments linked as money between accounts until its type is put right. A
+    kind a person chose that the old type would not have given stays. Returns the
+    pairs changed."""
+    was, now = kind_for_type(old_type), kind_for(account)
+    if was == now:
+        return 0
+    inflows = db.execute(
+        select(models.Transaction).where(
+            models.Transaction.household_id == account.household_id,
+            models.Transaction.account_id == account.id,
+            models.Transaction.amount_cents > 0,
+            models.Transaction.split_parent_id.is_(None),
+            models.Transaction.transfer_group_id.is_not(None),
+            models.Transaction.transfer_kind == was,
+        )
+    ).scalars().all()
+    accounts = _accounts(db, account.household_id)
+    categories = _category_ids(db, account.household_id)
+    changed = 0
+    for inflow in inflows:
+        legs = group_legs(db, account.household_id, inflow.transfer_group_id or "")
+        pair = outflow_and_inflow(legs)
+        if pair is None or pair[1].id != inflow.id:
+            continue
+        apply_kind(db, pair[0], pair[1], now, accounts, categories)
+        changed += 1
+    return changed
 
 
 def classify_existing(db: Session, household_id: str) -> int:

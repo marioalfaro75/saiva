@@ -136,4 +136,55 @@ describe("AccountDialog", () => {
     expect(screen.getByText(/none yet/)).toBeInTheDocument();
     expect(wording()).toHaveValue("");
   });
+
+  it("says which line is too short before sending, and will not save it", () => {
+    const update = vi.spyOn(api, "updateAccount");
+    show();
+    fireEvent.change(wording(), { target: { value: "By Authority To Cc\nCc" } });
+    expect(screen.getByRole("alert")).toHaveTextContent("“Cc” is too short to recognise a payment by");
+    expect(screen.getByRole("button", { name: "Save" })).toBeDisabled();
+    expect(update).not.toHaveBeenCalled();
+  });
+
+  it("says when a line is too long", () => {
+    show();
+    fireEvent.change(wording(), { target: { value: "x".repeat(81) } });
+    expect(screen.getByRole("alert")).toHaveTextContent("too long");
+  });
+
+  it("allows a number on its own line, which matches nothing and is dropped", () => {
+    show();
+    fireEvent.change(wording(), { target: { value: "By Authority To Cc\n0412" } });
+    expect(screen.queryByRole("alert")).toBeNull();
+  });
+
+  it("says how many links the new type recounted", async () => {
+    vi.spyOn(api, "updateAccount").mockResolvedValue({ ...ACCOUNT, transfers_rekinded: 4 });
+    vi.spyOn(api, "detectTransfers").mockResolvedValue({ linked: 0, to_review: 0, cash_deposits: 0 });
+    show();
+    fireEvent.change(screen.getByRole("combobox", { name: "Type" }), {
+      target: { value: "home_loan" },
+    });
+    save();
+    await waitFor(() =>
+      expect(onDone).toHaveBeenCalledWith(
+        "Saved. 4 linked transfers now counted as home loan. 0 transfers linked, 0 to review.",
+      ),
+    );
+  });
+
+  it("is saved even when looking again fails, and says so", async () => {
+    vi.spyOn(api, "updateAccount").mockResolvedValue(ACCOUNT);
+    vi.spyOn(api, "detectTransfers").mockRejectedValue(new ApiError(500, "Server error"));
+    show();
+    fireEvent.change(wording(), { target: { value: "Payment to card" } });
+    save();
+    await waitFor(() =>
+      expect(onDone).toHaveBeenCalledWith(
+        "Saved. Couldn't look through your transactions again: try Transactions → Transfers → Look again.",
+      ),
+    );
+    expect(onClose).toHaveBeenCalled();
+  });
 });
+

@@ -2,9 +2,9 @@ import { useId, useState } from "react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 
 import { api, ApiError } from "../api/client";
-import type { Account } from "../api/types";
+import type { Account, TransferScan } from "../api/types";
 import { useDismissable } from "../hooks/useDismissable";
-import { ACCOUNT_TYPES, accountTypeLabel } from "./accountTypes";
+import { ACCOUNT_TYPES, accountTypeLabel, wordingProblem } from "./accountTypes";
 
 interface Props {
   account: Account;
@@ -13,6 +13,12 @@ interface Props {
 }
 
 const plural = (n: number, one: string) => `${n} ${one}${n === 1 ? "" : "s"}`;
+
+interface Saved {
+  scan: TransferScan | null;
+  scanFailed: boolean;
+  rekinded: number;
+}
 
 /**
  * Edit an account: its name and type, and the wording that marks money moving to or from
@@ -36,23 +42,37 @@ export function AccountDialog({ account, onClose, onDone }: Props) {
     phrases.join("\n") !== (account.transfer_wording ?? []).join("\n");
   const typeChanged = type !== account.type;
 
+  const problem = wordingProblem(phrases);
+
   const save = useMutation({
-    mutationFn: async () => {
-      await api.updateAccount(account.id, {
+    mutationFn: async (): Promise<Saved> => {
+      const saved = await api.updateAccount(account.id, {
         name: name.trim(),
         type,
         institution: institution.trim() || null,
         transfer_wording: phrases,
       });
-      // What the wording or type now explains is linked straight away, not at the next import.
-      return wordingChanged || typeChanged ? api.detectTransfers() : null;
+      const rekinded = saved.transfers_rekinded ?? 0;
+      if (!wordingChanged && !typeChanged) return { scan: null, scanFailed: false, rekinded };
+      // What the wording or type now explains is linked straight away, not at the next
+      // import. The account is saved whether or not this works.
+      try {
+        return { scan: await api.detectTransfers(), scanFailed: false, rekinded };
+      } catch {
+        return { scan: null, scanFailed: true, rekinded };
+      }
     },
-    onSuccess: (scan) => {
+    onSuccess: ({ scan, scanFailed, rekinded }) => {
       void qc.invalidateQueries();
+      const recounted = rekinded
+        ? ` ${plural(rekinded, "linked transfer")} now counted as ${accountTypeLabel(type)}.`
+        : "";
       onDone(
-        scan
-          ? `Saved. ${plural(scan.linked / 2, "transfer")} linked, ${scan.to_review} to review.`
-          : "Saved.",
+        scanFailed
+          ? `Saved.${recounted} Couldn't look through your transactions again: try Transactions → Transfers → Look again.`
+          : scan
+            ? `Saved.${recounted} ${plural(scan.linked / 2, "transfer")} linked, ${scan.to_review} to review.`
+            : `Saved.${recounted}`,
       );
       onClose();
     },
@@ -95,6 +115,11 @@ export function AccountDialog({ account, onClose, onDone }: Props) {
             placeholder={"By Authority To Cc\nPayment to card"}
             aria-describedby={`${fid}-wording-help`}
           />
+          {problem && (
+            <div className="error" role="alert" style={{ marginTop: 6 }}>
+              {problem}
+            </div>
+          )}
           <p id={`${fid}-wording-help`} className="muted" style={{ margin: "4px 0 0", fontSize: 13 }}>
             One per line. When a description in another of your accounts contains one of these,
             Saiva knows the money went to or came from {account.name}.
@@ -117,7 +142,7 @@ export function AccountDialog({ account, onClose, onDone }: Props) {
           </button>
           <button
             className="btn btn-primary"
-            disabled={save.isPending || !name.trim()}
+            disabled={save.isPending || !name.trim() || problem !== null}
             onClick={() => save.mutate()}
           >
             {save.isPending ? "Saving…" : "Save"}

@@ -124,6 +124,8 @@ export interface TransferAccept {
   /** The wording remembered for the receiving account, if any. */
   learned: string | null;
   learned_for: string | null;
+  /** Other pairs the learned wording linked straight away. */
+  also_linked?: number;
 }
 
 export interface TransferScan {

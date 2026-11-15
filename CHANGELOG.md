@@ -26,7 +26,8 @@ Edit**, since the type decides how money going into it counts.
 - **Your bank's wording.** On **Accounts → Edit**, list the words your bank uses for a
   payment to that account, one per line — e.g. "By Authority To Cc" for the credit card.
   Payments with that wording link by themselves. Accepting a pair can remember its
-  wording for you.
+  wording for you, and links the others with the same wording straight away. Wording is
+  matched as whole words, and must have at least four letters.
 - **Link by hand.** The ⇄ button on a transaction links it with its other half, or
   unlinks it.
 - **Cash deposits.** Money into a savings or offset account that came from none of your
@@ -34,7 +35,9 @@ Edit**, since the type decides how money going into it counts.
 - **Notes.** Add a note to any transaction ("Gift from Mum") in its ⋯ window; Saiva
   suggests one from the description. Notes show under the description.
 - **Hide transfers** on the transactions list.
-- An account's type can now be changed on **Accounts → Edit**.
+- An account's type can now be changed on **Accounts → Edit**. Transfers already linked
+  into it are then counted by the new type — a home loan first imported as an everyday
+  account starts counting its repayments.
 
 ### Changed
 
@@ -42,8 +45,13 @@ Edit**, since the type decides how money going into it counts.
   → Credit card".
 - Importing a statement says how many transfers it linked, how many are left to review
   and the cash deposits it found, with a link to the review.
+- **A loan account's own transactions — its interest and fees — are no longer counted as
+  spending.** Your repayments already pay for them, and count once, on the account that
+  paid.
 - Linked transfers are no longer flagged as possible duplicates, and the cash-flow
   forecast starts from your everyday, savings, offset and cash accounts only.
+- Saving only a note leaves the category as it was, rather than marking it as your
+  choice.
 
 ### Fixed
 

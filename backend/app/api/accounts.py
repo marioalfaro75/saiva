@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session
 from .. import models, schemas
 from ..db import get_db
 from ..deps import get_current_user, require_owner, require_writer
+from ..services import transfers
 from ..services.transfers import wording_of
 
 router = APIRouter(prefix="/accounts", tags=["accounts"])
@@ -39,15 +40,29 @@ def _to_out(db: Session, account: models.Account) -> schemas.AccountOut:
     )
 
 
+# Shorter wording than this matches too much: "cc" would read a payment to the card into
+# every "ACC 1234" description in the household's other accounts.
+MIN_WORDING_LETTERS = 4
+
+
 def _clean_wording(phrases: list[str]) -> list[str]:
-    """Trimmed, one of each (compared as wording: case, digits and punctuation aside),
-    and only phrases with words in them -- digits alone would match nothing."""
+    """Trimmed, one of each (compared as wording: case, digits and punctuation aside).
+    A phrase too short to tell a payment to this account from anything else is refused,
+    with the reason."""
     kept: list[str] = []
     seen: set[str] = set()
     for phrase in phrases:
         text = " ".join(phrase.split())
         key = wording_of(text)
-        if key and key not in seen:
+        if not key:
+            continue  # digits alone would match nothing
+        if len(key.replace(" ", "")) < MIN_WORDING_LETTERS:
+            raise HTTPException(
+                status.HTTP_422_UNPROCESSABLE_ENTITY,
+                f"“{text}” is too short to recognise a payment by. Use more of your "
+                "bank's wording, e.g. “By Authority To Cc”.",
+            )
+        if key not in seen:
             seen.add(key)
             kept.append(text)
     return kept
@@ -98,23 +113,29 @@ def get_account(
     return _to_out(db, _get_owned(db, account_id, user.household_id))
 
 
-@router.patch("/{account_id}", response_model=schemas.AccountOut)
+@router.patch("/{account_id}", response_model=schemas.AccountUpdateOut)
 def update_account(
     account_id: str,
     payload: schemas.AccountUpdate,
     user: models.User = Depends(require_writer),
     db: Session = Depends(get_db),
-) -> schemas.AccountOut:
+) -> schemas.AccountUpdateOut:
     account = _get_owned(db, account_id, user.household_id)
+    old_type = account.type
     for key, value in payload.model_dump(exclude_unset=True).items():
         if key == "transfer_wording":
             value = _clean_wording(value or [])
         elif value is None and key in ("name", "type"):
             continue  # an explicit null is "leave it": these columns are not nullable
         setattr(account, key, value)
+    # The type decides what money into the account is: what was linked under the old
+    # one is counted by the new one.
+    rekinded = transfers.rekind_into(db, account, old_type) if account.type != old_type else 0
     db.commit()
     db.refresh(account)
-    return _to_out(db, account)
+    return schemas.AccountUpdateOut(
+        **_to_out(db, account).model_dump(), transfers_rekinded=rekinded
+    )
 
 
 @router.delete("/{account_id}", status_code=status.HTTP_204_NO_CONTENT)

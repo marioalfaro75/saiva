@@ -117,6 +117,25 @@ describe("to review", () => {
     });
   });
 
+  it("says how many more the learned wording linked at once", async () => {
+    vi.spyOn(api, "transferSuggestions").mockResolvedValue([SUGGESTION]);
+    vi.spyOn(api, "recentTransfers").mockResolvedValue([]);
+    vi.spyOn(api, "acceptTransfer").mockResolvedValue({
+      group: GROUP,
+      learned: "by authority to cc",
+      learned_for: "Credit card",
+      also_linked: 3,
+    });
+    show();
+    const item = await within(toReview()).findByRole("listitem");
+    fireEvent.click(within(item).getByRole("button", { name: "Accept" }));
+    await waitFor(() =>
+      expect(flash).toHaveBeenCalledWith(
+        "Linked. From now on “by authority to cc” links payments to Credit card by itself. 3 more linked now.",
+      ),
+    );
+  });
+
   it("does not ask to learn the wording once the box is unticked", async () => {
     vi.spyOn(api, "transferSuggestions").mockResolvedValue([SUGGESTION]);
     vi.spyOn(api, "recentTransfers").mockResolvedValue([]);

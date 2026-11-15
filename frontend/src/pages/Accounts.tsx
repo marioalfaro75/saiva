@@ -13,6 +13,7 @@ import { TABLE_MIN, TableWrap } from "../table/TableWrap";
 import { formatCents } from "../format";
 import { PageHead } from "../components/PageHead";
 import { AccountDialog } from "../components/AccountDialog";
+import { useAuth } from "../auth/AuthContext";
 import { ACCOUNT_TYPES, accountTypeLabel } from "../components/accountTypes";
 
 const ACCOUNT_LABELS = {
@@ -40,6 +41,8 @@ export function Accounts() {
   const [type, setType] = useState("everyday");
   const [institution, setInstitution] = useState("");
   const [editing, setEditing] = useState<Account | null>(null);
+  const { me } = useAuth();
+  const canEdit = me !== null && me.user.role !== "viewer";
   const [flash, setFlash] = useState<string | null>(null);
 
   const create = useMutation({
@@ -115,13 +118,15 @@ export function Accounts() {
                         </td>
                         <td className="num muted">{a.txn_count}</td>
                         <td className="actions">
-                          <button
-                            className="btn btn-ghost"
-                            aria-label={`Edit ${a.name}`}
-                            onClick={() => setEditing(a)}
-                          >
-                            Edit
-                          </button>
+                          {canEdit && (
+                            <button
+                              className="btn btn-ghost"
+                              aria-label={`Edit ${a.name}`}
+                              onClick={() => setEditing(a)}
+                            >
+                              Edit
+                            </button>
+                          )}
                         </td>
                       </tr>
                     ))}

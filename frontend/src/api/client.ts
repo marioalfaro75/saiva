@@ -103,6 +103,19 @@ async function send(path: string, options: RequestInit): Promise<Response> {
   return fetch(`/api${path}`, { ...options, headers, credentials: "same-origin" });
 }
 
+/** A refusal's reason as a sentence. Validation errors arrive as a list of objects,
+ *  which String() turned into "[object Object]". */
+export function describeDetail(detail: unknown): string {
+  if (Array.isArray(detail)) {
+    return detail
+      .map((d) =>
+        typeof d === "object" && d !== null && "msg" in d ? String((d as { msg: unknown }).msg) : String(d),
+      )
+      .join("; ");
+  }
+  return String(detail);
+}
+
 async function request<T>(path: string, options: RequestInit = {}, retry = true): Promise<T> {
   let res = await send(path, options);
 
@@ -134,7 +147,7 @@ async function request<T>(path: string, options: RequestInit = {}, retry = true)
   if (!res.ok) {
     const detail =
       typeof data === "object" && data !== null && "detail" in data
-        ? String((data as { detail: unknown }).detail)
+        ? describeDetail((data as { detail: unknown }).detail)
         : res.statusText;
     throw new ApiError(res.status, detail);
   }
@@ -192,7 +205,10 @@ export const api = {
       transfer_wording?: string[];
     },
   ) =>
-    request<Account>(`/accounts/${id}`, { method: "PATCH", body: JSON.stringify(patch) }),
+    request<Account & { transfers_rekinded?: number }>(`/accounts/${id}`, {
+      method: "PATCH",
+      body: JSON.stringify(patch),
+    }),
 
   detectTransfers: () =>
     request<TransferScan>("/transactions/detect-transfers", { method: "POST" }),
