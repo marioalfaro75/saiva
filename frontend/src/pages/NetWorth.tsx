@@ -4,7 +4,7 @@ import { Line, LineChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from "rec
 
 import { TABLE_MIN, TableWrap } from "../table/TableWrap";
 import { api } from "../api/client";
-import type { NetWorth as NetWorthData, NetWorthItem } from "../api/types";
+import type { NetWorth as NetWorthData, NetWorthAccount, NetWorthItem } from "../api/types";
 import { dollarsToCents, formatCents } from "../format";
 import { usePeriod } from "../period/context";
 import { FilterRow, FilterToggle } from "../table/FilterRow";
@@ -158,6 +158,57 @@ function ItemTable({
   );
 }
 
+/** Which accounts count: an account's balance is in net worth once it is ticked. */
+function AccountsCard({
+  accounts,
+  onToggle,
+  busy,
+}: {
+  accounts: NetWorthAccount[];
+  onToggle: (id: string, on: boolean) => void;
+  busy: boolean;
+}) {
+  if (!accounts.length) return null;
+  return (
+    <div className="card" style={{ marginTop: 16 }}>
+      <h2>Accounts</h2>
+      <p className="muted" style={{ marginTop: 0 }}>
+        Tick an account to count its balance. Only tick it once the balance is right.
+      </p>
+      <TableWrap min={360} label="Accounts">
+        <table>
+          <thead>
+            <tr>
+              <th>Count</th>
+              <th>Account</th>
+              <th className="num">Balance</th>
+            </tr>
+          </thead>
+          <tbody>
+            {accounts.map((a) => (
+              <tr key={a.id}>
+                <td>
+                  <input
+                    type="checkbox"
+                    aria-label={`Count ${a.name}`}
+                    checked={a.in_net_worth}
+                    disabled={busy}
+                    onChange={(e) => onToggle(a.id, e.target.checked)}
+                  />
+                </td>
+                <td>{a.name}</td>
+                <td className={`num ${a.balance_cents < 0 ? "negative" : ""}`}>
+                  {formatCents(a.balance_cents)}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </TableWrap>
+    </div>
+  );
+}
+
 export function NetWorth() {
   const fid = useId();
   const { period } = usePeriod();
@@ -194,6 +245,13 @@ export function NetWorth() {
   const snapshot = useMutation({
     mutationFn: () => api.recordNetWorthSnapshot(),
     onSuccess: setData,
+  });
+  const count = useMutation({
+    mutationFn: (v: { id: string; on: boolean }) => api.updateAccount(v.id, { in_net_worth: v.on }),
+    onSuccess: () => {
+      void qc.invalidateQueries({ queryKey: ["netWorth"] });
+      void qc.invalidateQueries({ queryKey: ["accounts"] });
+    },
   });
 
   const onSubmit = (e: FormEvent) => {
@@ -272,6 +330,13 @@ export function NetWorth() {
         />
       </div>
 
+      <AccountsCard
+        accounts={data?.accounts ?? []}
+        onToggle={(id, on) => count.mutate({ id, on })}
+        busy={count.isPending}
+      />
+      {count.isError && <div className="error">Couldn’t change that account.</div>}
+
       <div className="card" style={{ marginTop: 16 }}>
         <h2>Add an item</h2>
         <form onSubmit={onSubmit}>
@@ -313,7 +378,7 @@ export function NetWorth() {
         </form>
       </div>
 
-      {data && data.items.length === 0 && (
+      {data && data.items.length === 0 && !(data.accounts ?? []).some((a) => a.in_net_worth) && (
         <p className="muted" style={{ marginTop: 12 }}>
           Add your assets (home, super, savings) and liabilities (mortgage, loans) to track net
           worth over time — or load demo data from Settings.

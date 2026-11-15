@@ -1490,3 +1490,30 @@ fieldset.repayment .notice {
   margin: 0 0 8px;
 }
 
+
+/* ---- Mortgage (0.19.0) ---- */
+.mortgage-summary,
+.mortgage-payoffs {
+  margin: 0;
+  padding-left: 18px;
+  display: grid;
+  gap: 6px;
+}
+.mortgage-payoffs {
+  margin-top: 12px;
+  font-size: 14px;
+}
+.mortgage-setup fieldset {
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  padding: 10px 12px 12px;
+  margin: 12px 0;
+}
+.mortgage-setup legend {
+  font-size: 13px;
+  color: var(--muted);
+  padding: 0 4px;
+}
+.mortgage-setup fieldset .notice {
+  margin: 0 0 8px;
+}

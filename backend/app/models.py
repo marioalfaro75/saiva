@@ -120,6 +120,29 @@ class Account(Base, TimestampMixin):
     transfer_wording: Mapped[list | None] = mapped_column(JSON, nullable=True)
     # A loan's regular repayment, as periods: [{"since", "cents", "every"}] (0.18.1).
     repayment_schedule: Mapped[list | None] = mapped_column(JSON, nullable=True)
+    # Whether its balance counts in net worth: once the household says it is right.
+    in_net_worth: Mapped[bool] = mapped_column(Boolean, default=False)
+
+
+class Mortgage(Base, TimestampMixin):
+    """A home loan's details, for the Mortgage page: what was borrowed and when, the
+    term, the interest rate over time, and the accounts that offset it. The balance
+    owing lives on the loan's account; `balance_as_of` is when the household last said
+    what it was."""
+
+    __tablename__ = "mortgages"
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_uuid)
+    household_id: Mapped[str] = mapped_column(ForeignKey("households.id"), index=True)
+    account_id: Mapped[str] = mapped_column(ForeignKey("accounts.id"), nullable=False)
+    original_cents: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    start_date: Mapped[dt.date | None] = mapped_column(Date, nullable=True)
+    term_months: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    rates: Mapped[list | None] = mapped_column(JSON, nullable=True)
+    offset_account_ids: Mapped[list | None] = mapped_column(JSON, nullable=True)
+    balance_as_of: Mapped[dt.date | None] = mapped_column(Date, nullable=True)
+
+    __table_args__ = (UniqueConstraint("account_id", name="uq_mortgage_account"),)
 
 
 class Category(Base, TimestampMixin):

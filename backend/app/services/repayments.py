@@ -410,21 +410,23 @@ class LoanBill:
     occurrences: int
 
 
-def loan_bills(
+@dataclass
+class LoanRepayments:
+    """A loan's repayments over a stretch of time, each sorted regular or extra."""
+
+    loan: models.Account
+    schedule: list[Period]
+    paid: list[models.Transaction]  # oldest first
+    extra: dict[str, bool]  # by id; True: extra
+
+
+def loan_repayments(
     db: Session, household_id: str, start: dt.date, today: dt.date
-) -> tuple[list[LoanBill], set[str]]:
-    """Each loan with a regular repayment set, as a bill, and the transactions that make
-    it up -- left out of the bills found by description, so none is counted twice. That
-    includes its debits not linked yet (the loan's statement not imported that far): by
-    the loan's own wording, or from an account that paid it, by description, near the
-    amount. A loan without a repayment set is found by description, as before."""
-    mortgage, _ = repayment_category_ids(db, household_id)
-    loan_repayments = db.execute(
-        select(models.Category.id).where(
-            models.Category.household_id == household_id,
-            models.Category.system_key == LOAN_REPAYMENT_CATEGORY,
-        )
-    ).scalar()
+) -> tuple[dict[str, LoanRepayments], set[str]]:
+    """Each loan with a regular repayment set, with its repayments from `start` to
+    `today`, and the ids of the transactions that make them up. That includes its debits
+    not linked yet (the loan's statement not imported that far): by the loan's own
+    wording, or from an account that paid it, by description, near the amount."""
     scheduled = {
         a.id: a
         for a in db.execute(
@@ -436,10 +438,9 @@ def loan_bills(
         if schedule_of(a)
     }
     if not scheduled:
-        return [], set()
-    _, extra_id = repayment_category_ids(db, household_id)
+        return {}, set()
+    mortgage, extra_id = repayment_category_ids(db, household_id)
     legs_by_loan = paying_legs(db, household_id, list(scheduled))
-    bills: list[LoanBill] = []
     covered: set[str] = set()
     loose = db.execute(
         select(models.Transaction).where(
@@ -462,6 +463,7 @@ def loan_bills(
         for loan_id, legs in legs_by_loan.items()
     }
     claimed = _claims(list(loose), loans)
+    found: dict[str, LoanRepayments] = {}
     for loan_id, legs in legs_by_loan.items():
         loan, schedule, _, _ = loans[loan_id]
         mine = [t for t in loose if claimed.get(t.id) == loan_id]
@@ -472,14 +474,39 @@ def loan_bills(
         covered.update(t.id for t in legs)
         covered.update(t.id for t in mine)
         flags = sort_legs(everything, schedule, _fixed(everything, mortgage, extra_id))
-        regular_days = sorted({t.txn_date for t in everything if not flags[t.id]})
+        found[loan_id] = LoanRepayments(loan, schedule, everything, flags)
+    return found, covered
+
+
+def loan_bills(
+    db: Session, household_id: str, start: dt.date, today: dt.date
+) -> tuple[list[LoanBill], set[str]]:
+    """Each loan with a regular repayment set, as a bill, and the transactions that make
+    it up -- left out of the bills found by description, so none is counted twice. A
+    loan without a repayment set is found by description, as before."""
+    found, covered = loan_repayments(db, household_id, start, today)
+    if not found and not covered:
+        return [], set()
+    mortgage, _ = repayment_category_ids(db, household_id)
+    loan_repayments_id = db.execute(
+        select(models.Category.id).where(
+            models.Category.household_id == household_id,
+            models.Category.system_key == LOAN_REPAYMENT_CATEGORY,
+        )
+    ).scalar()
+    bills: list[LoanBill] = []
+    for found_loan in found.values():
+        loan, schedule = found_loan.loan, found_loan.schedule
+        regular_days = sorted(
+            {t.txn_date for t in found_loan.paid if not found_loan.extra[t.id]}
+        )
         if not regular_days:
             continue
         now = in_force(schedule, today) or schedule[-1]
         bills.append(
             LoanBill(
                 loan=loan,
-                category_id=mortgage if loan.type == "home_loan" else loan_repayments,
+                category_id=mortgage if loan.type == "home_loan" else loan_repayments_id,
                 every=now.every,
                 typical_cents=now.cents,
                 first_date=regular_days[0],

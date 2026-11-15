@@ -7,7 +7,7 @@ export interface NavItem {
 }
 
 /**
- * The fourteen destinations, in four clusters.
+ * The fifteen destinations, in four clusters.
  *
  * The clusters are separated by space rather than headings. Every item here is a
  * page with that exact title, so group names like "Money" or "Plan" would be the
@@ -32,6 +32,7 @@ export const CLUSTERS: NavItem[][] = [
   // Forward commitments.
   [
     { to: "/budgets", label: "Budgets" },
+    { to: "/mortgage", label: "Mortgage" },
     { to: "/bills", label: "Bills" },
     { to: "/goals", label: "Savings goals" },
     { to: "/forecast", label: "Forecast" },

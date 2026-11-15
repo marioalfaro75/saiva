@@ -26,6 +26,10 @@ import type {
   Insights,
   MatchType,
   Me,
+  Mortgage,
+  MortgageLoan,
+  MortgageSetupBody,
+  MortgageWhatIf,
   NetWorth,
   Notification,
   NotificationList,
@@ -205,6 +209,10 @@ export const api = {
       institution?: string | null;
       transfer_wording?: string[];
       repayment_schedule?: RepaymentPeriod[];
+      in_net_worth?: boolean;
+      /** What the balance is at the end of `balance_on` (today without one). */
+      balance_cents?: number;
+      balance_on?: string;
     },
   ) =>
     request<Account & { transfers_rekinded?: number }>(`/accounts/${id}`, {
@@ -435,6 +443,23 @@ export const api = {
   deleteBudget: (id: string) => request<void>(`/budgets/${id}`, { method: "DELETE" }),
 
   netWorth: (period?: string) => request<NetWorth>(`/net-worth${qs({ period })}`),
+  mortgages: () => request<MortgageLoan[]>("/mortgages"),
+  mortgage: (accountId: string, whatIf: MortgageWhatIf = {}) =>
+    request<Mortgage>(
+      `/mortgages/${encodeURIComponent(accountId)}${qs({
+        extra_cents: whatIf.extra_cents || undefined,
+        lump_cents: whatIf.lump_cents || undefined,
+        rate_change: whatIf.rate_change || undefined,
+        offset_change_cents: whatIf.offset_change_cents || undefined,
+      })}`,
+    ),
+  saveMortgage: (accountId: string, body: MortgageSetupBody) =>
+    request<Mortgage>(`/mortgages/${encodeURIComponent(accountId)}`, {
+      method: "PUT",
+      body: JSON.stringify(body),
+    }),
+  deleteMortgage: (accountId: string) =>
+    request<void>(`/mortgages/${encodeURIComponent(accountId)}`, { method: "DELETE" }),
   createNetWorthItem: (body: { name: string; kind: string; value_cents: number }) =>
     request<NetWorth>("/net-worth/items", { method: "POST", body: JSON.stringify(body) }),
   updateNetWorthItem: (id: string, patch: { name?: string; value_cents?: number }) =>

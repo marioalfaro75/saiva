@@ -5,6 +5,32 @@ All notable changes to Saiva are documented here. The project follows
 
 ## [Unreleased]
 
+## [0.19.0] — 2026-11-15
+
+Apply it with **Update now** in Settings. Then open **Mortgage** (after Budgets) and fill
+in your home loan from its statement.
+
+### Added
+
+- **Mortgage page**, after Budgets in the menu. Set up your home loan once: the amount
+  borrowed, when it started, the term, the interest rate (and when it changed), your
+  regular repayment, what you owe now, and your offset accounts. It then shows:
+  - what you owe, when it will be paid off, the interest still to pay, and your next
+    repayment;
+  - how far ahead of the loan term you are, and what your extra repayments and your
+    offset each save;
+  - a graph of what you'll owe: as you pay (with your usual extras), and with regular
+    repayments only;
+  - **What if…**: an extra amount each repayment, a one-off payment, a rate change, or
+    more in the offset. Nothing is saved;
+  - the repayment schedule, year by year: regular, extra, interest and what's owed;
+  - the repayments made over the last 12 months, regular and extra apart.
+- **Net worth from your accounts.** Net worth lists your accounts: tick one to count its
+  balance (in credit, an asset; owing, a liability). Setting up the Mortgage page counts
+  the loan and its offsets.
+- **Set an account's balance.** The API can set what an account's balance was on a date
+  (the Mortgage page uses it for the loan and the offsets).
+
 ## [0.18.1] — 2026-11-15
 
 Apply it with **Update now** in Settings. Then set your home loan's regular repayment on

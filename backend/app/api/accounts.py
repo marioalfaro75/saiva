@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import datetime as dt
+
 from fastapi import APIRouter, Depends, HTTPException, Response, status
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
@@ -9,7 +11,8 @@ from sqlalchemy.orm import Session
 from .. import models, schemas
 from ..db import get_db
 from ..deps import get_current_user, require_owner, require_writer
-from ..services import repayments, transfers
+from ..services import networth, repayments, transfers
+from ..services.mortgage import set_balance
 from ..services.transfers import wording_of
 
 router = APIRouter(prefix="/accounts", tags=["accounts"])
@@ -42,6 +45,7 @@ def _to_out(db: Session, account: models.Account) -> schemas.AccountOut:
             for p in repayments.schedule_of(account)
         ],
         repayment_suggestion=_suggestion(db, account),
+        in_net_worth=bool(account.in_net_worth),
     )
 
 
@@ -84,7 +88,7 @@ def _clean_wording(phrases: list[str]) -> list[str]:
     return kept
 
 
-def _clean_schedule(periods: list[dict]) -> list[dict] | None:
+def clean_schedule(periods: list[dict]) -> list[dict] | None:
     """Oldest first, one period a date -- a second for the same date replaces the first;
     an undated one is "from the start". Empty is none."""
     by_since: dict[str | None, dict] = {}
@@ -146,13 +150,20 @@ def update_account(
     db: Session = Depends(get_db),
 ) -> schemas.AccountUpdateOut:
     account = _get_owned(db, account_id, user.household_id)
+    balance_on = payload.balance_on or dt.date.today()
+    if payload.balance_cents is not None and balance_on > dt.date.today():
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_ENTITY, "The balance's date can't be in the future."
+        )
     old_type = account.type
     for key, value in payload.model_dump(exclude_unset=True, mode="json").items():
+        if key in ("balance_cents", "balance_on"):
+            continue  # below, once the rest is set
         if key == "transfer_wording":
             value = _clean_wording(value or [])
         elif key == "repayment_schedule":
-            value = _clean_schedule(value or [])
-        elif value is None and key in ("name", "type"):
+            value = clean_schedule(value or [])
+        elif value is None and key in ("name", "type", "in_net_worth"):
             continue  # an explicit null is "leave it": these columns are not nullable
         setattr(account, key, value)
     # The type decides what money into the account is: what was linked under the old
@@ -164,7 +175,11 @@ def update_account(
     if account.type != old_type or "repayment_schedule" in payload.model_fields_set:
         db.flush()
         repayments.sort_repayments(db, user.household_id)
+    if payload.balance_cents is not None:
+        db.flush()
+        set_balance(db, account, payload.balance_cents, balance_on)
     db.commit()
+    networth.record_snapshot_if_used(db, user.household_id)
     db.refresh(account)
     return schemas.AccountUpdateOut(
         **_to_out(db, account).model_dump(), transfers_rekinded=rekinded

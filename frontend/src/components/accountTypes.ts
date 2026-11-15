@@ -46,3 +46,10 @@ export function parseDollars(text: string): number | null {
   const cents = Math.round(Number(clean.replace(/,/g, "")) * 100);
   return cents > 0 ? cents : null;
 }
+
+/** Like parseDollars, but $0 is an amount too (nothing in the offset, nothing extra). */
+export function parseDollarsOrZero(text: string): number | null {
+  const clean = text.trim().replace(/^\$\s*/, "");
+  if (/^0+(\.0{1,2})?$/.test(clean)) return 0;
+  return parseDollars(clean);
+}

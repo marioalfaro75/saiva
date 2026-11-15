@@ -1,17 +1,20 @@
-"""Net worth (PRD Phase 2): a simple manual balance sheet of assets and
-liabilities with a daily snapshot history for the trend chart. Net worth is
-assets minus liabilities; account balances are intentionally not folded in, so
-v1 stays manual and unambiguous."""
+"""Net worth (PRD Phase 2): a balance sheet of assets and liabilities with a daily
+snapshot history for the trend chart. Net worth is assets minus liabilities.
+
+The household enters items by hand (the house, a car), and chooses which accounts count
+(0.19.0): an account's balance counts once the household says it is right -- in credit
+an asset, owing a liability. Setting up the Mortgage page counts the loan and its
+offsets."""
 
 from __future__ import annotations
 
 import datetime as dt
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from .. import models
-from ..schemas import NetWorthItemOut, NetWorthOut, NetWorthPoint
+from ..schemas import NetWorthAccountOut, NetWorthItemOut, NetWorthOut, NetWorthPoint
 
 
 def _items(db: Session, household_id: str) -> list[models.NetWorthItem]:
@@ -30,9 +33,47 @@ def _items(db: Session, household_id: str) -> list[models.NetWorthItem]:
     )
 
 
-def _totals(items: list[models.NetWorthItem]) -> tuple[int, int, int]:
+def _accounts(db: Session, household_id: str) -> list[NetWorthAccountOut]:
+    """Every account with its balance today, and whether it counts."""
+    accounts = (
+        db.execute(
+            select(models.Account)
+            .where(models.Account.household_id == household_id)
+            .order_by(models.Account.name)
+        )
+        .scalars()
+        .all()
+    )
+    moved = dict(
+        db.execute(
+            select(models.Transaction.account_id, func.sum(models.Transaction.amount_cents))
+            .where(
+                models.Transaction.household_id == household_id,
+                models.Transaction.split_parent_id.is_(None),
+            )
+            .group_by(models.Transaction.account_id)
+        ).tuples().all()
+    )
+    return [
+        NetWorthAccountOut(
+            id=a.id,
+            name=a.name,
+            type=a.type,
+            balance_cents=a.opening_balance_cents + int(moved.get(a.id) or 0),
+            in_net_worth=bool(a.in_net_worth),
+        )
+        for a in accounts
+    ]
+
+
+def _totals(
+    items: list[models.NetWorthItem], accounts: list[NetWorthAccountOut]
+) -> tuple[int, int, int]:
+    counted = [a.balance_cents for a in accounts if a.in_net_worth]
     assets = sum(i.value_cents for i in items if i.kind == "asset")
+    assets += sum(b for b in counted if b > 0)
     liabilities = sum(i.value_cents for i in items if i.kind == "liability")
+    liabilities += sum(-b for b in counted if b < 0)
     return assets, liabilities, assets - liabilities
 
 
@@ -41,7 +82,7 @@ def record_snapshot(
 ) -> models.NetWorthSnapshot:
     """Upsert the net-worth total for a day (today by default) from current items."""
     as_of = as_of or dt.date.today()
-    assets, liabilities, net = _totals(_items(db, household_id))
+    assets, liabilities, net = _totals(_items(db, household_id), _accounts(db, household_id))
     snapshot = db.execute(
         select(models.NetWorthSnapshot).where(
             models.NetWorthSnapshot.household_id == household_id,
@@ -58,6 +99,22 @@ def record_snapshot(
     return snapshot
 
 
+def record_snapshot_if_used(db: Session, household_id: str) -> None:
+    """Today's snapshot, when the household keeps a net worth: an item, or an account
+    that counts. Commits."""
+    used = db.execute(
+        select(models.NetWorthItem.id).where(models.NetWorthItem.household_id == household_id)
+        .limit(1)
+    ).first() or db.execute(
+        select(models.Account.id).where(
+            models.Account.household_id == household_id,
+            models.Account.in_net_worth.is_(True),
+        ).limit(1)
+    ).first()
+    if used:
+        record_snapshot(db, household_id)
+
+
 def get_net_worth(
     db: Session, household_id: str, as_at: dt.date | None = None
 ) -> NetWorthOut:
@@ -68,7 +125,8 @@ def get_net_worth(
     that far back the current figures are the best available, and are returned as-is.
     """
     items = _items(db, household_id)
-    assets, liabilities, net = _totals(items)
+    accounts = _accounts(db, household_id)
+    assets, liabilities, net = _totals(items, accounts)
     conditions = [models.NetWorthSnapshot.household_id == household_id]
     historical = as_at is not None and as_at < dt.date.today()
     if historical:
@@ -99,4 +157,5 @@ def get_net_worth(
             )
             for s in snapshots
         ],
+        accounts=accounts,
     )

@@ -15,7 +15,7 @@ from .. import models, schemas
 from ..db import get_db
 from ..deps import get_current_user, require_writer
 from ..ratelimit import rate_limit_import
-from ..services import audit, dedup, importers
+from ..services import audit, dedup, importers, networth
 from ..services.categorise import build_categoriser
 from ..services.transfers import classify_transfers
 
@@ -724,6 +724,7 @@ async def commit(
     # expense, taking both out of every figure the app reports.
     earliest = min((p.txn_date for p in parsed), default=None)
     scan = classify_transfers(db, user.household_id, since=earliest)
+    networth.record_snapshot_if_used(db, user.household_id)
     audit.record(
         db, action="import_commit", household_id=user.household_id, actor_user_id=user.id,
         entity="import_batch", entity_id=batch.id, detail={"added": added, "skipped": skipped},

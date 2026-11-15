@@ -17,6 +17,7 @@ from . import (
     imports,
     insights,
     meta,
+    mortgages,
     networth,
     notifications,
     periods,
@@ -39,6 +40,7 @@ api_router.include_router(transfers.router)
 api_router.include_router(dashboard.router)
 api_router.include_router(budgets.router)
 api_router.include_router(networth.router)
+api_router.include_router(mortgages.router)
 api_router.include_router(goals.router)
 api_router.include_router(insights.router)
 api_router.include_router(benchmarks.router)

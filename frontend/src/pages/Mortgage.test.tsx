@@ -1,0 +1,275 @@
+import { fireEvent, screen, waitFor, within } from "@testing-library/react";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+
+import { api } from "../api/client";
+import type { Mortgage as MortgageData, MortgageProjection, NetWorth as NetWorthData } from "../api/types";
+import { CLUSTERS } from "../components/navItems";
+import { monthsBetween, monthYear, span } from "../components/mortgageText";
+import { PeriodCtx } from "../period/context";
+import { renderApp } from "../testing/harness";
+import { Mortgage } from "./Mortgage";
+import { NetWorth } from "./NetWorth";
+
+/**
+ * The Mortgage page (0.19.0): set up by the household -- the loan and its offset, what was
+ * borrowed and when, the term, the rate over time, the repayment -- then when it is paid
+ * off, as they pay and with regular repayments only, a what-if, the offset's effect, the
+ * repayments made and a schedule.
+ */
+
+const SETUP_NEEDED: MortgageData = {
+  account_id: "loan",
+  name: "Home loan",
+  set_up: false,
+  original_cents: null,
+  start_date: null,
+  term_months: null,
+  rates: [],
+  offsets: [],
+  balance_as_of: null,
+  repayment_schedule: [],
+  repayment_suggestion: { since: "2026-06-05", cents: 70000, every: "weekly" },
+  offset_choices: [
+    { account_id: "off", name: "Offset", balance_cents: 2_500_000 },
+    { account_id: "sav", name: "Savings", balance_cents: 100_000 },
+  ],
+  missing: ["setup"],
+  paid: [],
+  projection: null,
+};
+
+const PROJECTION: MortgageProjection = {
+  owing_cents: 45_000_000,
+  estimated: false,
+  known_on: "2026-11-15",
+  known_cents: 45_000_000,
+  offset_cents: 3_000_000,
+  usual_extra_cents: 200_000,
+  next_due: "2026-11-22",
+  next_cents: 70000,
+  every: "weekly",
+  rate: 6.24,
+  contract_end: "2050-03-15",
+  needed_cents: 65000,
+  as_you_pay: { payoff: "2041-03-14", interest_cents: 20_000_000 },
+  regular_only: { payoff: "2046-09-11", interest_cents: 26_000_000 },
+  without_offset: { payoff: "2043-01-09", interest_cents: 23_000_000 },
+  what_if: null,
+  what_if_needed_cents: null,
+  points: [
+    { month: "2026-11", as_you_pay: 44_900_000, regular_only: 44_950_000 },
+    { month: "2026-12", as_you_pay: 44_700_000, regular_only: 44_850_000 },
+  ],
+  schedule: [
+    { year: 2026, regular_cents: 420_000, extra_cents: 100_000, interest_cents: 300_000, owing_cents: 44_700_000 },
+  ],
+  what_if_schedule: null,
+};
+
+const SET_UP: MortgageData = {
+  ...SETUP_NEEDED,
+  set_up: true,
+  original_cents: 60_000_000,
+  start_date: "2020-03-15",
+  term_months: 360,
+  rates: [{ since: null, percent: 6.24 }],
+  offsets: [{ account_id: "off", name: "Offset", balance_cents: 3_000_000 }],
+  balance_as_of: "2026-11-15",
+  repayment_schedule: [{ since: null, cents: 70000, every: "weekly" }],
+  repayment_suggestion: null,
+  missing: [],
+  paid: [
+    { month: "2026-11", regular_cents: 140000, extra_cents: 0 },
+    { month: "2026-10", regular_cents: 280000, extra_cents: 500000 },
+  ],
+  projection: PROJECTION,
+};
+
+function show(loan: MortgageData | null) {
+  vi.spyOn(api, "mortgages").mockResolvedValue(
+    loan ? [{ account_id: loan.account_id, name: loan.name, set_up: loan.set_up }] : [],
+  );
+  const get = vi.spyOn(api, "mortgage");
+  if (loan) get.mockResolvedValue(loan);
+  renderApp(<Mortgage />);
+  return get;
+}
+
+const input = (name: string | RegExp) => screen.getByRole("textbox", { name });
+const type = (name: string | RegExp, value: string) =>
+  fireEvent.change(input(name), { target: { value } });
+
+beforeEach(() => {
+  vi.restoreAllMocks();
+});
+
+describe("Mortgage page", () => {
+  it("is in the menu straight after Budgets", () => {
+    const labels = CLUSTERS.flat().map((i) => i.label);
+    expect(labels[labels.indexOf("Budgets") + 1]).toBe("Mortgage");
+  });
+
+  it("without a home loan, says to add one on Accounts", async () => {
+    show(null);
+    expect(await screen.findByText("No home loan yet")).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "Accounts" })).toHaveAttribute("href", "/accounts");
+  });
+
+  it("sets the loan up from what is on the statement", async () => {
+    show(SETUP_NEEDED);
+    const save = vi.spyOn(api, "saveMortgage").mockResolvedValue(SET_UP);
+    await screen.findByText("Set up your home loan");
+
+    type("Amount borrowed ($)", "600,000");
+    fireEvent.change(screen.getByLabelText("Loan started"), { target: { value: "2020-03-15" } });
+    type("Loan term (years)", "30");
+    type("Rate (%)", "6.24");
+    fireEvent.click(screen.getByRole("button", { name: "Use this" }));
+    expect(input("Repayment ($)")).toHaveValue("700.00");
+    type("You owe ($)", "452,000");
+    fireEvent.click(screen.getByRole("checkbox", { name: "Offset" }));
+    fireEvent.change(screen.getByRole("textbox", { name: "Balance today ($)" }), {
+      target: { value: "30,000" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+
+    await waitFor(() => expect(save).toHaveBeenCalled());
+    expect(save.mock.calls[0]).toEqual([
+      "loan",
+      {
+        original_cents: 60_000_000,
+        start_date: "2020-03-15",
+        term_months: 360,
+        rates: [{ since: null, percent: 6.24 }],
+        offsets: [{ account_id: "off", balance_cents: 3_000_000 }],
+        owing_cents: 45_200_000,
+        owing_on: new Date().toISOString().slice(0, 10),
+        repayment_schedule: [{ since: "2026-06-05", cents: 70000, every: "weekly" }],
+      },
+    ]);
+  });
+
+  it("sends an offset's balance only when it was changed", async () => {
+    show({ ...SET_UP, projection: PROJECTION });
+    const save = vi.spyOn(api, "saveMortgage").mockResolvedValue(SET_UP);
+    fireEvent.click(await screen.findByRole("button", { name: "Edit setup" }));
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+
+    await waitFor(() => expect(save).toHaveBeenCalled());
+    const body = save.mock.calls[0][1];
+    expect(body.offsets).toEqual([{ account_id: "off", balance_cents: null }]);
+    expect(body.owing_cents).toBeNull(); // left empty: kept
+    expect(body.repayment_schedule).toEqual([{ since: null, cents: 70000, every: "weekly" }]);
+  });
+
+  it("won't save a rate that isn't one, or a first setup without what is owed", async () => {
+    show(SETUP_NEEDED);
+    await screen.findByText("Set up your home loan");
+    expect(screen.getByText("Enter what you owe now.")).toBeInTheDocument();
+    type("Rate (%)", "six");
+    expect(
+      screen.getByText("Enter the interest rate as a percentage, e.g. 6.24."),
+    ).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Save" })).toBeDisabled();
+  });
+
+  it("shows what is owed, when it is paid off, the next repayment, and what extras and the offset save", async () => {
+    show(SET_UP);
+    expect(await screen.findByText("$450,000.00")).toBeInTheDocument();
+    expect(screen.getAllByText("Mar 2041").length).toBeGreaterThan(0);
+    expect(screen.getByText("$700.00")).toBeInTheDocument();
+    expect(screen.getByText(/You've paid off 25% of the \$600,000\.00 you borrowed/)).toBeInTheDocument();
+    expect(screen.getByText(/finish 9 years early/)).toBeInTheDocument();
+    expect(
+      screen.getByText(/extra repayments \(about \$2,000\.00 a month\) save \$60,000\.00 in interest and 5 years 5 months/),
+    ).toBeInTheDocument();
+    expect(screen.getByText(/offset \(\$30,000\.00\) saves \$30,000\.00 in interest and 1 year 9 months/)).toBeInTheDocument();
+    expect(screen.getByText(/Regular repayments only:/)).toBeInTheDocument();
+  });
+
+  it("lists the repayments made, extras apart, and the schedule by year", async () => {
+    show(SET_UP);
+    const made = await screen.findByRole("region", { name: "Repayments made" });
+    expect(within(made).getByText("Oct 2026")).toBeInTheDocument();
+    expect(within(made).getByText("$5,000.00")).toBeInTheDocument();
+    const schedule = screen.getByRole("region", { name: "Repayment schedule" });
+    expect(within(schedule).getByText("2026")).toBeInTheDocument();
+    expect(within(schedule).getByText("$447,000.00")).toBeInTheDocument();
+  });
+
+  it("tries a what-if without saving, once typing pauses", async () => {
+    const get = show(SET_UP);
+    await screen.findByText("$450,000.00");
+    get.mockResolvedValue({
+      ...SET_UP,
+      projection: {
+        ...PROJECTION,
+        what_if: { payoff: "2038-01-01", interest_cents: 17_000_000 },
+        what_if_schedule: PROJECTION.schedule,
+      },
+    });
+
+    type("Extra each week ($)", "200");
+
+    await waitFor(() => expect(get).toHaveBeenLastCalledWith("loan", expect.objectContaining({ extra_cents: 20000 })));
+    expect(
+      await screen.findByText(/Paid off Jan 2038: 3 years 2 months sooner, saving \$30,000\.00 in interest/),
+    ).toBeInTheDocument();
+    expect(screen.getByRole("checkbox", { name: "Show the what-if" })).toBeInTheDocument();
+  });
+
+  it("an offset can be taken down in a what-if", async () => {
+    const get = show(SET_UP);
+    await screen.findByText("$450,000.00");
+    type("Add to offset ($)", "-5,000");
+    await waitFor(() =>
+      expect(get).toHaveBeenLastCalledWith("loan", expect.objectContaining({ offset_change_cents: -500000 })),
+    );
+  });
+
+  it("asks for the rate when it is missing", async () => {
+    show({ ...SET_UP, missing: ["rate"], projection: null });
+    expect(await screen.findByText("Almost there")).toBeInTheDocument();
+    expect(screen.getByText(/Add your interest rate/)).toBeInTheDocument();
+  });
+});
+
+describe("how the page says time", () => {
+  it("says months and years plainly", () => {
+    expect(monthYear("2041-03-14")).toBe("Mar 2041");
+    expect(span(30)).toBe("2 years 6 months");
+    expect(span(12)).toBe("1 year");
+    expect(span(1)).toBe("1 month");
+    expect(span(0)).toBe("0 months");
+    expect(monthsBetween("2026-01-15", "2026-03-14")).toBe(1);
+    expect(monthsBetween("2026-03-15", "2026-01-10")).toBe(-2);
+  });
+});
+
+describe("Net worth accounts", () => {
+  it("counts an account once it is ticked", async () => {
+    const worth: NetWorthData = {
+      assets_cents: 0,
+      liabilities_cents: 0,
+      net_cents: 0,
+      items: [],
+      history: [],
+      accounts: [
+        { id: "sav", name: "Savings", type: "savings", balance_cents: 250000, in_net_worth: false },
+      ],
+    };
+    vi.spyOn(api, "netWorth").mockResolvedValue(worth);
+    const update = vi.spyOn(api, "updateAccount").mockResolvedValue({} as never);
+    renderApp(
+      <PeriodCtx.Provider
+        value={{ period: "month", setPeriod: () => {}, resolved: null, options: undefined, isPast: false }}
+      >
+        <NetWorth />
+      </PeriodCtx.Provider>,
+    );
+
+    fireEvent.click(await screen.findByRole("checkbox", { name: "Count Savings" }));
+
+    await waitFor(() => expect(update).toHaveBeenCalledWith("sav", { in_net_worth: true }));
+  });
+});

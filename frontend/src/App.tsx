@@ -15,6 +15,7 @@ import { Goals } from "./pages/Goals";
 import { ImportPage } from "./pages/Import";
 import { Insights } from "./pages/Insights";
 import { Login } from "./pages/Login";
+import { Mortgage } from "./pages/Mortgage";
 import { NetWorth } from "./pages/NetWorth";
 import { Overview } from "./pages/Overview";
 import { Settings } from "./pages/Settings";
@@ -42,6 +43,7 @@ export default function App() {
           <Route path="/accounts" element={<Accounts />} />
           <Route path="/categories" element={<Categories />} />
           <Route path="/budgets" element={<Budgets />} />
+          <Route path="/mortgage" element={<Mortgage />} />
           <Route path="/bills" element={<Bills />} />
           <Route path="/forecast" element={<Forecast />} />
           <Route path="/net-worth" element={<NetWorth />} />
