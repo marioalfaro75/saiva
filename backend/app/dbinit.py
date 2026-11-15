@@ -26,6 +26,7 @@ import os
 import shutil
 import subprocess  # nosec B404 - argv is built from our own config, never user input
 import sys
+import unicodedata
 from typing import Any
 
 from alembic import command
@@ -193,12 +194,21 @@ def _rename_extra_repayments(db: Engine) -> None:
             if taken:
                 continue  # already has one: leave the old as it is
             category.system_key = EXTRA_REPAYMENT_CATEGORY
-            same_name = session.execute(
-                select(Category.id).where(
-                    Category.household_id == category.household_id,
-                    Category.name == EXTRA_REPAYMENT_CATEGORY,
-                )
-            ).first()
+            # Names are one per household as people see them -- case and accents aside --
+            # so the rename doesn't make a second "Extra Repayments" the picker can't
+            # tell apart from the household's own.
+            def folded(name: str) -> str:
+                return unicodedata.normalize("NFC", name).casefold()
+
+            same_name = any(
+                folded(name) == folded(EXTRA_REPAYMENT_CATEGORY)
+                for name in session.execute(
+                    select(Category.name).where(
+                        Category.household_id == category.household_id,
+                        Category.id != category.id,
+                    )
+                ).scalars()
+            )
             if category.name == OLD_EXTRA_REPAYMENT_CATEGORY and not same_name:
                 category.name = EXTRA_REPAYMENT_CATEGORY
         session.commit()

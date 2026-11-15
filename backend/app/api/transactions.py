@@ -94,8 +94,11 @@ RepaymentView = tuple[str | None, set[str]]  # (Extra repayments id, home loan a
 
 
 def repayment_view(db: Session, household_id: str) -> RepaymentView:
-    """What it takes to say whether a repayment is the regular one or extra."""
-    _, extra = repayments.repayment_category_ids(db, household_id)
+    """What it takes to say whether a repayment is the regular one or extra -- nothing,
+    when either category is gone, since the choice could not be recorded."""
+    mortgage, extra = repayments.repayment_category_ids(db, household_id)
+    if mortgage is None or extra is None:
+        return None, set()
     loans = set(
         db.execute(
             select(models.Account.id).where(
@@ -110,11 +113,14 @@ def repayment_view(db: Session, household_id: str) -> RepaymentView:
 def _repayment(
     t: models.Transaction, other: models.Transaction | None, view: RepaymentView | None
 ) -> str | None:
-    if view is None or other is None or t.amount_cents >= 0:
+    """Regular or extra, for either side of a home loan repayment: the paying side's
+    category says, and the loan's side shows the same."""
+    if view is None or view[0] is None or other is None or t.transfer_kind != LOAN_REPAYMENT:
         return None
-    if t.transfer_kind != LOAN_REPAYMENT or other.account_id not in view[1]:
+    paying, loan = (t, other) if t.amount_cents < 0 else (other, t)
+    if loan.account_id not in view[1] or paying.amount_cents >= 0:
         return None
-    return "extra" if view[0] is not None and t.category_id == view[0] else "regular"
+    return "extra" if paying.category_id == view[0] else "regular"
 
 
 def _to_out(

@@ -12,10 +12,12 @@ Apply it with **Update now** in Settings.
 ### Added
 
 - **Regular and extra home loan repayments.** Saiva learns your usual repayment — its
-  amount and how often it goes — and files each one: the regular one as **Mortgage**, an
-  extra one as **Extra repayments**. A payment far from the usual amount, or a second one
-  in the same week, is extra. When the usual amount changes (say after a rate rise), it
-  becomes the usual after two in a row. Both count as spending.
+  amount and how often it goes, weekly, fortnightly or monthly — and files each one: the
+  regular one as **Mortgage**, an extra one as **Extra repayments**. A one-off amount, or
+  a second payment in the same week, is extra. A repayment a few days late (a public
+  holiday) or a missed week is still regular, and a repayment paid from two accounts on
+  the same day counts as one. When the usual changes — a rate rise, or paying fortnightly
+  instead of monthly — the new one becomes the usual. Both count as spending.
 - **Say so yourself.** The ⇄ window on a repayment lets you mark it as the regular one
   or extra. Saiva keeps your choice and learns from it.
 - **Your repayment on Bills**, named for the loan ("Westpac home loan repayment"), with

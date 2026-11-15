@@ -349,7 +349,11 @@ def set_repayment(
     mortgage, extra = repayments.repayment_category_ids(db, user.household_id)
     target = extra if payload.extra else mortgage
     if target is None:
-        raise HTTPException(status.HTTP_409_CONFLICT, "The Mortgage categories are missing.")
+        missing = "Extra repayments" if payload.extra else "Mortgage"
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            f"There is no “{missing}” category to file it under: it was removed.",
+        )
     out = pair[0]
     out.category_id, out.confidence = target, PERSON_CONFIDENCE
     db.flush()
