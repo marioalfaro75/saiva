@@ -4,7 +4,13 @@ import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { api, ApiError } from "../api/client";
 import type { Mortgage, MortgageRate, RepaymentEvery, RepaymentPeriod } from "../api/types";
 import { formatCents, formatDate } from "../format";
-import { EVERY_LABELS, parseDollars, parseDollarsOrZero, parseSignedDollars } from "./accountTypes";
+import {
+  EVERY_LABELS,
+  nextSchedule,
+  parseDollars,
+  parseDollarsOrZero,
+  parseSignedDollars,
+} from "./accountTypes";
 import { localToday } from "./mortgageText";
 
 interface Props {
@@ -88,6 +94,7 @@ export function MortgageSetup({ loan, onDone, onCancel }: Props) {
   if (rates.some((r, i) => r.percent.trim() && rateValues[i] === null))
     problems.push("Enter the interest rate as a percentage, e.g. 6.24.");
   if (repay.trim() && repayCents === null) problems.push("Enter the repayment as an amount, e.g. 2,950.");
+  if (!repay.trim() && schedule.length) problems.push("Enter your regular repayment.");
   if (owing.trim() && owingCents === null) problems.push("Enter what you owe as an amount, e.g. 452,000.");
   if (!loan.set_up && !owing.trim()) problems.push("Enter what you owe now.");
   if (owing.trim() && !owingOn) problems.push("Enter the date for what you owe.");
@@ -96,12 +103,17 @@ export function MortgageSetup({ loan, onDone, onCancel }: Props) {
     problems.push("Enter each offset balance as an amount, e.g. 25,000.");
 
   const repayment = (): RepaymentPeriod[] | null => {
-    if (!repay.trim()) return schedule.length ? [] : null;
-    if (repayCents === null) return null;
-    const now: RepaymentPeriod = { since: repaySince || null, cents: repayCents, every };
-    const keep =
-      current && (current.since ?? "") !== (repaySince || "") ? [...earlier, current] : earlier;
-    return [...keep.filter((p) => (p.since ?? "") !== (repaySince || "")), now];
+    if (repayCents === null) return null; // none given: what is saved stays
+    return nextSchedule(schedule, { since: repaySince || null, cents: repayCents, every });
+  };
+
+  // The page's own figures first, then the rest of the app in the background.
+  const refresh = async () => {
+    await Promise.all([
+      qc.invalidateQueries({ queryKey: ["mortgage", loan.account_id] }),
+      qc.invalidateQueries({ queryKey: ["mortgages"] }),
+    ]);
+    void qc.invalidateQueries();
   };
 
   const save = useMutation({
@@ -126,11 +138,12 @@ export function MortgageSetup({ loan, onDone, onCancel }: Props) {
         owing_cents: owingCents,
         owing_on: owingCents !== null ? owingOn : null,
         repayment_schedule: repayment(),
+        today,
       });
     },
     // The page shows the new figures before it says so.
     onSuccess: async () => {
-      await qc.invalidateQueries();
+      await refresh();
       onDone("Saved.");
     },
   });
@@ -138,7 +151,7 @@ export function MortgageSetup({ loan, onDone, onCancel }: Props) {
   const forget = useMutation({
     mutationFn: () => api.deleteMortgage(loan.account_id),
     onSuccess: async () => {
-      await qc.invalidateQueries();
+      await refresh();
       onDone("Setup removed. Your accounts are unchanged.");
     },
   });

@@ -10,6 +10,7 @@ import {
   accountTypeLabel,
   EVERY_LABELS,
   LOAN_TYPES,
+  nextSchedule,
   parseDollars,
   wordingProblem,
 } from "./accountTypes";
@@ -61,11 +62,7 @@ export function AccountDialog({ account, onClose, onDone }: Props) {
     isLoan && amount.trim() && cents === null ? "Enter the repayment as an amount, e.g. 1,254.92." : null;
   const repayment = (): RepaymentPeriod[] => {
     if (cents === null) return [];
-    const now: RepaymentPeriod = { since: since || null, cents, every };
-    // The same date as the period being edited corrects it; a new date starts a new one
-    // from then (a rate rise), keeping what came before.
-    const keep = current && (current.since ?? "") !== (since || "") ? [...earlier, current] : earlier;
-    return [...keep.filter((p) => (p.since ?? "") !== (since || "")), now];
+    return nextSchedule(schedule, { since: since || null, cents, every });
   };
 
   const phrases = wording

@@ -8,6 +8,7 @@ what-if, the offset's effect and the next repayment; and net worth from account 
 
 from __future__ import annotations
 
+import calendar
 import datetime as dt
 import itertools
 
@@ -791,3 +792,286 @@ def test_taking_the_last_account_out_of_net_worth_is_recorded(auth_client: TestC
     with SessionLocal() as db:
         snap = db.query(NetWorthSnapshot).one()
         assert snap.net_cents == 0
+
+
+# --------------------------------------------------------------------------------------
+# What the second review found (0.19.0)
+# --------------------------------------------------------------------------------------
+
+
+def test_importing_one_accounts_statement_keeps_its_stated_balance(
+    auth_client: TestClient,
+) -> None:
+    import json
+    from pathlib import Path
+
+    savings = create_account(auth_client, "Savings", "savings")["id"]
+    auth_client.patch(f"/api/accounts/{savings}", json={"balance_cents": 100000})
+    csv = (Path(__file__).parent / "fixtures" / "cba_sample.csv").read_bytes()
+    mapping = auth_client.post(
+        "/api/imports/sniff", files={"file": ("cba.csv", csv, "text/csv")}
+    ).json()["suggested_mapping"]
+
+    commit = auth_client.post(
+        "/api/imports/commit",
+        files={"file": ("cba.csv", csv, "text/csv")},
+        data={"account_id": savings, "file_format": "csv", "mapping": json.dumps(mapping)},
+    )
+
+    assert commit.json()["added"] == 6
+    assert _account(auth_client, savings)["balance_cents"] == 100000
+
+
+def test_a_transaction_typed_in_after_the_balance_was_given_counts(
+    auth_client: TestClient,
+) -> None:
+    savings = create_account(auth_client, "Savings", "savings")["id"]
+    today = dt.date.today().isoformat()
+    _add(auth_client, savings, today, -2000, "Coffee")  # before: in the figure
+    auth_client.patch(f"/api/accounts/{savings}", json={"balance_cents": 100000})
+
+    _add(auth_client, savings, today, -500, "Lunch")  # after: new
+    old = _add(auth_client, savings, "2026-01-05", 7000, "Pay")  # earlier: in the figure
+
+    assert _account(auth_client, savings)["balance_cents"] == 99500
+    auth_client.delete(f"/api/transactions/{old}")
+    assert _account(auth_client, savings)["balance_cents"] == 99500
+
+
+def test_a_balance_too_large_to_hold_is_refused_not_a_crash(auth_client: TestClient) -> None:
+    savings = create_account(auth_client, "Savings", "savings")["id"]
+    _add(auth_client, savings, "2026-01-05", -1_000_000_000, "Big")
+
+    resp = auth_client.patch(f"/api/accounts/{savings}", json={"balance_cents": 2_000_000_000})
+
+    assert resp.status_code == 422
+    assert "too large" in resp.json()["detail"]
+
+
+def test_offsets_are_set_as_of_the_households_today(auth_client: TestClient) -> None:
+    offset = create_account(auth_client, "Offset", "offset")["id"]
+    loan = create_account(auth_client, "Home loan", "home_loan")["id"]
+    tomorrow = (dt.date.today() + dt.timedelta(days=1)).isoformat()  # Sydney's today
+    _add(auth_client, offset, tomorrow, -5000, "Coffee this morning")
+
+    _setup(
+        auth_client,
+        loan,
+        offsets=[{"account_id": offset, "balance_cents": 3_000_000}],
+        today=tomorrow,
+    )
+
+    assert _account(auth_client, offset)["balance_cents"] == 3_000_000
+
+
+def test_only_a_liability_that_looks_like_a_home_loan_is_named(auth_client: TestClient) -> None:
+    loan = create_account(auth_client, "Home loan", "home_loan")["id"]
+    for name in ("Car loan", "HECS", "House loan"):
+        auth_client.post(
+            "/api/net-worth/items", json={"name": name, "kind": "liability", "value_cents": 1}
+        )
+
+    assert _setup(auth_client, loan)["manual_liabilities"] == ["House loan"]
+
+
+def test_net_worth_too_large_to_snapshot_still_saves(auth_client: TestClient) -> None:
+    for name in ("A", "B"):
+        account = create_account(auth_client, name, "savings")["id"]
+        resp = auth_client.patch(
+            f"/api/accounts/{account}", json={"balance_cents": 1_500_000_000, "in_net_worth": True}
+        )
+        assert resp.status_code == 200, resp.text
+
+    assert auth_client.get("/api/net-worth").json()["net_cents"] == 3_000_000_000
+
+
+def test_one_lump_in_a_short_history_is_not_usual(auth_client: TestClient) -> None:
+    offset = create_account(auth_client, "Offset", "offset")["id"]
+    loan = create_account(auth_client, "Home loan", "home_loan")["id"]
+    _wording(auth_client, loan, "By Authority To Westpac")
+    today = dt.date.today()
+    two_months = today.replace(day=1) - relativedelta(months=2)
+    for week in range(12):
+        day = two_months + dt.timedelta(days=7 * week)
+        if day <= today:
+            _pay(auth_client, offset, loan, day, WEEKLY)
+    _pay(auth_client, offset, loan, two_months + dt.timedelta(days=10), 500000)
+    _scan(auth_client)
+
+    p = _setup(auth_client, loan)["projection"]
+
+    assert p["usual_extra_cents"] == 0
+
+
+def test_the_lenders_charge_day_comes_from_the_statement(auth_client: TestClient) -> None:
+    from app.db import SessionLocal
+    from app.models import Account
+    from app.services.mortgage import charge_day_of
+
+    loan = create_account(auth_client, "Home loan", "home_loan")["id"]
+    for day in ("2026-08-31", "2026-09-30", "2026-10-31"):
+        _add(auth_client, loan, day, -225000, "INTEREST")
+
+    with SessionLocal() as db:
+        account = db.get(Account, loan)
+        assert account is not None
+        assert charge_day_of(db, account) == 31
+    # The statement ends on a charge day: nothing has built up since.
+    assert accrued_since_charge(dt.date(2026, 10, 31), OWING, 0, [Rate(None, 6.0)], 31) == 0
+
+
+def test_a_tie_on_the_payment_day_goes_to_the_new_day() -> None:
+    days = [dt.date(2026, m, 15) for m in (5, 6, 7)] + [dt.date(2026, m, 1) for m in (8, 9, 10)]
+
+    assert usual_timing(days, "monthly") == (dt.date(2026, 10, 1), 1)
+
+
+def test_a_rate_cut_still_to_come_is_not_never() -> None:
+    terms = Terms(
+        [Rate(None, 8.0), Rate(dt.date(2028, 1, 1), 5.0)],
+        [Period(None, MONTHLY, "monthly")],
+        START,
+        1,
+    )
+
+    run = simulate(State(START, OWING), terms, Scenario())
+
+    assert run.payoff is not None and not run.stalls
+
+
+def test_a_lump_that_clears_everything_pays_the_interest_built_up_too() -> None:
+    start = State(START, OWING, accrued=12345.0)
+
+    run = simulate(start, _terms(), Scenario(lump_cents=OWING + 12345))
+
+    assert run.payoff == START
+    assert run.interest_cents == pytest.approx(12345)
+    assert run.years[0].extra_cents == pytest.approx(OWING + 12345)
+
+
+def test_after_a_change_of_pace_the_first_new_repayment_counts_once(
+    auth_client: TestClient,
+) -> None:
+    offset = create_account(auth_client, "Offset", "offset")["id"]
+    loan = create_account(auth_client, "Home loan", "home_loan")["id"]
+    _wording(auth_client, loan, "By Authority To Westpac")
+    today = dt.date.today()
+    base = today - dt.timedelta(days=10)
+    for k in range(6):
+        _pay(auth_client, offset, loan, base - dt.timedelta(days=7 * k), WEEKLY)
+    changed = base + dt.timedelta(days=4)
+    _pay(auth_client, offset, None, changed, 2 * WEEKLY)  # the loan's statement isn't in yet
+    _scan(auth_client)
+    p = _setup(
+        auth_client,
+        loan,
+        owing_on=base.isoformat(),
+        repayment_schedule=[
+            {"since": None, "cents": WEEKLY, "every": "weekly"},
+            {"since": changed.isoformat(), "cents": 2 * WEEKLY, "every": "fortnightly"},
+        ],
+    )["projection"]
+
+    # $1,400 off once, and the interest charged on the 15th in between, if any.
+    charge = last_charge(today, 15)
+    days = (charge - last_charge(base, 15)).days if charge > base else 0
+    charged = 45_000_000 * 0.06 * days / 365
+    assert p["owing_cents"] == pytest.approx(45_000_000 + charged - 2 * WEEKLY, abs=1500)
+    assert p["next_due"] == (changed + dt.timedelta(days=14)).isoformat()
+
+
+def test_a_change_to_monthly_takes_its_day_from_the_monthly_repayment(
+    auth_client: TestClient,
+) -> None:
+    offset = create_account(auth_client, "Offset", "offset")["id"]
+    loan = create_account(auth_client, "Home loan", "home_loan")["id"]
+    _wording(auth_client, loan, "By Authority To Westpac")
+    today = dt.date.today()
+    monthly_from = today - dt.timedelta(days=5)
+    for k in range(1, 7):
+        _pay(auth_client, offset, loan, monthly_from - dt.timedelta(days=7 * k - 2), WEEKLY)
+    _pay(auth_client, offset, loan, monthly_from, 300000)
+    _scan(auth_client)
+
+    p = _setup(
+        auth_client,
+        loan,
+        repayment_schedule=[
+            {"since": None, "cents": WEEKLY, "every": "weekly"},
+            {"since": monthly_from.isoformat(), "cents": 300000, "every": "monthly"},
+        ],
+    )["projection"]
+
+    assert p["next_due"] == (monthly_from + relativedelta(months=1)).isoformat()
+
+
+def test_usual_extras_are_not_assumed_on_top_of_the_ones_seen_to_today(
+    auth_client: TestClient,
+) -> None:
+    # No interest (0%), so what is owed is plain sums. The regular repayment goes from an
+    # account imported only to five weeks ago; the extras from the offset, to today.
+    offset = create_account(auth_client, "Offset", "offset")["id"]
+    loan = create_account(auth_client, "Home loan", "home_loan")["id"]
+    _wording(auth_client, loan, "By Authority To Westpac")
+    today = dt.date.today()
+    last_regular = today - dt.timedelta(days=35)
+    for k in range(30):
+        _pay(auth_client, offset, None, last_regular - dt.timedelta(days=7 * k), WEEKLY)
+    tenths = [
+        (today.replace(day=1) - relativedelta(months=k)).replace(day=10) for k in range(8)
+    ]
+    for day in tenths:
+        if day <= today:
+            _pay(auth_client, offset, None, day, 100000)
+    known_on = today - dt.timedelta(days=30)
+
+    p = _setup(
+        auth_client, loan, owing_on=known_on.isoformat(), rates=[{"since": None, "percent": 0}]
+    )["projection"]
+
+    assert p["usual_extra_cents"] == 100000
+    dues = [last_regular + dt.timedelta(days=7 * k) for k in range(1, 10)]
+    scheduled = sum(1 for d in dues if known_on < d <= today)
+    extras = sum(1 for d in tenths if known_on < d <= today)
+    assert p["owing_cents"] == 45_000_000 - scheduled * WEEKLY - extras * 100000
+
+
+def test_the_projection_charges_interest_on_the_statements_day(auth_client: TestClient) -> None:
+    loan = create_account(auth_client, "Home loan", "home_loan")["id"]
+    today = dt.date.today()
+    month_end = today.replace(day=1) - dt.timedelta(days=1)
+    if today.day == calendar.monthrange(today.year, today.month)[1]:
+        pytest.skip("on a month's last day the next charge is today")
+    for k in range(3):
+        day = (month_end.replace(day=1) - relativedelta(months=k))
+        day = day.replace(day=calendar.monthrange(day.year, day.month)[1])
+        _add(auth_client, loan, day.isoformat(), -225000, "INTEREST")
+    # The loan started on the 1st, but the lender charges at the end of each month.
+    p = _setup(
+        auth_client,
+        loan,
+        owing_on=(month_end - relativedelta(months=3)).isoformat(),
+        start_date="2020-03-01",
+        repayment_schedule=[
+            {"since": month_end.isoformat(), "cents": 300000, "every": "monthly"}
+        ],
+    )["projection"]
+
+    assert p["known_on"] == month_end.isoformat()
+    assert p["owing_cents"] == p["known_cents"]  # nothing charged since the month's end
+
+
+def test_a_net_worth_too_large_for_a_snapshot_is_not_written(auth_client: TestClient) -> None:
+    from app.db import SessionLocal
+    from app.models import User
+    from app.services.networth import record_snapshot
+
+    for name in ("A", "B"):
+        account = create_account(auth_client, name, "savings")["id"]
+        auth_client.patch(
+            f"/api/accounts/{account}", json={"balance_cents": 1_500_000_000, "in_net_worth": True}
+        )
+
+    with SessionLocal() as db:
+        household = db.query(User).first().household_id  # type: ignore[union-attr]
+        assert record_snapshot(db, household) is None

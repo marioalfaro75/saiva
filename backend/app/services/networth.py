@@ -77,12 +77,19 @@ def _totals(
     return assets, liabilities, assets - liabilities
 
 
+# Snapshot totals are 32-bit integers on Postgres.
+MAX_SNAPSHOT_CENTS = 2**31 - 1
+
+
 def record_snapshot(
     db: Session, household_id: str, as_of: dt.date | None = None
-) -> models.NetWorthSnapshot:
-    """Upsert the net-worth total for a day (today by default) from current items."""
+) -> models.NetWorthSnapshot | None:
+    """Upsert the net-worth total for a day (today by default) from current items and
+    counted accounts. None when the totals are too large to store."""
     as_of = as_of or dt.date.today()
     assets, liabilities, net = _totals(_items(db, household_id), _accounts(db, household_id))
+    if max(abs(assets), abs(liabilities), abs(net)) > MAX_SNAPSHOT_CENTS:
+        return None  # beyond what a snapshot holds: today's figures are still shown live
     snapshot = db.execute(
         select(models.NetWorthSnapshot).where(
             models.NetWorthSnapshot.household_id == household_id,

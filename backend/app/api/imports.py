@@ -689,12 +689,14 @@ async def commit(
 
     added = 0
     skipped = 0
+    touched: set[str] = set()
     resolve = _resolver(multi, targets, single)
     decisions, _ = _decide(db, parsed, resolve)
     for index, p, target, verdict in decisions:
         if target.account_id is None or not _will_import(verdict, index, forced, skipped_rows):
             skipped += 1
             continue
+        touched.add(target.account_id)
         result = categoriser.categorise(p.raw_description, p.merchant)
         db.add(
             models.Transaction(
@@ -719,7 +721,7 @@ async def commit(
     batch.added_count = added
     batch.skipped_count = skipped
     # A balance the household stated on a day keeps: older rows were already in it.
-    balances.reanchor(db, {t.account_id for t in targets.values() if t.account_id})
+    balances.reanchor(db, touched)
     db.commit()
     # Scoped to the dates this file covered. Re-deciding the whole history after every
     # import is how a crafted row could reach back years and pair itself with a real

@@ -183,7 +183,10 @@ def update_account(
         db.flush()
         repayments.sort_repayments(db, user.household_id)
     if payload.balance_cents is not None:
-        balances.set_balance(db, account, payload.balance_cents, balance_on)
+        try:
+            balances.set_balance(db, account, payload.balance_cents, balance_on)
+        except balances.BalanceTooLarge as e:
+            raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, str(e)) from e
     db.commit()
     networth.record_snapshot_if_used(db, user.household_id)
     db.refresh(account)

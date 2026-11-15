@@ -125,6 +125,7 @@ class Account(Base, TimestampMixin):
     # balance is kept so the account reads that then, whatever is imported later.
     balance_anchor_cents: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     balance_anchor_on: Mapped[dt.date | None] = mapped_column(Date, nullable=True)
+    balance_anchor_at: Mapped[dt.datetime | None] = mapped_column(DateTime, nullable=True)
     # Whether its balance counts in net worth: once the household says it is right.
     in_net_worth: Mapped[bool] = mapped_column(Boolean, default=False)
 

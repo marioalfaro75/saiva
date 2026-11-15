@@ -311,7 +311,7 @@ export function NetWorth() {
 
       <div className="split" style={{ marginTop: 16 }}>
         <ItemTable
-          title="Assets"
+          title="Assets you added"
           tableId="networth-assets"
           items={assets}
           total={assets.reduce((sum, i) => sum + i.value_cents, 0)}
@@ -320,7 +320,7 @@ export function NetWorth() {
           busy={busy}
         />
         <ItemTable
-          title="Liabilities"
+          title="Liabilities you added"
           tableId="networth-liabilities"
           items={liabilities}
           total={liabilities.reduce((sum, i) => sum + i.value_cents, 0)}

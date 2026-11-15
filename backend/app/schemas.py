@@ -812,6 +812,8 @@ class MortgageIn(BaseModel):
     owing_on: BoundedDate | None = None
     # The loan's regular repayment (its account's); null leaves it.
     repayment_schedule: list[RepaymentPeriodIn] | None = Field(default=None, max_length=50)
+    # The household's today, for the offsets' balances (the server's clock is UTC).
+    today: BoundedDate | None = None
 
 
 class MortgageLoanOut(BaseModel):

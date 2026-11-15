@@ -44,6 +44,7 @@ def upgrade() -> None:
     # balance is kept so the account reads that on that day, whatever is imported later.
     op.add_column('accounts', sa.Column('balance_anchor_cents', sa.BigInteger(), nullable=True))
     op.add_column('accounts', sa.Column('balance_anchor_on', sa.Date(), nullable=True))
+    op.add_column('accounts', sa.Column('balance_anchor_at', sa.DateTime(), nullable=True))
     # Whether an account's balance counts in net worth: the household says so once its
     # balance is right (the loan and offsets set up on the Mortgage page, say).
     op.add_column(
@@ -56,6 +57,7 @@ def upgrade() -> None:
 
 def downgrade() -> None:
     op.drop_column('accounts', 'in_net_worth')
+    op.drop_column('accounts', 'balance_anchor_at')
     op.drop_column('accounts', 'balance_anchor_on')
     op.drop_column('accounts', 'balance_anchor_cents')
     op.drop_index(op.f('ix_mortgages_household_id'), table_name='mortgages')

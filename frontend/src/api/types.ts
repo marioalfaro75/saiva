@@ -418,6 +418,8 @@ export interface MortgageSetupBody {
   owing_cents?: number | null;
   owing_on?: string | null;
   repayment_schedule?: RepaymentPeriod[] | null;
+  /** The household's today, for the offsets' balances. */
+  today?: string;
 }
 
 export interface MortgageWhatIf {

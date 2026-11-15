@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import dataclasses
 import datetime as dt
+import re
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
 from sqlalchemy import select
@@ -19,7 +20,11 @@ from ..db import get_db
 from ..deps import get_current_user, require_writer
 from ..services import mortgage as mortgage_service
 from ..services import networth, repayments
+from ..services.balances import BalanceTooLarge, set_balance
 from .accounts import clean_schedule, latest_today
+
+# A liability entered by hand on Net worth with one of these in its name may be this loan.
+LIKE_A_HOME_LOAN = re.compile(r"mortgage|home|house|property", re.IGNORECASE)
 
 router = APIRouter(prefix="/mortgages", tags=["mortgages"])
 
@@ -98,14 +103,16 @@ def _detail(
             for a in _offset_choices(db, loan.household_id)
         ],
         paid=[schemas.MortgagePaidMonth(**dataclasses.asdict(m)) for m in past.months],
-        manual_liabilities=list(
-            db.execute(
+        manual_liabilities=[
+            name
+            for name in db.execute(
                 select(models.NetWorthItem.name).where(
                     models.NetWorthItem.household_id == loan.household_id,
                     models.NetWorthItem.kind == "liability",
                 )
             ).scalars()
-        ),
+            if LIKE_A_HOME_LOAN.search(name)
+        ],
     )
     if setup is None:
         out.missing = ["setup"]
@@ -174,7 +181,9 @@ def save_mortgage(
     db: Session = Depends(get_db),
 ) -> schemas.MortgageOut:
     loan = _loan(db, account_id, user.household_id)
-    today = dt.date.today()
+    today = payload.today or dt.date.today()
+    if today > latest_today() or today < dt.date.today() - dt.timedelta(days=1):
+        today = dt.date.today()  # not a today anywhere: the server's
     if payload.owing_on is not None and payload.owing_on > latest_today():
         raise HTTPException(
             status.HTTP_422_UNPROCESSABLE_ENTITY,
@@ -201,11 +210,14 @@ def save_mortgage(
     setup.rates = _clean_rates(payload.rates)
     setup.offset_account_ids = [a.id for a in offsets] or None
     db.flush()
-    if payload.owing_cents is not None:
-        mortgage_service.set_balance(db, loan, -payload.owing_cents, payload.owing_on or today)
-    for o in payload.offsets:
-        if o.balance_cents is not None:
-            mortgage_service.set_balance(db, choices[o.account_id], o.balance_cents, today)
+    try:
+        if payload.owing_cents is not None:
+            set_balance(db, loan, -payload.owing_cents, payload.owing_on or today)
+        for o in payload.offsets:
+            if o.balance_cents is not None:
+                set_balance(db, choices[o.account_id], o.balance_cents, today)
+    except BalanceTooLarge as e:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, str(e)) from e
     if payload.repayment_schedule is not None:
         loan.repayment_schedule = clean_schedule(
             [p.model_dump(mode="json") for p in payload.repayment_schedule]

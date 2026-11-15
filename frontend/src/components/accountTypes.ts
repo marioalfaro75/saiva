@@ -1,3 +1,5 @@
+import type { RepaymentPeriod } from "../api/types";
+
 /** The kinds of account Saiva knows; the type decides how transfers into it are counted. */
 export const ACCOUNT_TYPES = [
   "everyday",
@@ -62,4 +64,14 @@ export function parseSignedDollars(text: string): number | null {
     return cents === null ? null : -cents;
   }
   return parseDollarsOrZero(clean);
+}
+
+/** A loan's repayment periods after editing the latest one. A later date starts a new
+ *  period from then (a rate rise), keeping those before; the same or an earlier date
+ *  corrects it, and drops the periods it now covers. */
+export function nextSchedule(schedule: RepaymentPeriod[], now: RepaymentPeriod): RepaymentPeriod[] {
+  const current = schedule.length ? schedule[schedule.length - 1] : null;
+  const since = now.since ?? "";
+  if (current && since > (current.since ?? "")) return [...schedule, now];
+  return [...schedule.slice(0, -1).filter((p) => (p.since ?? "") < since), now];
 }

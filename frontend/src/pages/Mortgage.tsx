@@ -12,7 +12,7 @@ import {
   YAxis,
 } from "recharts";
 
-import { api } from "../api/client";
+import { api, ApiError } from "../api/client";
 import type {
   Mortgage as MortgageData,
   MortgageOutcome,
@@ -37,6 +37,9 @@ function Stat({ label, value, sub }: { label: string; value: string; sub?: strin
     </div>
   );
 }
+
+/** "this month", or "in 2 years 3 months". */
+const fromNow = (months: number) => (months <= 0 ? "this month" : `in ${span(months)}`);
 
 /** "paid off Mar 2041", or why it isn't. */
 function paidOff(o: MortgageOutcome): string {
@@ -147,25 +150,31 @@ const NO_WHAT_IF: WhatIfText = {
   offsetIn: true,
 };
 
-/** The what-if as the API takes it; null while something typed isn't a number. Every
- *  field is a plain number (phones' number pads have no minus key): a rate cut and
- *  money taken out of the offset are chosen beside them. */
-function whatIfValues(w: WhatIfText): MortgageWhatIf | null {
+/** The what-if as the API takes it, or what is wrong with what was typed. Every field
+ *  is a plain number (phones' number pads have no minus key): a rate cut and money
+ *  taken out of the offset are chosen beside them. */
+function whatIfValues(w: WhatIfText): { values: MortgageWhatIf } | { problem: string } {
   const money = (t: string) => (t.trim() ? parseDollarsOrZero(t) : 0);
   const extra = money(w.extra);
   const lump = money(w.lump);
   const offset = money(w.offset);
   const rateText = w.rate.trim().replace(/%$/, "").trim();
   const rate = rateText ? Number(rateText) : 0;
-  if (extra === null || lump === null || offset === null) return null;
-  if (!/^(\d+(\.\d*)?|\.\d+)?$/.test(rateText) || rate > 10) return null;
+  if (extra === null || lump === null || offset === null || !/^(\d+(\.\d*)?|\.\d+)?$/.test(rateText)) {
+    return { problem: "Enter numbers only, e.g. 200." };
+  }
+  if (rate > 10) return { problem: "Try a rate change of up to 10%, e.g. 0.5." };
   return {
-    extra_cents: extra,
-    lump_cents: lump,
-    rate_change: w.rateUp ? rate : -rate,
-    offset_change_cents: w.offsetIn ? offset : -offset,
+    values: {
+      extra_cents: extra,
+      lump_cents: lump,
+      rate_change: w.rateUp ? rate : -rate,
+      offset_change_cents: w.offsetIn ? offset : -offset,
+    },
   };
 }
+
+const isEmpty = (w: WhatIfText) => !w.extra.trim() && !w.lump.trim() && !w.rate.trim() && !w.offset.trim();
 
 function whatIfResult(p: MortgageProjection, tried: MortgageWhatIf): string | null {
   const w = p.what_if;
@@ -203,16 +212,20 @@ function WhatIfPanel({
   p,
   text,
   setText,
-  invalid,
+  onClear,
+  problem,
   tried,
+  working,
   failed,
 }: {
   p: MortgageProjection;
   text: WhatIfText;
   setText: (t: WhatIfText) => void;
-  invalid: boolean;
+  onClear: () => void;
+  problem: string | null;
   tried: MortgageWhatIf;
-  failed: boolean;
+  working: boolean;
+  failed: string | null;
 }) {
   const fid = useId();
   const field = (key: "extra" | "lump" | "rate" | "offset", label: string, placeholder: string) => (
@@ -233,11 +246,9 @@ function WhatIfPanel({
     <div className="card" style={{ marginTop: 16 }}>
       <div className="spread">
         <h2>What if…</h2>
-        {text !== NO_WHAT_IF && (
-          <button type="button" className="btn btn-ghost" onClick={() => setText(NO_WHAT_IF)}>
-            Clear
-          </button>
-        )}
+        <button type="button" className="btn btn-ghost" disabled={isEmpty(text)} onClick={onClear}>
+          Clear
+        </button>
       </div>
       <p className="muted" style={{ marginTop: 0 }}>Try a change. Nothing is saved.</p>
       <div className="row">
@@ -254,7 +265,7 @@ function WhatIfPanel({
             <option value="down">Goes down</option>
           </select>
         </div>
-        {field("rate", "By (%)", "e.g. 0.5")}
+        {field("rate", "Rate change (%)", "e.g. 0.5")}
         <div className="field">
           <label htmlFor={`${fid}-offset-dir`}>Offset</label>
           <select
@@ -266,15 +277,19 @@ function WhatIfPanel({
             <option value="out">Take out</option>
           </select>
         </div>
-        {field("offset", "Amount ($)", "e.g. 20,000")}
+        {field("offset", "Offset amount ($)", "e.g. 20,000")}
       </div>
-      {invalid && <div className="error">Enter numbers only, e.g. 200.</div>}
-      {failed && <div className="error">Couldn't try that. Please try again.</div>}
-      {result && !failed && (
-        <p className="notice" role="status">
-          {result}
-        </p>
-      )}
+      <div role="status" aria-live="polite">
+        {problem ? (
+          <div className="error">{problem}</div>
+        ) : failed ? (
+          <div className="error">{failed}</div>
+        ) : working ? (
+          <p className="notice">Working it out…</p>
+        ) : (
+          result && <p className="notice">{result}</p>
+        )}
+      </div>
     </div>
   );
 }
@@ -314,6 +329,23 @@ function Summary({ loan, p }: { loan: MortgageData; p: MortgageProjection }) {
   const offset = saving(p.without_offset, p.as_you_pay);
   const early =
     p.contract_end && p.as_you_pay.payoff ? monthsApart(p.as_you_pay.payoff, p.contract_end) : null;
+  const ended = p.contract_end !== null && p.contract_end < localToday();
+  /** "pays the loan off 1 year sooner and saves $X in interest", or the half of it
+   *  that is true; null when neither is. */
+  const effect = (
+    s: { months: number; interest: number } | null,
+    sooner: (time: string) => string,
+    saves: string,
+  ) => {
+    if (!s || (s.months <= 0 && s.interest <= 0)) return null;
+    const parts = [];
+    if (s.months > 0) parts.push(sooner(span(s.months)));
+    if (s.interest > 0) parts.push(`${saves} ${formatCents(s.interest)} in interest`);
+    return parts.join(" and ");
+  };
+  const madeEffect = effect(made, (t) => `bring your pay-off forward ${t}`, "save");
+  const usualEffect = effect(extras, (t) => `pay it off ${t} sooner`, "save");
+  const offsetEffect = effect(offset, (t) => `pays it off ${t} sooner`, "saves");
   const paidOffShare =
     loan.original_cents && loan.original_cents > 0
       ? Math.max(0, Math.min(100, Math.round((1 - p.owing_cents / loan.original_cents) * 100)))
@@ -327,7 +359,7 @@ function Summary({ loan, p }: { loan: MortgageData; p: MortgageProjection }) {
       )}
       {early !== null && p.contract_end && (
         <li>
-          Your loan term ends {monthYear(p.contract_end)}.{" "}
+          Your loan term {ended ? "ended" : "ends"} {monthYear(p.contract_end)}.{" "}
           {early > 0
             ? `You're on track to finish ${span(early)} early.`
             : early < 0
@@ -335,22 +367,22 @@ function Summary({ loan, p }: { loan: MortgageData; p: MortgageProjection }) {
               : "You're on track to finish on time."}
         </li>
       )}
-      {made && (p.extras_made_cents ?? 0) > 0 && (
+      {madeEffect && (p.extras_made_cents ?? 0) > 0 && (
         <li>
-          Your extra repayments in the last 12 months ({formatCents(p.extras_made_cents ?? 0)}) bring
-          your pay-off forward {span(made.months)} and save {formatCents(made.interest)} in interest.
+          Your extra repayments in the last 12 months ({formatCents(p.extras_made_cents ?? 0)}){" "}
+          {madeEffect}.
         </li>
       )}
-      {p.usual_extra_cents > 0 && extras && (
+      {usualEffect && p.usual_extra_cents > 0 && (
         <li>
-          Your usual extra repayments (about {formatCents(p.usual_extra_cents)} a month) save{" "}
-          {formatCents(extras.interest)} in interest and {span(extras.months)}.
+          Your usual extra repayments (about {formatCents(p.usual_extra_cents)} a month){" "}
+          {usualEffect}.
         </li>
       )}
-      {p.offset_cents > 0 && offset && (
+      {offsetEffect && p.offset_cents > 0 && (
         <li>
-          Your offset ({formatCents(p.offset_cents)}) saves {formatCents(offset.interest)} in
-          interest and {span(offset.months)}.
+          Your offset ({formatCents(p.offset_cents)}){" "}
+          {offsetEffect}.
         </li>
       )}
       {!p.as_you_pay.payoff && (
@@ -375,7 +407,8 @@ function LoanView({ accountId }: { accountId: string }) {
     const t = setTimeout(() => setApplied(text), 400);
     return () => clearTimeout(t);
   }, [text]);
-  const values = whatIfValues(applied);
+  const parsed = whatIfValues(applied);
+  const values = "values" in parsed ? parsed.values : null;
   const trying =
     values !== null &&
     Boolean(values.extra_cents || values.lump_cents || values.rate_change || values.offset_change_cents);
@@ -385,11 +418,22 @@ function LoanView({ accountId }: { accountId: string }) {
     queryKey: ["mortgage", accountId, values],
     queryFn: () => api.mortgage(accountId, values ?? {}),
     enabled: trying,
-    placeholderData: keepPreviousData,
+    // While the next answer comes, keep the last one only if there was one.
+    placeholderData: (previous, previousQuery) =>
+      previousQuery?.state.data ? keepPreviousData(previous) : undefined,
   });
+  const clear = () => {
+    setText(NO_WHAT_IF);
+    setApplied(NO_WHAT_IF);
+  };
+  const whatIfFailed = !trying || !whatIf.isError
+    ? null
+    : whatIf.error instanceof ApiError && whatIf.error.status < 500
+      ? "That's too large to try."
+      : "Couldn't try that. Please try again.";
 
   if (base.isLoading) return <p className="muted">Loading…</p>;
-  if (base.isError || !base.data) return <div className="error">Couldn't load your home loan.</div>;
+  if (!base.data) return <div className="error">Couldn't load your home loan.</div>;
   const data = (trying && whatIf.data) || base.data;
   const p = data.projection;
   const notice = message && (
@@ -419,10 +463,15 @@ function LoanView({ accountId }: { accountId: string }) {
   return (
     <div>
       {notice}
+      {base.isError && (
+        <p className="notice notice-warn" role="status">
+          Couldn't refresh. Showing what Saiva had.
+        </p>
+      )}
       {doubled.length > 0 && (
         <p className="notice notice-warn" role="status">
-          Net worth also has {doubled.map((n) => `“${n}”`).join(", ")} entered by hand. If that's
-          this loan, remove it there so it isn't counted twice.
+          <Link to="/net-worth">Net worth</Link> also has {doubled.map((n) => `“${n}”`).join(", ")}{" "}
+          entered by hand. If that's this loan, remove it there so it isn't counted twice.
         </p>
       )}
       <div className="spread" style={{ marginBottom: 12 }}>
@@ -455,7 +504,7 @@ function LoanView({ accountId }: { accountId: string }) {
               value={p.as_you_pay.payoff ? monthYear(p.as_you_pay.payoff) : p.as_you_pay.stalls ? "Never" : "50+ years"}
               sub={
                 p.as_you_pay.payoff
-                  ? `in ${span(monthsApart(localToday(), p.as_you_pay.payoff))}`
+                  ? fromNow(monthsApart(localToday(), p.as_you_pay.payoff))
                   : "at this repayment"
               }
             />
@@ -480,9 +529,11 @@ function LoanView({ accountId }: { accountId: string }) {
             p={p}
             text={text}
             setText={setText}
-            invalid={values === null}
+            onClear={clear}
+            problem={"problem" in parsed ? parsed.problem : null}
             tried={values ?? {}}
-            failed={trying && whatIf.isError}
+            working={trying && (whatIf.isPlaceholderData || (whatIf.isFetching && !whatIf.data))}
+            failed={whatIfFailed}
           />
 
           <div className="card" style={{ marginTop: 16 }}>

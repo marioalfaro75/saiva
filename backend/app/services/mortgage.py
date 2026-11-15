@@ -84,6 +84,27 @@ def _last_txn_date(db: Session, account: models.Account, today: dt.date) -> dt.d
     ).scalar()
 
 
+def charge_day_of(db: Session, loan: models.Account) -> int | None:
+    """The day of the month the lender charges interest, from the loan's statement: the
+    commonest day of its debits (31 for a month's last day). None without any."""
+    days = db.execute(
+        select(models.Transaction.txn_date)
+        .where(
+            models.Transaction.account_id == loan.id,
+            models.Transaction.amount_cents < 0,
+            models.Transaction.split_parent_id.is_(None),
+        )
+        .order_by(models.Transaction.txn_date.desc())
+        .limit(12)
+    ).scalars().all()
+    if not days:
+        return None
+    counts = Counter(
+        31 if d.day == calendar.monthrange(d.year, d.month)[1] else d.day for d in days
+    )
+    return max(counts, key=lambda d: counts[d])
+
+
 def known_owing(db: Session, loan: models.Account, today: dt.date) -> tuple[dt.date, int]:
     """(day, owed): the latest day the books say what is owed -- the day the household
     said (the loan account's balance anchor), or the end of the loan's statement."""
@@ -143,8 +164,14 @@ def usual_timing(days: list[dt.date], every: str) -> tuple[dt.date, int | None] 
     recent = sorted(days)[-USUAL_DAY_FROM:]
     last = recent[-1]
     if every == "monthly":
-        counts = Counter(d.day for d in recent)
-        dom = max(counts, key=lambda d: (counts[d], d))
+        # A repayment on a month's last day is the 31st's (30 April, 28 February). A tie
+        # goes to the day paid most recently: a new payment day wins as it comes in.
+        def day_of(d: dt.date) -> int:
+            return 31 if d.day == calendar.monthrange(d.year, d.month)[1] else d.day
+
+        counts = Counter(day_of(d) for d in recent)
+        latest = {day_of(d): i for i, d in enumerate(recent)}
+        dom = max(counts, key=lambda d: (counts[d], latest[d]))
         # The due date the last one was for: a repayment two days early is next month's.
         nearest = (_on_day(last + relativedelta(months=m), dom) for m in (-1, 0, 1))
         return min(nearest, key=lambda d: abs((d - last).days)), dom
@@ -242,17 +269,27 @@ def simulate(
     regular repayment is due after the anchor. Paid off: the day a repayment clears what
     is owed and the interest so far. Not paid off (`payoff` None): when a whole year
     leaves no less owing, or after MAX_YEARS."""
-    lump = min(scenario.lump_cents, start.owing)
-    owing = start.owing - lump
-    accrued = start.accrued if owing > 0 else 0.0
+    # A lump sum pays what is owed, then the interest since the last charge.
+    lump = min(scenario.lump_cents, start.owing + start.accrued)
+    on_owing = min(lump, start.owing)
+    owing = start.owing - on_owing
+    accrued = start.accrued - (lump - on_owing)
     day = start.day
-    run = Run(state=start, points=[(day, owing)])
-    year = Year((day + dt.timedelta(days=1)).year, extra_cents=lump)
-    if owing <= 0:
+    run = Run(state=start, points=[(day, owing)], interest_cents=lump - on_owing)
+    year = Year(
+        (day + dt.timedelta(days=1)).year, extra_cents=lump, interest_cents=lump - on_owing
+    )
+    if owing <= 0 and accrued <= 0:
         run.payoff = day
         run.state = State(day, 0.0)
         run.years.append(year)
         return run
+    # A year that leaves no less owing stalls the loan -- unless a rate or repayment
+    # still to come changes that.
+    changes = [r.since for r in terms.rates if r.since] + [
+        p.since for p in terms.schedule if p.since
+    ]
+    settled = max(changes, default=day)
     dues = due_dates(terms.schedule, terms.anchor, day, terms.day_of_month)
     due = next(dues)
     limit = stop or day + relativedelta(years=MAX_YEARS)
@@ -298,7 +335,12 @@ def simulate(
             year.owing_cents = owing
             run.years.append(year)
             year = Year(tomorrow.year)
-            if stop is None and last_year_owing is not None and owing >= last_year_owing:
+            if (
+                stop is None
+                and last_year_owing is not None
+                and owing >= last_year_owing
+                and day >= settled
+            ):
                 run.stalls = True
                 break
             last_year_owing = owing
@@ -396,7 +438,9 @@ def history(db: Session, loan: models.Account, today: dt.date, since: dt.date) -
     ]
     first_paid = min((p.day for p in paid), default=None)
     counted = [m for m in whole if first_paid and m >= first_paid.strftime("%Y-%m")]
-    usual = round(statistics.median(months[m][1] for m in counted)) if counted else 0
+    extras = [months[m][1] for m in counted]
+    # With only a month or two to go by, an extra is usual only if it was paid in each.
+    usual = round(statistics.median(extras) if len(extras) >= 3 else min(extras, default=0))
     return History(
         paid=paid,
         months=[PaidMonth(m, r, e) for m, (r, e) in sorted(months.items(), reverse=True)],
@@ -529,15 +573,25 @@ def project(
     offsets = max(sum(offset_balance(db, mortgage).values()), 0)
     past = past or history(db, loan, today, known_on)
     every = _period(schedule, max(today, known_on)).every
-    timing = usual_timing(past.regular_days, every)
+    # When the repayment is due: from the repayments at the pace in force on the last one
+    # (not the weekly ones before a change to monthly, say).
+    last_regular = max(past.regular_days, default=None)
+    timing = None
+    if last_regular:
+        pace = _period(schedule, last_regular)
+        timing = usual_timing(
+            [d for d in past.regular_days if pace.since is None or d >= pace.since], pace.every
+        )
     if timing:
         anchor, day_of_month = timing
+        if last_regular and pace.since and anchor < pace.since <= last_regular:
+            anchor = last_regular
     else:
         anchor = next(
             (p.since for p in reversed(schedule) if p.since and p.since <= known_on), known_on
         )
         day_of_month = None
-    charge_day = (mortgage.start_date or anchor).day
+    charge_day = charge_day_of(db, loan) or (mortgage.start_date or anchor).day
     terms = Terms(rates, schedule, anchor, charge_day, day_of_month)
     as_you_pay = Scenario(offset_cents=offsets, extra_monthly=past.usual_extra_cents)
 
@@ -548,8 +602,13 @@ def project(
         float(known_cents),
         accrued_since_charge(known_on, known_cents, offsets, rates, charge_day),
     )
+    # The extras made to today are the ones seen: none are assumed.
     to_today = simulate(
-        start, terms, as_you_pay, stop=today, paid=_since_known(past.paid, known_on, today)
+        start,
+        terms,
+        Scenario(offset_cents=offsets),
+        stop=today,
+        paid=_since_known(past.paid, known_on, today),
     )
     now = to_today.state
     if to_today.payoff or now.day < today:

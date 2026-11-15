@@ -31,9 +31,9 @@ in your home loan from its statement.
   the loan and its offsets. If you entered your mortgage by hand on Net worth, remove it
   there so it isn't counted twice (the Mortgage page reminds you).
 - **What you say a balance is, stays.** The balance you enter for the loan (and the
-  offsets) is kept for that day: importing older statements afterwards doesn't change
-  it. Repayments made since, that the loan's statement doesn't show yet, come off what
-  you owe.
+  offsets) is kept for that day: importing statements afterwards doesn't change it
+  (a transaction you type in yourself later still counts). Repayments made since, that
+  the loan's statement doesn't show yet, come off what you owe.
 
 ## [0.18.1] — 2026-11-15
 
