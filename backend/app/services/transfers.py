@@ -39,6 +39,7 @@ from ..constants import (
     OWN_ACCOUNTS,
     TRANSFER_CATEGORY,
 )
+from . import repayments
 from .categorise import ML_MAX_CONFIDENCE, RULE_CONFIDENCE, set_by_person
 
 WINDOW_DAYS = 3
@@ -582,6 +583,8 @@ def classify_transfers(
         pairing.possible,
         income_ids,
     )
+    db.flush()
+    repayments.sort_repayments(db, household_id)
     db.commit()
     return scan
 

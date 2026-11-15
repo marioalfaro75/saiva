@@ -5,6 +5,28 @@ All notable changes to Saiva are documented here. The project follows
 
 ## [Unreleased]
 
+## [0.18.1] — 2026-11-15
+
+Apply it with **Update now** in Settings.
+
+### Added
+
+- **Regular and extra home loan repayments.** Saiva learns your usual repayment — its
+  amount and how often it goes — and files each one: the regular one as **Mortgage**, an
+  extra one as **Extra repayments**. A payment far from the usual amount, or a second one
+  in the same week, is extra. When the usual amount changes (say after a rate rise), it
+  becomes the usual after two in a row. Both count as spending.
+- **Say so yourself.** The ⇄ window on a repayment lets you mark it as the regular one
+  or extra. Saiva keeps your choice and learns from it.
+- **Your repayment on Bills**, named for the loan ("Westpac home loan repayment"), with
+  its usual amount and next due date. Extra repayments are not a bill.
+- An extra repayment is tagged "Extra repayment → Westpac home loan".
+
+### Changed
+
+- The category "Offset/Extra repayments" is now "Extra repayments" (unless you renamed
+  it).
+
 ## [0.18.0] — 2026-11-15
 
 Apply it with **Update now** in Settings. On first start, Saiva sorts the transfers

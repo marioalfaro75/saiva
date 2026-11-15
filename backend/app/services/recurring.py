@@ -17,10 +17,14 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from .. import models
+from ..constants import LOAN_REPAYMENT
+from . import repayments
 from .dashboard import _spendable_leaves
 
 LOOKBACK_DAYS = 550  # ~18 months of history to establish a cadence
 MIN_OCCURRENCES = 3
+# A repayment is known to be one by its link, so two make a series.
+REPAYMENT_OCCURRENCES = 2
 
 # (label, canonical interval days, min gap, max gap)
 _CADENCES: list[tuple[str, int, int, int]] = [
@@ -101,9 +105,10 @@ def detect(
     leaves = _spendable_leaves(db, household_id, start, today)
 
     # merchant -> {date -> summed amount}; collapses splits and same-day charges.
+    # A loan repayment is its own series, below: by the loan, regular ones only.
     by_merchant: dict[str, dict[dt.date, int]] = {}
     for t in leaves:
-        if not t.merchant:
+        if not t.merchant or t.transfer_kind == LOAN_REPAYMENT:
             continue
         per_day = by_merchant.setdefault(t.merchant, {})
         per_day[t.txn_date] = per_day.get(t.txn_date, 0) + t.amount_cents
@@ -160,8 +165,59 @@ def detect(
                 is_subscription=direction == "expense" and amount_cv <= SUBSCRIPTION_AMOUNT_CV,
             )
         )
+    series.extend(_repayment_series(db, household_id, start, today, cat_names))
     series.sort(key=lambda s: s.monthly_amount_cents, reverse=True)
     return series
+
+
+def _repayment_series(
+    db: Session,
+    household_id: str,
+    start: dt.date,
+    today: dt.date,
+    cat_names: dict[str, str],
+) -> list[RecurringSeries]:
+    """Each loan's regular repayment, as a bill: named for the loan, its usual amount and
+    how often it goes. Extra repayments are not a bill."""
+    out: list[RecurringSeries] = []
+    for found in repayments.regular_repayments(db, household_id):
+        dates: dict[dt.date, int] = {}
+        for t in found.regular:
+            if start <= t.txn_date <= today:
+                dates[t.txn_date] = dates.get(t.txn_date, 0) + abs(t.amount_cents)
+        days = sorted(dates)
+        if len(days) < REPAYMENT_OCCURRENCES:
+            continue
+        gaps = [(b - a).days for a, b in zip(days, days[1:], strict=False)]
+        classified = _classify(float(statistics.median(gaps)))
+        if classified is None:
+            continue
+        cadence, interval = classified
+        recent = [dates[d] for d in days[-repayments.USUAL_FROM :]]
+        typical = int(round(statistics.median(recent)))
+        last_date = days[-1]
+        next_due = last_date + dt.timedelta(days=interval)
+        while next_due < today:
+            next_due += dt.timedelta(days=interval)
+        out.append(
+            RecurringSeries(
+                merchant=f"{found.loan.name} repayment",
+                category_id=found.category_id,
+                category_name=cat_names.get(found.category_id) if found.category_id else None,
+                direction="expense",
+                cadence=cadence,
+                interval_days=interval,
+                typical_amount_cents=typical,
+                monthly_amount_cents=int(round(typical * DAYS_PER_MONTH / interval)),
+                occurrences=len(days),
+                first_date=days[0],
+                last_date=last_date,
+                next_due=next_due,
+                active=last_date >= today - dt.timedelta(days=int(interval * 1.5)),
+                is_subscription=False,
+            )
+        )
+    return out
 
 
 def upcoming_bills(

@@ -104,6 +104,41 @@ describe("a linked transaction", () => {
   });
 });
 
+describe("a home loan repayment", () => {
+  const REPAYMENT = { ...LINKED, repayment: "regular" } as Transaction;
+
+  it("can be marked as an extra repayment", async () => {
+    const set = vi.spyOn(api, "setRepayment").mockResolvedValue({
+      ...GROUP("loan_repayment"),
+      outflow: { ...REPAYMENT, repayment: "extra" } as Transaction,
+    });
+    show(REPAYMENT);
+    const choice = screen.getByRole("combobox", { name: "Repayment" });
+    expect(choice).toHaveValue("regular");
+    fireEvent.change(choice, { target: { value: "extra" } });
+    await waitFor(() => expect(onDone).toHaveBeenCalledWith("Marked as an extra repayment."));
+    expect(set).toHaveBeenCalledWith("g1", true);
+  });
+
+  it("can be marked back as the regular one", async () => {
+    const set = vi.spyOn(api, "setRepayment").mockResolvedValue({
+      ...GROUP("loan_repayment"),
+      outflow: REPAYMENT,
+    });
+    show({ ...REPAYMENT, repayment: "extra" } as Transaction);
+    fireEvent.change(screen.getByRole("combobox", { name: "Repayment" }), {
+      target: { value: "regular" },
+    });
+    await waitFor(() => expect(onDone).toHaveBeenCalledWith("Marked as the regular repayment."));
+    expect(set).toHaveBeenCalledWith("g1", false);
+  });
+
+  it("offers no such choice for other transfers", () => {
+    show(LINKED);
+    expect(screen.queryByRole("combobox", { name: "Repayment" })).toBeNull();
+  });
+});
+
 describe("a transaction not linked", () => {
   const OTHER = txn({
     id: "t9",

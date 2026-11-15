@@ -9,7 +9,7 @@ DEFAULT_TAXONOMY: list[dict] = [
         "Salary/Wages", "Government benefits", "Investment/Interest", "Refunds", "Cash deposit",
         "Other income"]},
     {"name": "Housing", "kind": "expense", "children": [
-        "Mortgage", "Rent", "Offset/Extra repayments", "Strata/Body corporate",
+        "Mortgage", "Rent", "Extra repayments", "Strata/Body corporate",
         "Council rates", "Home insurance", "Repairs & maintenance"]},
     {"name": "Utilities", "kind": "expense", "children": [
         "Electricity", "Gas", "Water", "Internet", "Mobile phone"]},

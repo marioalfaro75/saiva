@@ -100,6 +100,8 @@ export interface Transaction {
   counterpart_account_name?: string | null;
   /** A note worth offering, from the description, when there is none. */
   note_suggestion?: string | null;
+  /** A home loan repayment's paying side: the regular one, or extra. */
+  repayment?: "regular" | "extra" | null;
 }
 
 /** What a linked pair is: decided by the account the money went into. */

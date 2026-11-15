@@ -9,7 +9,7 @@ from sqlalchemy.orm import Session
 from .. import models, schemas
 from ..db import get_db
 from ..deps import get_current_user, require_owner, require_writer
-from ..services import transfers
+from ..services import repayments, transfers
 from ..services.transfers import wording_of
 
 router = APIRouter(prefix="/accounts", tags=["accounts"])
@@ -140,6 +140,8 @@ def update_account(
     if account.type != old_type:
         rekinded = transfers.rekind_into(db, account, old_type)
         transfers.unfile_cash_deposits(db, account)
+        db.flush()
+        repayments.sort_repayments(db, user.household_id)
     db.commit()
     db.refresh(account)
     return schemas.AccountUpdateOut(

@@ -507,9 +507,15 @@ class TransactionOut(BaseModel):
     # A note worth offering, from the description ("To John Smith · Birthday gift"),
     # when the transaction has none.
     note_suggestion: str | None = None
+    # A home loan repayment's paying side: "regular" or "extra". None otherwise.
+    repayment: Literal["regular", "extra"] | None = None
 
 
 TransferKind = Literal["card_payment", "own_accounts", "loan_repayment"]
+
+
+class RepaymentIn(BaseModel):
+    extra: bool  # True: an extra repayment; False: the regular one
 
 
 class TransferScanOut(BaseModel):

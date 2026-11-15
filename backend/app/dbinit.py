@@ -34,9 +34,13 @@ from sqlalchemy import and_, inspect, or_, select, update
 from sqlalchemy.engine import URL, Engine
 from sqlalchemy.orm import Session
 
-from .constants import CASH_DEPOSIT_CATEGORY
+from .constants import (
+    CASH_DEPOSIT_CATEGORY,
+    EXTRA_REPAYMENT_CATEGORY,
+    OLD_EXTRA_REPAYMENT_CATEGORY,
+)
 from .db import engine
-from .models import Category, Household, Transaction
+from .models import Account, Category, Household, Transaction
 from .schema_state import SchemaState, ahead_warning, alembic_config, read_schema_state
 from .services.categorise import (
     ML_MAX_CONFIDENCE,
@@ -44,6 +48,7 @@ from .services.categorise import (
     UNTOUCHED,
     apply_all_rules,
 )
+from .services.repayments import sort_repayments
 from .services.transfers import classify_existing, classify_transfers
 
 BASELINE_REVISION = "0001"
@@ -132,6 +137,7 @@ def main(db: Engine | None = None, cfg: Config | None = None) -> SchemaState:
             cfg.attributes.pop("connection", None)
     if not state.is_ahead:
         _record_category_keys(db)
+        _rename_extra_repayments(db)
         _mark_automatic_categories(db)
         _apply_rules_once(db)
         _classify_transfers_once(db)
@@ -161,6 +167,41 @@ def _record_category_keys(db: Engine) -> None:
             .where(Category.is_system.is_(True), Category.system_key.is_(None))
             .values(system_key=Category.name)
         )
+
+
+def _rename_extra_repayments(db: Engine) -> None:
+    """"Offset/Extra repayments" becomes "Extra repayments": what 0.18.1 files an extra
+    home loan repayment under. Its key moves with it; its name too, unless the
+    household renamed it or already has a category of the new name. Every start, and
+    only ever finds a household an older image made."""
+    inspector = inspect(db)
+    if "categories" not in inspector.get_table_names():
+        return
+    if "system_key" not in {c["name"] for c in inspector.get_columns("categories")}:
+        return
+    with Session(db) as session:
+        old = session.execute(
+            select(Category).where(Category.system_key == OLD_EXTRA_REPAYMENT_CATEGORY)
+        ).scalars().all()
+        for category in old:
+            taken = session.execute(
+                select(Category.id).where(
+                    Category.household_id == category.household_id,
+                    Category.system_key == EXTRA_REPAYMENT_CATEGORY,
+                )
+            ).first()
+            if taken:
+                continue  # already has one: leave the old as it is
+            category.system_key = EXTRA_REPAYMENT_CATEGORY
+            same_name = session.execute(
+                select(Category.id).where(
+                    Category.household_id == category.household_id,
+                    Category.name == EXTRA_REPAYMENT_CATEGORY,
+                )
+            ).first()
+            if category.name == OLD_EXTRA_REPAYMENT_CATEGORY and not same_name:
+                category.name = EXTRA_REPAYMENT_CATEGORY
+        session.commit()
 
 
 def _mark_automatic_categories(db: Engine) -> None:
@@ -415,6 +456,18 @@ def _classify_transfers_once(db: Engine) -> None:
             )
             for household_id in unkinded:
                 classify_existing(session, household_id)
+            session.commit()
+            # Home loan repayments sorted into regular and extra (0.18.1), and kept so:
+            # it only re-files what it filed, so on most starts it changes nothing.
+            with_loans = (
+                session.execute(
+                    select(Account.household_id).where(Account.type == "home_loan").distinct()
+                )
+                .scalars()
+                .all()
+            )
+            for household_id in with_loans:
+                sort_repayments(session, household_id)
             session.commit()
         except Exception as exc:  # noqa: BLE001 - logged, and retried next start
             session.rollback()

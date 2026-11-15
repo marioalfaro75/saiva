@@ -15,9 +15,8 @@ export function transferLabel(t: Transaction): string | null {
   if (t.transfer_kind) {
     const other = t.counterpart_account_name;
     const arrow = t.amount_cents < 0 ? "→" : "←";
-    return other
-      ? `${TRANSFER_KIND_LABELS[t.transfer_kind]} ${arrow} ${other}`
-      : TRANSFER_KIND_LABELS[t.transfer_kind];
+    const kind = t.repayment === "extra" ? "Extra repayment" : TRANSFER_KIND_LABELS[t.transfer_kind];
+    return other ? `${kind} ${arrow} ${other}` : kind;
   }
   return t.is_transfer ? "transfer" : null;
 }
