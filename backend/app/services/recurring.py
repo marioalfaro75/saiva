@@ -120,7 +120,9 @@ def detect(
             select(models.Category).where(models.Category.household_id == household_id)
         ).scalars()
     }
-    cat_by_merchant = _dominant_category(leaves)
+    # Labelled from what is left: a loan's repayments by the same description are the
+    # loan's bill, and their category is not this one's.
+    cat_by_merchant = _dominant_category([t for t in leaves if t.id not in covered])
 
     series: list[RecurringSeries] = []
     for merchant, per_day in by_merchant.items():

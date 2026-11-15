@@ -5,6 +5,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { api, ApiError } from "../api/client";
 import type { Account } from "../api/types";
 import { AccountDialog } from "./AccountDialog";
+import { parseDollars } from "./accountTypes";
 
 /**
  * Accounts → Edit. The type decides how money into the account counts, and the wording is
@@ -290,6 +291,36 @@ describe("AccountDialog: a home loan's regular repayment", () => {
     fireEvent.change(amount(), { target: { value: "about 1200" } });
     expect(screen.getByText(/Enter the repayment as an amount/)).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Save" })).toBeDisabled();
+  });
+
+  it("reads only amounts it can be sure of", () => {
+    expect(parseDollars("1,254.92")).toBe(125492);
+    expect(parseDollars("$1254.9")).toBe(125490);
+    expect(parseDollars("1254")).toBe(125400);
+    for (const wrong of ["1254,92", "1,25", "12,54,92", "-5", "0", "about 1200", "1.234"]) {
+      expect(parseDollars(wrong)).toBeNull();
+    }
+  });
+
+  it("ties the amount's error to the field, politely", () => {
+    show(LOAN);
+    fireEvent.change(amount(), { target: { value: "1254,92" } });
+    expect(amount()).toHaveAttribute("aria-invalid", "true");
+    expect(amount()).toHaveAccessibleDescription(expect.stringContaining("Enter the repayment as an amount"));
+  });
+
+  it("says a home loan's repayments are now regular or extra when one is set with the type", async () => {
+    vi.spyOn(api, "updateAccount").mockResolvedValue({ ...LOAN, transfers_rekinded: 4 });
+    vi.spyOn(api, "detectTransfers").mockResolvedValue({ linked: 0, to_review: 0, cash_deposits: 0 });
+    show({ ...LOAN, type: "personal_loan" });
+    fireEvent.change(screen.getByRole("combobox", { name: "Type" }), { target: { value: "home_loan" } });
+    fireEvent.change(amount(), { target: { value: "1,254.92" } });
+    save();
+    await waitFor(() =>
+      expect(onDone).toHaveBeenCalledWith(
+        "Saved. 4 loan repayments now filed as Mortgage or Extra repayments. 0 transfers linked, 0 to review.",
+      ),
+    );
   });
 });
 

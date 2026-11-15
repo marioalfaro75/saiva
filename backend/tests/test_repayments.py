@@ -444,8 +444,10 @@ def test_income_and_other_bills_by_the_same_description_are_left_alone(
     assert "Home loan repayment" in merchants
     assert any(s["direction"] == "income" for s in merchants.values())
     assert merchants["Home loan repayment"]["occurrences"] == 6
-    # The smaller one by the same description is its own bill, not part of the loan's.
-    assert any(s["typical_amount_cents"] == 8000 for s in merchants.values())
+    # The smaller one by the same description is its own bill, not part of the loan's,
+    # and not labelled as the loan's.
+    other = next(s for s in merchants.values() if s["typical_amount_cents"] == 8000)
+    assert other["category_name"] != "Mortgage"
 
 
 def test_a_personal_loans_bill_is_loan_repayments(auth_client: TestClient) -> None:
@@ -610,3 +612,139 @@ def test_a_debit_with_the_loans_wording_from_any_account_counts_with_its_bill(
     assert bill["occurrences"] == 5
     assert bill["last_date"] == dt.date.today().isoformat()
     del loan
+
+
+# --------------------------------------------------------------------------------------
+# What the last review found
+# --------------------------------------------------------------------------------------
+
+
+def test_repayments_before_the_first_from_date_are_as_they_were() -> None:
+    raised = int(WEEKLY * 1.3)
+    schedule = [Period(START + dt.timedelta(days=28), raised, "weekly")]
+    legs = [_leg(7 * i, WEEKLY) for i in range(4)] + [_leg(28 + 7 * i, raised) for i in range(3)]
+    assert _extras(legs, schedule) == [False] * 7
+
+
+def test_partners_paying_their_parts_a_day_apart_make_one_repayment() -> None:
+    legs: list[models.Transaction] = []
+    for week in range(4):
+        legs += [
+            _leg(7 * week, WEEKLY // 2, "alex"),
+            _leg(7 * week + 1, WEEKLY - WEEKLY // 2, "sam"),
+        ]
+    assert _extras(legs) == [False] * 8
+
+
+def test_the_first_repayment_after_a_change_to_less_often_is_not_too_soon() -> None:
+    schedule = [
+        Period(None, 120000, "fortnightly"),
+        Period(START + dt.timedelta(days=60), 260000, "monthly"),
+    ]
+    legs = [_leg(14 * i, 120000) for i in range(5)] + [_leg(66, 260000), _leg(96, 260000)]
+    assert _extras(legs, schedule) == [False] * 7
+
+
+def test_soon_after_a_rise_the_new_amount_is_suggested() -> None:
+    raised = int(WEEKLY * 1.2)
+    legs = [_leg(7 * i, WEEKLY) for i in range(12)] + [_leg(84 + 7 * i, raised) for i in range(8)]
+    found = suggest(legs, START + dt.timedelta(days=84 + 7 * 7 + 1))
+    assert found is not None and found.cents == raised
+    assert found.since == START + dt.timedelta(days=84)
+
+
+def test_an_even_split_is_suggested_as_the_whole_repayment() -> None:
+    legs: list[models.Transaction] = []
+    for month in range(6):
+        legs += [_leg(30 * month, 100000, "alex"), _leg(30 * month, 100000, "sam")]
+    found = suggest(legs, START + dt.timedelta(days=151))
+    assert found is not None and (found.cents, found.every) == (200000, "monthly")
+
+
+def test_the_since_date_reaches_past_an_extra_in_between() -> None:
+    legs = [_leg(30 * i, 200000) for i in range(3)]
+    legs += [_leg(90 + 30 * i, 230000) for i in range(8)] + [_leg(104, 500000)]
+    found = suggest(legs, START + dt.timedelta(days=90 + 30 * 7 + 1))
+    assert found is not None and found.since == START + dt.timedelta(days=90)
+
+
+def test_extras_a_few_days_after_do_not_make_a_fortnightly_repayment_weekly() -> None:
+    legs = [_leg(14 * i, 150000) for i in range(8)] + [_leg(14 * i + 5, 150000) for i in (1, 3, 5)]
+    found = suggest(legs, START + dt.timedelta(days=14 * 7 + 1))
+    assert found is not None and found.every == "fortnightly"
+
+
+def test_no_suggestion_right_after_a_rise_is_entered(auth_client: TestClient) -> None:
+    raised = int(WEEKLY * 1.15)
+    _, loan, _ = _weeks(
+        auth_client, *[(7 * i, WEEKLY) for i in range(5)], (35, raised), schedule=False
+    )
+    rise = (dt.date.today() - dt.timedelta(days=0)).isoformat()
+    resp = auth_client.patch(
+        f"/api/accounts/{loan}",
+        json={
+            "repayment_schedule": [
+                {"since": None, "cents": WEEKLY, "every": "weekly"},
+                {"since": rise, "cents": raised, "every": "weekly"},
+            ]
+        },
+    )
+
+    assert resp.json()["repayment_suggestion"] is None
+
+
+def test_no_suggestion_while_the_set_repayment_is_still_paid_alongside_an_extra(
+    auth_client: TestClient,
+) -> None:
+    savings = create_account(auth_client, "Savings", "savings")["id"]
+    loan = create_account(auth_client, "Westpac home loan", "home_loan")["id"]
+    start = dt.date.today() - dt.timedelta(days=120)
+    for day in range(0, 121, 7):
+        date = (start + dt.timedelta(days=day)).isoformat()
+        _add(auth_client, savings, date, -30000, "TRANSFER TO LOAN")
+        _add(auth_client, loan, date, 30000, "TRANSFER FROM SAVINGS")
+    for month in range(4):
+        date = (start + dt.timedelta(days=2 + 30 * month)).isoformat()
+        _add(auth_client, savings, date, -200000, "TRANSFER TO LOAN MONTHLY")
+        _add(auth_client, loan, date, 200000, "TRANSFER FROM SAVINGS MONTHLY")
+    _scan(auth_client)
+
+    saved = _set_repayment(auth_client, loan, 200000, "monthly")
+
+    assert saved["repayment_suggestion"] is None
+
+
+def test_a_split_repayment_is_counted_once_in_the_bills(auth_client: TestClient) -> None:
+    _, _, paid = _weeks(auth_client, *[(7 * i, WEEKLY) for i in range(5)])
+    for leg in paid[1:4]:
+        resp = auth_client.post(
+            f"/api/transactions/{leg}/split",
+            json={"splits": [{"amount_cents": -100000}, {"amount_cents": -(WEEKLY - 100000)}]},
+        )
+        assert resp.status_code == 200, resp.text
+
+    assert [s["merchant"] for s in _series(auth_client)] == ["Westpac home loan repayment"]
+
+
+def test_a_debit_is_counted_for_one_loan_only(auth_client: TestClient) -> None:
+    everyday = create_account(auth_client, "Everyday")["id"]
+    old = create_account(auth_client, "Old loan", "home_loan")["id"]
+    new = create_account(auth_client, "New loan", "home_loan")["id"]
+    start = dt.date.today() - dt.timedelta(days=84)
+    for week in range(6):
+        date = (start + dt.timedelta(days=7 * week)).isoformat()
+        _add(auth_client, everyday, date, -WEEKLY, "INTERNET BANKING TRANSFER LOAN")
+        _add(auth_client, old, date, WEEKLY, "TRANSFER IN")
+    for week in range(6, 12):
+        date = (start + dt.timedelta(days=7 * week)).isoformat()
+        _add(auth_client, everyday, date, -130000, "INTERNET BANKING TRANSFER LOAN")
+        if week < 8:
+            _add(auth_client, new, date, 130000, "TRANSFER IN")
+    _scan(auth_client)
+    _set_repayment(auth_client, old, WEEKLY, "weekly")
+    _set_repayment(auth_client, new, 130000, "weekly")
+
+    bills = {s["merchant"]: s for s in _series(auth_client)}
+
+    assert bills["Old loan repayment"]["occurrences"] == 6
+    assert bills["New loan repayment"]["occurrences"] == 6

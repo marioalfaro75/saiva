@@ -41,6 +41,7 @@ MIN_GAP_DAYS = {"weekly": 3, "fortnightly": 7, "monthly": 14}
 MAX_LEGS_TOGETHER = 6  # legs on one day tried together, as parts of one repayment
 SUGGEST_FROM_DAYS = 120  # a suggestion reads the last few months
 SUGGEST_AT_LEAST = 3  # repayments at one amount before it is suggested
+COVERED_SHARE = 0.8  # periods with a repayment, for a schedule to be the one suggested
 
 
 @dataclass(frozen=True)
@@ -71,9 +72,10 @@ def schedule_of(account: models.Account) -> list[Period]:
     return sorted(periods, key=lambda p: p.since or dt.date.min)
 
 
-def in_force(schedule: list[Period], day: dt.date) -> Period:
-    """The period a date falls in: the latest begun by then, or the first."""
-    current = schedule[0]
+def in_force(schedule: list[Period], day: dt.date) -> Period | None:
+    """The period a date falls in: the latest begun by then. None before the first
+    dated period -- repayments before the household's "from" are as they were."""
+    current: Period | None = None
     for p in schedule:
         if p.since is None or p.since <= day:
             current = p
@@ -160,68 +162,124 @@ def _best_parts(
     return chosen
 
 
+# Parts of one repayment paid on different days -- two partners' paydays a day apart,
+# or one bank posting a day later -- are put together within this many days.
+PARTS_WITHIN_DAYS = 2
+# How late a regular repayment can be before a household is asked whether it changed.
+LATE_ALLOWANCE_DAYS = 7
+
+
 def sort_legs(
     legs: list[models.Transaction], schedule: list[Period], fixed: dict[str, bool]
 ) -> dict[str, bool]:
     """Which of one loan's repayments are extra, by id (True: extra). `fixed` holds what
-    a person (or a lock) has said. With no schedule, none is extra but what was said."""
+    a person (or a lock) has said. With no schedule, or before its first date, none is
+    extra but what was said."""
     extra = {t.id: fixed.get(t.id, False) for t in legs}
     if not schedule:
         return extra
     by_day: dict[dt.date, list[models.Transaction]] = {}
     for t in legs:
         by_day.setdefault(t.txn_date, []).append(t)
-    last_regular: dt.date | None = None
+    last_regular: tuple[dt.date, str] | None = None  # (day, the schedule it kept)
+    carry: list[models.Transaction] = []  # parts of a repayment not yet made up
     for day in sorted(by_day):
         period = in_force(schedule, day)
-        spacing = MIN_GAP_DAYS[period.every]
         day_legs = by_day[day]
         said_regular = [t for t in day_legs if fixed.get(t.id) is False]
         free = [t for t in day_legs if t.id not in fixed]
-        spaced = last_regular is None or (day - last_regular).days >= spacing
+        if period is None:
+            carry = []
+            continue  # before the household's "from": as it was
+        # A change of schedule keeps the gap the shorter one allows: the first monthly
+        # repayment after fortnightly ones is not "too soon".
+        gap = MIN_GAP_DAYS[period.every]
+        if last_regular is not None:
+            gap = min(gap, MIN_GAP_DAYS[last_regular[1]])
+        spaced = last_regular is None or (day - last_regular[0]).days >= gap
+        carry = [t for t in carry if (day - t.txn_date).days <= PARTS_WITHIN_DAYS]
         regular: list[models.Transaction] = []
         if free and (spaced or said_regular):
             base = sum(abs(t.amount_cents) for t in said_regular)
             regular = _best_parts(free, base, period.cents) or []
+            if not regular and not said_regular and carry:
+                # With the parts left from the day or two before, is it the repayment?
+                joined = _best_parts(carry + free, 0, period.cents) or []
+                if any(t in free for t in joined):
+                    regular = joined
         for t in free:
             extra[t.id] = t not in regular
+        for t in regular:
+            extra[t.id] = False
         if said_regular or regular:
-            last_regular = day
+            last_regular = (day, period.every)
+            carry = []
+        else:
+            carry += free
     return extra
 
 
+def _day_amounts(legs: list[models.Transaction]) -> dict[dt.date, list[int]]:
+    """Each day's candidate repayments: the day's total, and each leg on its own."""
+    days: dict[dt.date, list[models.Transaction]] = {}
+    for t in legs:
+        days.setdefault(t.txn_date, []).append(t)
+    return {
+        day: sorted({sum(abs(t.amount_cents) for t in ts), *(abs(t.amount_cents) for t in ts)})
+        for day, ts in days.items()
+    }
+
+
+def _how_often(days: list[dt.date]) -> str | None:
+    if len(days) < 2:
+        return None
+    span = (days[-1] - days[0]).days
+    for every in ("weekly", "fortnightly", "monthly"):
+        length = EVERY_DAYS[every]
+        periods = int(span / length) + 1
+        paid = {int((d - days[0]).days / length) for d in days}
+        if periods >= 2 and len(paid) / periods >= COVERED_SHARE:
+            return every
+    return None
+
+
 def suggest(legs: list[models.Transaction], today: dt.date) -> Period | None:
-    """A regular repayment the recent history shows: the amount most of the recent
-    repayments are near, how often they go, and since when. For a person to confirm."""
+    """A regular repayment the recent history shows: the amount the latest repayments are
+    near (a day counted once, whether paid in one leg or several), how often they go,
+    and since when. For a person to confirm."""
     recent = [t for t in legs if t.txn_date >= today - dt.timedelta(days=SUGGEST_FROM_DAYS)]
-    if len(recent) < SUGGEST_AT_LEAST:
+    days = _day_amounts(recent)
+    if len(days) < SUGGEST_AT_LEAST:
         return None
-    days: dict[dt.date, int] = {}
-    for t in recent:
-        days[t.txn_date] = days.get(t.txn_date, 0) + abs(t.amount_cents)
-    amounts = [abs(t.amount_cents) for t in recent] + list(days.values())
-    support = {a: sum(1 for b in amounts if _near(b, a)) for a in amounts}
+    latest = sorted(days, reverse=True)[: SUGGEST_AT_LEAST * 2]
+    candidates = {a for day in latest for a in days[day]}
+    # The amount most of the latest days are near; a tie goes to the larger, so two
+    # partners' halves don't outvote the whole repayment.
+    support = {
+        a: sum(1 for day in latest if any(_near(b, a) for b in days[day])) for a in candidates
+    }
     usual = max(support, key=lambda a: (support[a], a))
-    on = sorted(
-        {t.txn_date for t in recent if _near(abs(t.amount_cents), usual)}
-        | {d for d, total in days.items() if _near(total, usual)}
-    )
-    if len(on) < SUGGEST_AT_LEAST:
+    if support[usual] < SUGGEST_AT_LEAST:
         return None
-    gaps = [(b - a).days for a, b in zip(on, on[1:], strict=False)]
-    gap = statistics.median(gaps)
-    every = "weekly" if gap <= 10 else "fortnightly" if gap <= 21 else "monthly"
+    on = sorted(day for day, amounts in days.items() if any(_near(b, usual) for b in amounts))
+    # How often: the shortest schedule nearly every period of which has a repayment --
+    # extras between them don't make it more often, and a missed week doesn't make it
+    # less.
+    every = _how_often(on)
+    if every is None:
+        return None
     cents = int(round(statistics.median(
-        [a for a in amounts if _near(a, usual)]
+        min((b for b in days[day] if _near(b, usual)), key=lambda b: abs(b - usual)) for day in on
     )))
-    # Since when: back through the history while the repayments stay near this amount.
+    # Since when: back through the whole history while repayments near this amount keep
+    # coming at least once every two periods; an extra in between doesn't end it.
     since = on[0]
-    for t in sorted(legs, key=lambda t: t.txn_date, reverse=True):
-        if t.txn_date >= since:
+    for day, amounts in sorted(_day_amounts(legs).items(), reverse=True):
+        if day >= since:
             continue
-        if _near(abs(t.amount_cents), cents):
-            since = t.txn_date
-        elif (on[0] - t.txn_date).days > EVERY_DAYS[every] * 2:
+        if any(_near(b, cents) for b in amounts):
+            since = day
+        elif (since - day).days > EVERY_DAYS[every] * 2:
             break
     return Period(since, cents, every)
 
@@ -229,23 +287,26 @@ def suggest(legs: list[models.Transaction], today: dt.date) -> Period | None:
 def suggestion_for(
     db: Session, account: models.Account, today: dt.date | None = None
 ) -> Period | None:
-    """What to offer on a home loan's account: a regular repayment when none is set, or a
-    new one when the recent repayments have moved away from the one set."""
+    """What to offer on a home loan's account: a regular repayment when none is set; once
+    one is, a new one only when the set repayment has stopped being paid -- not while it
+    still is, whatever else is paid alongside it."""
     if account.type != "home_loan":
         return None
     today = today or dt.date.today()
     legs = paying_legs(db, account.household_id, [account.id]).get(account.id, [])
-    found = suggest(legs, today)
-    if found is None:
-        return None
     schedule = schedule_of(account)
     if not schedule:
-        return found
-    now = in_force(schedule, today)
-    if _near(found.cents, now.cents) and found.every == now.every:
+        return suggest(legs, today)
+    now = in_force(schedule, today) or schedule[-1]
+    window = dt.timedelta(days=EVERY_DAYS[now.every] * 2 + LATE_ALLOWANCE_DAYS)
+    lately = [t for t in legs if t.txn_date >= today - window]
+    flags = sort_legs(lately, schedule, {})
+    if not lately or any(not flags[t.id] for t in lately):
+        return None  # still paid (or nothing to go by)
+    since = now.since or dt.date.min
+    found = suggest([t for t in legs if t.txn_date >= since], today)
+    if found is None or (_near(found.cents, now.cents) and found.every == now.every):
         return None
-    if now.since and found.since and found.since <= now.since:
-        found = Period(now.since, found.cents, found.every)
     return found
 
 
@@ -300,26 +361,40 @@ def sort_repayments(db: Session, household_id: str) -> int:
     return changed
 
 
-def _belongs(
-    t: models.Transaction,
-    loan: models.Account,
-    schedule: list[Period],
-    payers: set[str],
-    merchants: set[str],
-) -> bool:
-    """Whether a debit not linked to anything is this loan's repayment: it carries the
-    loan's own wording, or it is from an account that paid the loan, by the same
-    description, near the amount."""
+def _amount_on(schedule: list[Period], day: dt.date) -> int:
+    return (in_force(schedule, day) or schedule[0]).cents
+
+
+def _claims(
+    loose: list[models.Transaction],
+    loans: dict[str, tuple[models.Account, list[Period], set[str], set[str]]],
+) -> dict[str, str]:
+    """Which loan each debit not linked to anything is the repayment of, if any -- one
+    loan each: by a loan's own wording first, else from an account that paid it, by the
+    same description, near the amount (the nearest loan's, when several fit)."""
     from .transfers import has_phrase, wording_of  # noqa: PLC0415 - transfers imports this
 
-    words = wording_of(t.raw_description or "")
-    if any(has_phrase(words, p) for p in loan.transfer_wording or []):
-        return True
-    return (
-        t.account_id in payers
-        and t.merchant in merchants
-        and _near(abs(t.amount_cents), in_force(schedule, t.txn_date).cents)
-    )
+    claimed: dict[str, str] = {}
+    for t in loose:
+        words = wording_of(t.raw_description or "")
+        worded = [
+            loan_id
+            for loan_id, (loan, _, _, _) in sorted(loans.items())
+            if any(has_phrase(words, p) for p in loan.transfer_wording or [])
+        ]
+        if worded:
+            claimed[t.id] = worded[0]
+            continue
+        fits = sorted(
+            (abs(abs(t.amount_cents) - _amount_on(schedule, t.txn_date)), loan_id)
+            for loan_id, (_, schedule, payers, merchants) in loans.items()
+            if t.account_id in payers
+            and t.merchant in merchants
+            and _near(abs(t.amount_cents), _amount_on(schedule, t.txn_date))
+        )
+        if fits:
+            claimed[t.id] = fits[0][1]
+    return claimed
 
 
 @dataclass
@@ -377,12 +452,19 @@ def loan_bills(
             models.Transaction.txn_date <= today,
         )
     ).scalars().all()
+    loans = {
+        loan_id: (
+            scheduled[loan_id],
+            schedule_of(scheduled[loan_id]),
+            {t.account_id for t in legs},
+            {t.merchant for t in legs if t.merchant},
+        )
+        for loan_id, legs in legs_by_loan.items()
+    }
+    claimed = _claims(list(loose), loans)
     for loan_id, legs in legs_by_loan.items():
-        loan = scheduled[loan_id]
-        schedule = schedule_of(loan)
-        payers = {t.account_id for t in legs}
-        merchants = {t.merchant for t in legs if t.merchant}
-        mine = [t for t in loose if _belongs(t, loan, schedule, payers, merchants)]
+        loan, schedule, _, _ = loans[loan_id]
+        mine = [t for t in loose if claimed.get(t.id) == loan_id]
         everything = sorted(
             [t for t in legs if start <= t.txn_date <= today] + mine,
             key=lambda t: (t.txn_date, t.id),
@@ -393,7 +475,7 @@ def loan_bills(
         regular_days = sorted({t.txn_date for t in everything if not flags[t.id]})
         if not regular_days:
             continue
-        now = in_force(schedule, today)
+        now = in_force(schedule, today) or schedule[-1]
         bills.append(
             LoanBill(
                 loan=loan,
@@ -404,5 +486,15 @@ def loan_bills(
                 last_date=regular_days[-1],
                 occurrences=len(regular_days),
             )
+        )
+    if covered:
+        # A split repayment's parts are what the bills by description read: covered too.
+        covered.update(
+            db.execute(
+                select(models.Transaction.id).where(
+                    models.Transaction.household_id == household_id,
+                    models.Transaction.split_parent_id.in_(list(covered)),
+                )
+            ).scalars()
         )
     return bills, covered

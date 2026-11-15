@@ -105,7 +105,13 @@ export function AccountDialog({ account, onClose, onDone }: Props) {
       const recounted = !rekinded
         ? ""
         : sameKind && kindForType(type) === "loan_repayment"
-          ? ` ${plural(rekinded, "loan repayment")} now filed as ${type === "home_loan" ? "Mortgage" : "Loan repayments"}.`
+          ? ` ${plural(rekinded, "loan repayment")} now filed as ${
+              type !== "home_loan"
+                ? "Loan repayments"
+                : cents !== null
+                  ? "Mortgage or Extra repayments"
+                  : "Mortgage"
+            }.`
           : ` ${plural(rekinded, "linked transfer")} changed to ${TRANSFER_KIND_LABELS[kindForType(type)]}.`;
       onDone(
         scanFailed
@@ -192,6 +198,7 @@ export function AccountDialog({ account, onClose, onDone }: Props) {
                   onChange={(e) => setAmount(e.target.value)}
                   placeholder="e.g. 1,254.92"
                   aria-invalid={amountProblem !== null}
+                  aria-describedby={`${fid}-repayment-help${amountProblem ? ` ${fid}-amount-error` : ""}`}
                 />
               </div>
               <div>
@@ -218,7 +225,9 @@ export function AccountDialog({ account, onClose, onDone }: Props) {
                 />
               </div>
             </div>
-            {amountProblem && <div className="error">{amountProblem}</div>}
+            <div id={`${fid}-amount-error`} role="status" aria-live="polite">
+              {amountProblem && <div className="error">{amountProblem}</div>}
+            </div>
             {earlier.length > 0 && (
               <p className="muted" style={{ margin: "4px 0 0", fontSize: 13 }}>
                 Before that:{" "}
@@ -232,7 +241,7 @@ export function AccountDialog({ account, onClose, onDone }: Props) {
                 .
               </p>
             )}
-            <p className="muted" style={{ margin: "4px 0 0", fontSize: 13 }}>
+            <p id={`${fid}-repayment-help`} className="muted" style={{ margin: "4px 0 0", fontSize: 13 }}>
               A repayment near this amount is the regular one; any other is an extra repayment.
               After a rate rise, enter the new amount and the date it started. Leave the amount
               empty to count every repayment as regular.
