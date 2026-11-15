@@ -118,6 +118,8 @@ class Account(Base, TimestampMixin):
     # this one ("By Authority To Cc"): set by the household or learned from a suggestion
     # they accepted. Lower case. None = none yet.
     transfer_wording: Mapped[list | None] = mapped_column(JSON, nullable=True)
+    # A loan's regular repayment, as periods: [{"since", "cents", "every"}] (0.18.1).
+    repayment_schedule: Mapped[list | None] = mapped_column(JSON, nullable=True)
 
 
 class Category(Base, TimestampMixin):

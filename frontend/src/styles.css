@@ -1475,3 +1475,18 @@ tr.rule-new > td {
   overflow: auto;
   margin-bottom: 12px;
 }
+
+fieldset.repayment {
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  padding: 10px 12px 12px;
+}
+fieldset.repayment legend {
+  font-size: 13px;
+  color: var(--muted);
+  padding: 0 4px;
+}
+fieldset.repayment .notice {
+  margin: 0 0 8px;
+}
+

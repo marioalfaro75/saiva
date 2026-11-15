@@ -17,7 +17,6 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from .. import models
-from ..constants import LOAN_REPAYMENT
 from . import repayments
 from .dashboard import _spendable_leaves
 
@@ -105,14 +104,12 @@ def detect(
     leaves = _spendable_leaves(db, household_id, start, today)
 
     # merchant -> {date -> summed amount}; collapses splits and same-day charges.
-    # A loan repayment is its own series, below: by the loan, regular ones only -- and
-    # so are the same repayment's debits not linked to the loan yet.
-    loans, loan_merchants = repayments.loan_bills(db, household_id, start, today)
+    # A loan with its regular repayment set is its own series, below -- its debits not
+    # linked yet too. Any other loan's repayments are found here, by description.
+    loans, covered = repayments.loan_bills(db, household_id, start, today)
     by_merchant: dict[str, dict[dt.date, int]] = {}
     for t in leaves:
-        if not t.merchant or t.transfer_kind == LOAN_REPAYMENT:
-            continue
-        if t.transfer_group_id is None and t.merchant in loan_merchants:
+        if not t.merchant or t.id in covered:
             continue
         per_day = by_merchant.setdefault(t.merchant, {})
         per_day[t.txn_date] = per_day.get(t.txn_date, 0) + t.amount_cents
@@ -183,7 +180,7 @@ def _repayment_series(
     for bill in loans:
         if bill.occurrences < REPAYMENT_OCCURRENCES:
             continue
-        classified = _classify(bill.cadence)
+        classified = _classify(repayments.EVERY_DAYS[bill.every])
         if classified is None:
             continue
         cadence, interval = classified

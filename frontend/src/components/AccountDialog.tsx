@@ -2,9 +2,17 @@ import { useId, useState } from "react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 
 import { api, ApiError } from "../api/client";
-import type { Account, TransferScan } from "../api/types";
+import type { Account, RepaymentEvery, RepaymentPeriod, TransferScan } from "../api/types";
+import { formatCents, formatDate } from "../format";
 import { useDismissable } from "../hooks/useDismissable";
-import { ACCOUNT_TYPES, accountTypeLabel, wordingProblem } from "./accountTypes";
+import {
+  ACCOUNT_TYPES,
+  accountTypeLabel,
+  EVERY_LABELS,
+  LOAN_TYPES,
+  parseDollars,
+  wordingProblem,
+} from "./accountTypes";
 import { kindForType, TRANSFER_KIND_LABELS } from "./transferLabels";
 
 interface Props {
@@ -34,6 +42,31 @@ export function AccountDialog({ account, onClose, onDone }: Props) {
   const [type, setType] = useState(account.type);
   const [institution, setInstitution] = useState(account.institution ?? "");
   const [wording, setWording] = useState((account.transfer_wording ?? []).join("\n"));
+  // The regular repayment: earlier periods kept as they are; this one edited here.
+  const schedule = account.repayment_schedule ?? [];
+  const current = schedule.length ? schedule[schedule.length - 1] : null;
+  const earlier = schedule.slice(0, -1);
+  const [amount, setAmount] = useState(current ? (current.cents / 100).toFixed(2) : "");
+  const [every, setEvery] = useState<RepaymentEvery>(current?.every ?? "weekly");
+  const [since, setSince] = useState(current?.since ?? "");
+  const suggestion = account.repayment_suggestion ?? null;
+  const takeSuggestion = (s: RepaymentPeriod) => {
+    setAmount((s.cents / 100).toFixed(2));
+    setEvery(s.every);
+    setSince(s.since ?? "");
+  };
+  const isLoan = LOAN_TYPES.includes(type);
+  const cents = amount.trim() ? parseDollars(amount) : null;
+  const amountProblem =
+    isLoan && amount.trim() && cents === null ? "Enter the repayment as an amount, e.g. 1,254.92." : null;
+  const repayment = (): RepaymentPeriod[] => {
+    if (cents === null) return [];
+    const now: RepaymentPeriod = { since: since || null, cents, every };
+    // The same date as the period being edited corrects it; a new date starts a new one
+    // from then (a rate rise), keeping what came before.
+    const keep = current && (current.since ?? "") !== (since || "") ? [...earlier, current] : earlier;
+    return [...keep.filter((p) => (p.since ?? "") !== (since || "")), now];
+  };
 
   const phrases = wording
     .split("\n")
@@ -52,6 +85,7 @@ export function AccountDialog({ account, onClose, onDone }: Props) {
         type,
         institution: institution.trim() || null,
         transfer_wording: phrases,
+        ...(isLoan ? { repayment_schedule: repayment() } : {}),
       });
       const rekinded = saved.transfers_rekinded ?? 0;
       if (!wordingChanged && !typeChanged) return { scan: null, scanFailed: false, rekinded };
@@ -135,6 +169,76 @@ export function AccountDialog({ account, onClose, onDone }: Props) {
             Saiva knows the money went to or came from {account.name}.
           </p>
         </div>
+        {isLoan && (
+          <fieldset className="field repayment">
+            <legend>Regular repayment</legend>
+            {suggestion && (
+              <p className="notice" role="status">
+                Your repayments look like {formatCents(suggestion.cents)}{" "}
+                {EVERY_LABELS[suggestion.every].toLowerCase()}
+                {suggestion.since ? ` since ${formatDate(suggestion.since)}` : ""}.{" "}
+                <button type="button" className="btn btn-ghost" onClick={() => takeSuggestion(suggestion)}>
+                  Use this
+                </button>
+              </p>
+            )}
+            <div className="row">
+              <div>
+                <label htmlFor={`${fid}-amount`}>Amount</label>
+                <input
+                  id={`${fid}-amount`}
+                  inputMode="decimal"
+                  value={amount}
+                  onChange={(e) => setAmount(e.target.value)}
+                  placeholder="e.g. 1,254.92"
+                  aria-invalid={amountProblem !== null}
+                />
+              </div>
+              <div>
+                <label htmlFor={`${fid}-every`}>How often</label>
+                <select
+                  id={`${fid}-every`}
+                  value={every}
+                  onChange={(e) => setEvery(e.target.value as RepaymentEvery)}
+                >
+                  {(Object.keys(EVERY_LABELS) as RepaymentEvery[]).map((k) => (
+                    <option key={k} value={k}>
+                      {EVERY_LABELS[k]}
+                    </option>
+                  ))}
+                </select>
+              </div>
+              <div>
+                <label htmlFor={`${fid}-since`}>From</label>
+                <input
+                  id={`${fid}-since`}
+                  type="date"
+                  value={since}
+                  onChange={(e) => setSince(e.target.value)}
+                />
+              </div>
+            </div>
+            {amountProblem && <div className="error">{amountProblem}</div>}
+            {earlier.length > 0 && (
+              <p className="muted" style={{ margin: "4px 0 0", fontSize: 13 }}>
+                Before that:{" "}
+                {earlier
+                  .map(
+                    (p) =>
+                      `${formatCents(p.cents)} ${EVERY_LABELS[p.every].toLowerCase()}` +
+                      (p.since ? ` from ${formatDate(p.since)}` : ""),
+                  )
+                  .join("; ")}
+                .
+              </p>
+            )}
+            <p className="muted" style={{ margin: "4px 0 0", fontSize: 13 }}>
+              A repayment near this amount is the regular one; any other is an extra repayment.
+              After a rate rise, enter the new amount and the date it started. Leave the amount
+              empty to count every repayment as regular.
+            </p>
+          </fieldset>
+        )}
         <p className="muted" style={{ fontSize: 13 }}>
           Account number:{" "}
           {account.bank_identifier ?? "none yet (it's recorded when you import a statement)"}
@@ -152,7 +256,7 @@ export function AccountDialog({ account, onClose, onDone }: Props) {
           </button>
           <button
             className="btn btn-primary"
-            disabled={save.isPending || !name.trim() || problem !== null}
+            disabled={save.isPending || !name.trim() || problem !== null || amountProblem !== null}
             onClick={() => save.mutate()}
           >
             {save.isPending ? "Saving…" : "Save"}

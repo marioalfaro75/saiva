@@ -1,4 +1,5 @@
 import type {
+  RepaymentPeriod,
   TransferAccept,
   TransferGroup,
   TransferKind,
@@ -203,6 +204,7 @@ export const api = {
       type?: string;
       institution?: string | null;
       transfer_wording?: string[];
+      repayment_schedule?: RepaymentPeriod[];
     },
   ) =>
     request<Account & { transfers_rekinded?: number }>(`/accounts/${id}`, {

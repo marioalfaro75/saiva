@@ -33,3 +33,16 @@ export function wordingProblem(phrases: string[]): string | null {
   }
   return null;
 }
+
+export const LOAN_TYPES = ["home_loan", "personal_loan"];
+
+export const EVERY_LABELS = { weekly: "Weekly", fortnightly: "Fortnightly", monthly: "Monthly" };
+
+/** "1,254.92" or "$1254.9" as cents; null when it is not an amount above zero. */
+export function parseDollars(text: string): number | null {
+  const clean = text.replace(/[$,\s]/g, "");
+  if (!/^\d+(\.\d{1,2})?$/.test(clean)) return null;
+  const cents = Math.round(Number(clean) * 100);
+  return cents > 0 ? cents : null;
+}
+

@@ -108,6 +108,14 @@ AccountType = Literal[
 ]
 
 
+class RepaymentPeriodIn(BaseModel):
+    """A home loan's regular repayment from a date: a rate rise is a new one."""
+
+    since: dt.date | None = None  # None: from the start
+    cents: int = Field(gt=0, le=10_000_000_000)  # up to $100 million a repayment
+    every: Literal["weekly", "fortnightly", "monthly"]
+
+
 class AccountUpdate(BaseModel):
     name: str | None = Field(default=None, min_length=1, max_length=120)
     # Was a free string: any word was saved as an account's type, and nothing that
@@ -121,6 +129,8 @@ class AccountUpdate(BaseModel):
     transfer_wording: list[Annotated[str, Field(min_length=2, max_length=80)]] | None = Field(
         default=None, max_length=30
     )
+    # A home loan's regular repayment; [] or null clears it.
+    repayment_schedule: list[RepaymentPeriodIn] | None = Field(default=None, max_length=50)
 
 
 class AccountOut(BaseModel):
@@ -137,6 +147,10 @@ class AccountOut(BaseModel):
     # The account number an import recorded, which links transfers that mention it.
     bank_identifier: str | None = None
     transfer_wording: list[str] = []
+    repayment_schedule: list[RepaymentPeriodIn] = []
+    # For a home loan: a regular repayment the history shows, when none is set or the
+    # recent repayments have moved away from it. For a person to confirm.
+    repayment_suggestion: RepaymentPeriodIn | None = None
 
 
 class AccountUpdateOut(AccountOut):

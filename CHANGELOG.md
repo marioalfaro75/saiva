@@ -7,22 +7,27 @@ All notable changes to Saiva are documented here. The project follows
 
 ## [0.18.1] — 2026-11-15
 
-Apply it with **Update now** in Settings.
+Apply it with **Update now** in Settings. Then set your home loan's regular repayment on
+**Accounts → Edit** (Saiva suggests it from your history: one click).
 
 ### Added
 
-- **Regular and extra home loan repayments.** Saiva learns your usual repayment — its
-  amount and how often it goes, weekly, fortnightly or monthly — and files each one: the
-  regular one as **Mortgage**, an extra one as **Extra repayments**. A one-off amount, or
-  a second payment in the same week, is extra. A repayment a few days late (a public
-  holiday) or a missed week is still regular, and a repayment paid from two accounts on
-  the same day counts as one. When the usual changes — a rate rise, or paying fortnightly
-  instead of monthly — the new one becomes the usual. Both count as spending.
-- **Say so yourself.** The ⇄ window on a repayment lets you mark it as the regular one
-  or extra. Saiva keeps your choice and learns from it.
+- **Your regular repayment.** On **Accounts → Edit** for a home loan, enter its regular
+  repayment — the amount, how often (weekly, fortnightly or monthly), and from when.
+  Saiva suggests it from your repayments, and says so again if they change (after a rate
+  rise, say). After a rise, enter the new amount and the date it started; earlier
+  repayments stay as they were.
+- **Regular and extra repayments.** With the regular repayment set, a repayment near it is
+  filed as **Mortgage**, once a week (or fortnight, or month); any other — a lump sum, or
+  a second payment within days — as **Extra repayments**. A repayment a few days late or
+  early, a moved payment day, a missed week, or one paid from two accounts on the same
+  day is still regular. Both count as spending. Until it is set, every repayment is
+  regular, as before.
+- **Say so yourself.** The ⇄ window on a repayment lets you mark it as the regular one or
+  extra. Your choice stays.
 - **Your repayment on Bills**, named for the loan ("Westpac home loan repayment"), with
-  its usual amount and next due date. Extra repayments are not a bill.
-- An extra repayment is tagged "Extra repayment → Westpac home loan".
+  its amount and next due date — counting the debits the loan's statement doesn't cover
+  yet. An extra repayment is tagged "Extra repayment → Westpac home loan".
 
 ### Changed
 

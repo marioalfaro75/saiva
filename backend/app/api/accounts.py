@@ -37,7 +37,17 @@ def _to_out(db: Session, account: models.Account) -> schemas.AccountOut:
         txn_count=int(count or 0),
         bank_identifier=account.bank_identifier,
         transfer_wording=list(account.transfer_wording or []),
+        repayment_schedule=[
+            schemas.RepaymentPeriodIn(**p.as_json())
+            for p in repayments.schedule_of(account)
+        ],
+        repayment_suggestion=_suggestion(db, account),
     )
+
+
+def _suggestion(db: Session, account: models.Account) -> schemas.RepaymentPeriodIn | None:
+    found = repayments.suggestion_for(db, account)
+    return schemas.RepaymentPeriodIn(**found.as_json()) if found else None
 
 
 # Shorter wording than this matches too much: "cc" would read a payment to the card into
@@ -72,6 +82,15 @@ def _clean_wording(phrases: list[str]) -> list[str]:
             seen.add(key)
             kept.append(text)
     return kept
+
+
+def _clean_schedule(periods: list[dict]) -> list[dict] | None:
+    """Oldest first, one period a date -- a second for the same date replaces the first;
+    an undated one is "from the start". Empty is none."""
+    by_since: dict[str | None, dict] = {}
+    for p in periods:
+        by_since[p.get("since")] = p
+    return sorted(by_since.values(), key=lambda p: p.get("since") or "") or None
 
 
 def _get_owned(db: Session, account_id: str, household_id: str) -> models.Account:
@@ -128,9 +147,11 @@ def update_account(
 ) -> schemas.AccountUpdateOut:
     account = _get_owned(db, account_id, user.household_id)
     old_type = account.type
-    for key, value in payload.model_dump(exclude_unset=True).items():
+    for key, value in payload.model_dump(exclude_unset=True, mode="json").items():
         if key == "transfer_wording":
             value = _clean_wording(value or [])
+        elif key == "repayment_schedule":
+            value = _clean_schedule(value or [])
         elif value is None and key in ("name", "type"):
             continue  # an explicit null is "leave it": these columns are not nullable
         setattr(account, key, value)
@@ -140,6 +161,7 @@ def update_account(
     if account.type != old_type:
         rekinded = transfers.rekind_into(db, account, old_type)
         transfers.unfile_cash_deposits(db, account)
+    if account.type != old_type or "repayment_schedule" in payload.model_fields_set:
         db.flush()
         repayments.sort_repayments(db, user.household_id)
     db.commit()

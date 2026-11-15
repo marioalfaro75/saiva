@@ -1,5 +1,5 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { api, ApiError } from "../api/client";
@@ -212,6 +212,84 @@ describe("AccountDialog", () => {
         "Saved. 2 loan repayments now filed as Loan repayments. 0 transfers linked, 0 to review.",
       ),
     );
+  });
+
+});
+
+describe("AccountDialog: a home loan's regular repayment", () => {
+  const LOAN: Account = { ...ACCOUNT, id: "l1", name: "Westpac home loan", type: "home_loan" };
+  const amount = () => screen.getByRole("textbox", { name: "Amount" });
+
+  it("is offered only for a loan", () => {
+    show();
+    expect(screen.queryByRole("group", { name: "Regular repayment" })).toBeNull();
+    fireEvent.change(screen.getByRole("combobox", { name: "Type" }), { target: { value: "home_loan" } });
+    expect(screen.getByRole("group", { name: "Regular repayment" })).toBeInTheDocument();
+  });
+
+  it("takes the suggestion with one click, and saves it", async () => {
+    const update = vi.spyOn(api, "updateAccount").mockResolvedValue(LOAN);
+    show({
+      ...LOAN,
+      repayment_suggestion: { since: "2026-06-05", cents: 125492, every: "weekly" },
+    });
+    expect(screen.getByText(/Your repayments look like \$1,254\.92 weekly since/)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Use this" }));
+    expect(amount()).toHaveValue("1254.92");
+    save();
+    await waitFor(() => expect(onDone).toHaveBeenCalled());
+    expect(update).toHaveBeenCalledWith(
+      "l1",
+      expect.objectContaining({
+        repayment_schedule: [{ since: "2026-06-05", cents: 125492, every: "weekly" }],
+      }),
+    );
+  });
+
+  it("corrects the amount in place, or starts a new one from a new date", async () => {
+    const update = vi.spyOn(api, "updateAccount").mockResolvedValue(LOAN);
+    const set = { ...LOAN, repayment_schedule: [{ since: null, cents: 125492, every: "weekly" as const }] };
+    show(set);
+    fireEvent.change(amount(), { target: { value: "1,260.00" } });
+    save();
+    await waitFor(() => expect(update).toHaveBeenCalledTimes(1));
+    expect(update.mock.calls[0][1].repayment_schedule).toEqual([
+      { since: null, cents: 126000, every: "weekly" },
+    ]);
+
+    cleanup();
+    show(set);
+    fireEvent.change(amount(), { target: { value: "1631.39" } });
+    fireEvent.change(screen.getByLabelText("From"), { target: { value: "2026-10-12" } });
+    save();
+    await waitFor(() => expect(update).toHaveBeenCalledTimes(2));
+    expect(update.mock.calls[1][1].repayment_schedule).toEqual([
+      { since: null, cents: 125492, every: "weekly" },
+      { since: "2026-10-12", cents: 163139, every: "weekly" },
+    ]);
+  });
+
+  it("shows what came before, and an empty amount clears it", async () => {
+    const update = vi.spyOn(api, "updateAccount").mockResolvedValue(LOAN);
+    show({
+      ...LOAN,
+      repayment_schedule: [
+        { since: null, cents: 125492, every: "weekly" },
+        { since: "2026-10-12", cents: 163139, every: "weekly" },
+      ],
+    });
+    expect(screen.getByText(/Before that: \$1,254\.92 weekly/)).toBeInTheDocument();
+    fireEvent.change(amount(), { target: { value: "" } });
+    save();
+    await waitFor(() => expect(update).toHaveBeenCalled());
+    expect(update.mock.calls[0][1].repayment_schedule).toEqual([]);
+  });
+
+  it("will not save an amount it cannot read", () => {
+    show(LOAN);
+    fireEvent.change(amount(), { target: { value: "about 1200" } });
+    expect(screen.getByText(/Enter the repayment as an amount/)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Save" })).toBeDisabled();
   });
 });
 
