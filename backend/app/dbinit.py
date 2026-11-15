@@ -175,10 +175,7 @@ def _rename_extra_repayments(db: Engine) -> None:
     home loan repayment under. Its key moves with it; its name too, unless the
     household renamed it or already has a category of the new name. Every start, and
     only ever finds a household an older image made."""
-    inspector = inspect(db)
-    if "categories" not in inspector.get_table_names():
-        return
-    if "system_key" not in {c["name"] for c in inspector.get_columns("categories")}:
+    if not _shaped_for(db, Category):
         return
     with Session(db) as session:
         old = session.execute(
@@ -309,6 +306,23 @@ def _mark_automatic_categories(db: Engine) -> None:
             )
 
 
+def _shaped_for(db: Engine, *entities: type) -> bool:
+    """Whether every column these models map is in the database. A step that loads
+    whole rows needs them all: under an older image's migrations -- or a test standing in
+    for one -- a column a later revision adds is missing, and the step is skipped rather
+    than stopping the start."""
+    inspector = inspect(db)
+    tables = set(inspector.get_table_names())
+    for entity in entities:
+        table = entity.__table__  # type: ignore[attr-defined]
+        if table.name not in tables:
+            return False
+        present = {c["name"] for c in inspector.get_columns(table.name)}
+        if not {c.name for c in table.columns} <= present:
+            return False
+    return True
+
+
 def _apply_rules_once(db: Engine) -> None:
     """Apply each household's rules to its transactions, once.
 
@@ -321,10 +335,7 @@ def _apply_rules_once(db: Engine) -> None:
 
     Skipped, like the others, when the column is not there yet.
     """
-    inspector = inspect(db)
-    if "households" not in inspector.get_table_names():
-        return
-    if "rules_applied_at" not in {c["name"] for c in inspector.get_columns("households")}:
+    if not _shaped_for(db, Household, Transaction, Category, Account):
         return
     with Session(db) as session:
         pending = (
@@ -403,9 +414,9 @@ def _classify_transfers_once(db: Engine) -> None:
     households.transfers_classified_at; a failure is logged and retried at the next
     start, never a reason not to start.
     """
-    inspector = inspect(db)
-    if "households" not in inspector.get_table_names():
+    if not _shaped_for(db, Household, Transaction, Category, Account):
         return
+    inspector = inspect(db)
     if "transfers_classified_at" not in {c["name"] for c in inspector.get_columns("households")}:
         return
     if "transfer_kind" not in {c["name"] for c in inspector.get_columns("transactions")}:

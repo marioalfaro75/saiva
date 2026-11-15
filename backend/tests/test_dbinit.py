@@ -29,6 +29,7 @@ from __future__ import annotations
 import datetime as dt
 import gzip
 import re
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -668,3 +669,33 @@ def test_a_start_applies_rules_made_before_rules_applied_themselves(cold_start: 
         filed = db.get(models.Transaction, txn_id)
         assert filed is not None and filed.category_id == loan_id
         assert db.execute(select(models.Household.rules_applied_at)).scalar_one() is not None
+
+
+@pytest.mark.parametrize("drop_newest", [1, 2, 3])
+def test_start_up_under_an_older_images_migrations_skips_what_it_cannot_load(
+    tmp_path: Path, drop_newest: int
+) -> None:
+    """A start-up step that loads whole rows needs every column the models map. Under an
+    older image's migrations -- what the rollback tests stand in for -- a newer column is
+    missing: the step is skipped, never the start. A database two revisions behind once
+    failed here because one step checked only the column it was named for."""
+    backend = Path(__file__).resolve().parents[1]
+    migrations = backend / "migrations"
+
+    def config(location: Path) -> Config:
+        cfg = Config(str(backend / "alembic.ini"))
+        cfg.set_main_option("script_location", str(location))
+        return cfg
+
+    script = ScriptDirectory.from_config(config(migrations))
+    revisions = [r.revision for r in reversed(list(script.walk_revisions()))]
+    older = tmp_path / "migrations"
+    shutil.copytree(migrations, older)
+    for revision in revisions[-drop_newest:]:
+        for path in (older / "versions").glob(f"{revision}_*.py"):
+            path.unlink()
+    engine = create_engine(f"sqlite+pysqlite:///{tmp_path}/older.db")
+
+    state = dbinit.main(db=engine, cfg=config(older))
+
+    assert state.image_head == revisions[-drop_newest - 1]
