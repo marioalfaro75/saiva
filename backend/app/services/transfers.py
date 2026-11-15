@@ -39,6 +39,7 @@ from ..constants import (
     OWN_ACCOUNTS,
     TRANSFER_CATEGORY,
 )
+from . import repayments
 from .categorise import ML_MAX_CONFIDENCE, RULE_CONFIDENCE, set_by_person
 
 WINDOW_DAYS = 3
@@ -461,12 +462,17 @@ def apply_kind(
         t.transfer_group_id = group
         t.transfer_kind = kind
         t.is_transfer = not (kind == LOAN_REPAYMENT and t is outflow)
-        if category is not None and _may_refile(t, legacy) and t.category_id != category:
-            t.category_id = category
-            # Automatic, not a person's: the score a row carried was for the category
-            # this replaces, and a person's 1.0 for Coffee left on it would read as a
-            # person's choice of Credit-card payments.
-            t.confidence = ML_MAX_CONFIDENCE
+        if category is not None and _may_refile(t, legacy):
+            if t.category_id != category:
+                t.category_id = category
+                # Automatic, not a person's: the score a row carried was for the category
+                # this replaces, and a person's 1.0 for Coffee left on it would read as a
+                # person's choice of Credit-card payments.
+                t.confidence = ML_MAX_CONFIDENCE
+            elif t.confidence is not None and t.confidence > ML_MAX_CONFIDENCE:
+                # A rule's (rules never reach a linked leg): the link files it now, so it
+                # can be sorted -- a repayment into Mortgage or Extra repayments, say.
+                t.confidence = ML_MAX_CONFIDENCE
     if relinking:
         # A leg split after it was linked: its parts are what the totals count, so they
         # are counted the way the kind now says. Their own categories stay theirs.
@@ -582,6 +588,8 @@ def classify_transfers(
         pairing.possible,
         income_ids,
     )
+    db.flush()
+    repayments.sort_repayments(db, household_id)
     db.commit()
     return scan
 

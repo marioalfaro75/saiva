@@ -1,4 +1,5 @@
 import type {
+  RepaymentPeriod,
   TransferAccept,
   TransferGroup,
   TransferKind,
@@ -203,6 +204,7 @@ export const api = {
       type?: string;
       institution?: string | null;
       transfer_wording?: string[];
+      repayment_schedule?: RepaymentPeriod[];
     },
   ) =>
     request<Account & { transfers_rekinded?: number }>(`/accounts/${id}`, {
@@ -228,6 +230,11 @@ export const api = {
   linkCandidates: (txnId: string) => request<Transaction[]>(`/transfers/candidates/${txnId}`),
   unlinkTransfer: (groupId: string) =>
     request<{ updated: number }>(`/transfers/${groupId}/unlink`, { method: "POST" }),
+  setRepayment: (groupId: string, extra: boolean) =>
+    request<TransferGroup>(`/transfers/${groupId}/repayment`, {
+      method: "POST",
+      body: JSON.stringify({ extra }),
+    }),
   changeTransferKind: (groupId: string, kind: TransferKind) =>
     request<TransferGroup>(`/transfers/${groupId}/kind`, {
       method: "POST",

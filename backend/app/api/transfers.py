@@ -10,10 +10,12 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session, aliased
 
 from .. import models, schemas
+from ..constants import LOAN_REPAYMENT
 from ..db import get_db
 from ..deps import get_current_user, require_writer
-from ..services import transfers
-from .transactions import _acct_names, _cat_names, _to_out
+from ..services import repayments, transfers
+from ..services.categorise import PERSON_CONFIDENCE
+from .transactions import RepaymentView, _acct_names, _cat_names, _to_out, repayment_view
 
 router = APIRouter(prefix="/transfers", tags=["transfers"])
 
@@ -34,6 +36,7 @@ def _group_view(
     legs: list[models.Transaction],
     cats: dict[str, str],
     accts: dict[str, str],
+    view: RepaymentView | None = None,
 ) -> schemas.TransferGroupOut | None:
     pair = transfers.outflow_and_inflow(legs)
     if pair is None:
@@ -42,8 +45,8 @@ def _group_view(
     return schemas.TransferGroupOut(
         group_id=group_id,
         kind=out.transfer_kind,
-        outflow=_to_out(out, cats, accts, inflow),
-        inflow=_to_out(inflow, cats, accts, out),
+        outflow=_to_out(out, cats, accts, inflow, view),
+        inflow=_to_out(inflow, cats, accts, out, view),
     )
 
 
@@ -51,10 +54,16 @@ def _group_out(
     db: Session, household_id: str, group_id: str
 ) -> schemas.TransferGroupOut:
     legs = transfers.group_legs(db, household_id, group_id)
-    view = _group_view(group_id, legs, _cat_names(db, household_id), _acct_names(db, household_id))
-    if view is None:
+    found = _group_view(
+        group_id,
+        legs,
+        _cat_names(db, household_id),
+        _acct_names(db, household_id),
+        repayment_view(db, household_id),
+    )
+    if found is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Transfer not found")
-    return view
+    return found
 
 
 def _is_split(db: Session, t: models.Transaction) -> bool:
@@ -281,7 +290,8 @@ def recent(
         ).scalars():
             legs[t.transfer_group_id or ""].append(t)
     cats, accts = _cat_names(db, user.household_id), _acct_names(db, user.household_id)
-    views = (_group_view(g, legs[g], cats, accts) for g in group_ids)
+    view = repayment_view(db, user.household_id)
+    views = (_group_view(g, legs[g], cats, accts, view) for g in group_ids)
     return [v for v in views if v is not None]
 
 
@@ -313,5 +323,40 @@ def change_kind(
     if pair is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Transfer not found")
     transfers.apply_kind(db, pair[0], pair[1], payload.kind)
+    db.flush()
+    repayments.sort_repayments(db, user.household_id)
+    db.commit()
+    return _group_out(db, user.household_id, group_id)
+
+
+@router.post("/{group_id}/repayment", response_model=schemas.TransferGroupOut)
+def set_repayment(
+    group_id: str,
+    payload: schemas.RepaymentIn,
+    user: models.User = Depends(require_writer),
+    db: Session = Depends(get_db),
+) -> schemas.TransferGroupOut:
+    """A person's say on one home loan repayment: the regular one, or extra. Kept as
+    their choice, and the rest are sorted again with it."""
+    pair = transfers.outflow_and_inflow(transfers.group_legs(db, user.household_id, group_id))
+    if pair is None or pair[0].transfer_kind != LOAN_REPAYMENT:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Loan repayment not found")
+    loan = db.get(models.Account, pair[1].account_id)
+    if loan is None or loan.type != "home_loan":
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST, "Only a home loan's repayments are regular or extra."
+        )
+    mortgage, extra = repayments.repayment_category_ids(db, user.household_id)
+    target = extra if payload.extra else mortgage
+    if target is None:
+        missing = "Extra repayments" if payload.extra else "Mortgage"
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            f"There is no “{missing}” category to file it under: it was removed.",
+        )
+    out = pair[0]
+    out.category_id, out.confidence = target, PERSON_CONFIDENCE
+    db.flush()
+    repayments.sort_repayments(db, user.household_id)
     db.commit()
     return _group_out(db, user.household_id, group_id)

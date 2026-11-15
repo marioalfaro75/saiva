@@ -33,3 +33,16 @@ export function wordingProblem(phrases: string[]): string | null {
   }
   return null;
 }
+
+export const LOAN_TYPES = ["home_loan", "personal_loan"];
+
+export const EVERY_LABELS = { weekly: "Weekly", fortnightly: "Fortnightly", monthly: "Monthly" };
+
+/** "1,254.92", "$1254.9" or "1254" as cents; null when it is not an amount above zero.
+ *  Commas only as thousands separators: "1254,92" is not $125,492. */
+export function parseDollars(text: string): number | null {
+  const clean = text.trim().replace(/^\$\s*/, "");
+  if (!/^(\d{1,3}(,\d{3})+|\d+)(\.\d{1,2})?$/.test(clean)) return null;
+  const cents = Math.round(Number(clean.replace(/,/g, "")) * 100);
+  return cents > 0 ? cents : null;
+}

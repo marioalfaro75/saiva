@@ -43,6 +43,19 @@ export interface Account {
   bank_identifier?: string | null;
   /** Phrases that, in another account's description, mean money moving to or from this one. */
   transfer_wording?: string[];
+  /** A loan's regular repayment, oldest period first. */
+  repayment_schedule?: RepaymentPeriod[];
+  /** For a home loan: what the history suggests, when none is set or it has moved. */
+  repayment_suggestion?: RepaymentPeriod | null;
+}
+
+export type RepaymentEvery = "weekly" | "fortnightly" | "monthly";
+
+/** A loan's regular repayment from a date (null: from the start). */
+export interface RepaymentPeriod {
+  since: string | null;
+  cents: number;
+  every: RepaymentEvery;
 }
 
 export interface Category {
@@ -100,6 +113,8 @@ export interface Transaction {
   counterpart_account_name?: string | null;
   /** A note worth offering, from the description, when there is none. */
   note_suggestion?: string | null;
+  /** A home loan repayment's paying side: the regular one, or extra. */
+  repayment?: "regular" | "extra" | null;
 }
 
 /** What a linked pair is: decided by the account the money went into. */

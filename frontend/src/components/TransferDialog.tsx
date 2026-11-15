@@ -54,7 +54,16 @@ export function TransferDialog({ txn, onClose, onDone }: Props) {
     mutationFn: (k: TransferKind) => api.changeTransferKind(txn.transfer_group_id ?? "", k),
     onSuccess: (g) => finish(g.kind ? `Changed to ${TRANSFER_KIND_LABELS[g.kind]}.` : "Changed."),
   });
-  const failed = link.error ?? unlink.error ?? rekind.error;
+  const repayment = useMutation({
+    mutationFn: (extra: boolean) => api.setRepayment(txn.transfer_group_id ?? "", extra),
+    onSuccess: (g) =>
+      finish(
+        g.outflow?.repayment === "extra"
+          ? "Marked as an extra repayment."
+          : "Marked as the regular repayment.",
+      ),
+  });
+  const failed = link.error ?? unlink.error ?? rekind.error ?? repayment.error;
 
   return (
     <div className="modal-overlay">
@@ -85,6 +94,20 @@ export function TransferDialog({ txn, onClose, onDone }: Props) {
                 ))}
               </select>
             </div>
+            {txn.repayment && (
+              <div className="field">
+                <label htmlFor={`${fid}-repayment`}>Repayment</label>
+                <select
+                  id={`${fid}-repayment`}
+                  value={txn.repayment}
+                  disabled={repayment.isPending}
+                  onChange={(e) => repayment.mutate(e.target.value === "extra")}
+                >
+                  <option value="regular">The regular repayment</option>
+                  <option value="extra">An extra repayment</option>
+                </select>
+              </div>
+            )}
           </>
         ) : (
           <>

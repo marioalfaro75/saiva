@@ -5,6 +5,35 @@ All notable changes to Saiva are documented here. The project follows
 
 ## [Unreleased]
 
+## [0.18.1] — 2026-11-15
+
+Apply it with **Update now** in Settings. Then set your home loan's regular repayment on
+**Accounts → Edit** (Saiva suggests it from your history: one click).
+
+### Added
+
+- **Your regular repayment.** On **Accounts → Edit** for a home loan, enter its regular
+  repayment — the amount, how often (weekly, fortnightly or monthly), and from when.
+  Saiva suggests it from your repayments, and says so again if they change (after a rate
+  rise, say). After a rise, enter the new amount and the date it started; earlier
+  repayments stay as they were.
+- **Regular and extra repayments.** With the regular repayment set, a repayment near it is
+  filed as **Mortgage**, once a week (or fortnight, or month); any other — a lump sum, or
+  a second payment within days — as **Extra repayments**. A repayment a few days late or
+  early, a moved payment day, a missed week, or one paid from two accounts on the same
+  day is still regular. Both count as spending. Until it is set, every repayment is
+  regular, as before.
+- **Say so yourself.** The ⇄ window on a repayment lets you mark it as the regular one or
+  extra. Your choice stays.
+- **Your repayment on Bills**, named for the loan ("Westpac home loan repayment"), with
+  its amount and next due date — counting the debits the loan's statement doesn't cover
+  yet. An extra repayment is tagged "Extra repayment → Westpac home loan".
+
+### Changed
+
+- The category "Offset/Extra repayments" is now "Extra repayments" (unless you renamed
+  it).
+
 ## [0.18.0] — 2026-11-15
 
 Apply it with **Update now** in Settings. On first start, Saiva sorts the transfers

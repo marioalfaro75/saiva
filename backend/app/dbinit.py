@@ -26,6 +26,7 @@ import os
 import shutil
 import subprocess  # nosec B404 - argv is built from our own config, never user input
 import sys
+import unicodedata
 from typing import Any
 
 from alembic import command
@@ -34,9 +35,13 @@ from sqlalchemy import and_, inspect, or_, select, update
 from sqlalchemy.engine import URL, Engine
 from sqlalchemy.orm import Session
 
-from .constants import CASH_DEPOSIT_CATEGORY
+from .constants import (
+    CASH_DEPOSIT_CATEGORY,
+    EXTRA_REPAYMENT_CATEGORY,
+    OLD_EXTRA_REPAYMENT_CATEGORY,
+)
 from .db import engine
-from .models import Category, Household, Transaction
+from .models import Account, Category, Household, Transaction
 from .schema_state import SchemaState, ahead_warning, alembic_config, read_schema_state
 from .services.categorise import (
     ML_MAX_CONFIDENCE,
@@ -44,6 +49,7 @@ from .services.categorise import (
     UNTOUCHED,
     apply_all_rules,
 )
+from .services.repayments import sort_repayments
 from .services.transfers import classify_existing, classify_transfers
 
 BASELINE_REVISION = "0001"
@@ -132,6 +138,7 @@ def main(db: Engine | None = None, cfg: Config | None = None) -> SchemaState:
             cfg.attributes.pop("connection", None)
     if not state.is_ahead:
         _record_category_keys(db)
+        _rename_extra_repayments(db)
         _mark_automatic_categories(db)
         _apply_rules_once(db)
         _classify_transfers_once(db)
@@ -161,6 +168,47 @@ def _record_category_keys(db: Engine) -> None:
             .where(Category.is_system.is_(True), Category.system_key.is_(None))
             .values(system_key=Category.name)
         )
+
+
+def _rename_extra_repayments(db: Engine) -> None:
+    """"Offset/Extra repayments" becomes "Extra repayments": what 0.18.1 files an extra
+    home loan repayment under. Its key moves with it; its name too, unless the
+    household renamed it or already has a category of the new name. Every start, and
+    only ever finds a household an older image made."""
+    if not _shaped_for(db, Category):
+        return
+    with Session(db) as session:
+        old = session.execute(
+            select(Category).where(Category.system_key == OLD_EXTRA_REPAYMENT_CATEGORY)
+        ).scalars().all()
+        for category in old:
+            taken = session.execute(
+                select(Category.id).where(
+                    Category.household_id == category.household_id,
+                    Category.system_key == EXTRA_REPAYMENT_CATEGORY,
+                )
+            ).first()
+            if taken:
+                continue  # already has one: leave the old as it is
+            category.system_key = EXTRA_REPAYMENT_CATEGORY
+            # Names are one per household as people see them -- case and accents aside --
+            # so the rename doesn't make a second "Extra Repayments" the picker can't
+            # tell apart from the household's own.
+            def folded(name: str) -> str:
+                return unicodedata.normalize("NFC", name).casefold()
+
+            same_name = any(
+                folded(name) == folded(EXTRA_REPAYMENT_CATEGORY)
+                for name in session.execute(
+                    select(Category.name).where(
+                        Category.household_id == category.household_id,
+                        Category.id != category.id,
+                    )
+                ).scalars()
+            )
+            if category.name == OLD_EXTRA_REPAYMENT_CATEGORY and not same_name:
+                category.name = EXTRA_REPAYMENT_CATEGORY
+        session.commit()
 
 
 def _mark_automatic_categories(db: Engine) -> None:
@@ -258,6 +306,23 @@ def _mark_automatic_categories(db: Engine) -> None:
             )
 
 
+def _shaped_for(db: Engine, *entities: type) -> bool:
+    """Whether every column these models map is in the database. A step that loads
+    whole rows needs them all: under an older image's migrations -- or a test standing in
+    for one -- a column a later revision adds is missing, and the step is skipped rather
+    than stopping the start."""
+    inspector = inspect(db)
+    tables = set(inspector.get_table_names())
+    for entity in entities:
+        table = entity.__table__  # type: ignore[attr-defined]
+        if table.name not in tables:
+            return False
+        present = {c["name"] for c in inspector.get_columns(table.name)}
+        if not {c.name for c in table.columns} <= present:
+            return False
+    return True
+
+
 def _apply_rules_once(db: Engine) -> None:
     """Apply each household's rules to its transactions, once.
 
@@ -270,10 +335,7 @@ def _apply_rules_once(db: Engine) -> None:
 
     Skipped, like the others, when the column is not there yet.
     """
-    inspector = inspect(db)
-    if "households" not in inspector.get_table_names():
-        return
-    if "rules_applied_at" not in {c["name"] for c in inspector.get_columns("households")}:
+    if not _shaped_for(db, Household, Transaction, Category, Account):
         return
     with Session(db) as session:
         pending = (
@@ -352,9 +414,9 @@ def _classify_transfers_once(db: Engine) -> None:
     households.transfers_classified_at; a failure is logged and retried at the next
     start, never a reason not to start.
     """
-    inspector = inspect(db)
-    if "households" not in inspector.get_table_names():
+    if not _shaped_for(db, Household, Transaction, Category, Account):
         return
+    inspector = inspect(db)
     if "transfers_classified_at" not in {c["name"] for c in inspector.get_columns("households")}:
         return
     if "transfer_kind" not in {c["name"] for c in inspector.get_columns("transactions")}:
@@ -415,6 +477,18 @@ def _classify_transfers_once(db: Engine) -> None:
             )
             for household_id in unkinded:
                 classify_existing(session, household_id)
+            session.commit()
+            # Home loan repayments sorted into regular and extra (0.18.1), and kept so:
+            # it only re-files what it filed, so on most starts it changes nothing.
+            with_loans = (
+                session.execute(
+                    select(Account.household_id).where(Account.type == "home_loan").distinct()
+                )
+                .scalars()
+                .all()
+            )
+            for household_id in with_loans:
+                sort_repayments(session, household_id)
             session.commit()
         except Exception as exc:  # noqa: BLE001 - logged, and retried next start
             session.rollback()

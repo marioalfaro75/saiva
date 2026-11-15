@@ -14,9 +14,10 @@ from sqlalchemy.sql import Select
 from sqlalchemy.sql.elements import ColumnElement
 
 from .. import models, schemas
+from ..constants import LOAN_REPAYMENT
 from ..db import get_db
 from ..deps import get_current_user, optional_period, require_writer
-from ..services import periods, transfers
+from ..services import periods, repayments, transfers
 from ..services.categorise import (
     PERSON_CONFIDENCE,
     RuleDefinition,
@@ -89,11 +90,45 @@ def counterparts(
     return {t.id: opposite[t.id] for t in txns if t.id in opposite}
 
 
+RepaymentView = tuple[str | None, set[str]]  # (Extra repayments id, home loan account ids)
+
+
+def repayment_view(db: Session, household_id: str) -> RepaymentView:
+    """What it takes to say whether a repayment is the regular one or extra -- nothing,
+    when either category is gone, since the choice could not be recorded."""
+    mortgage, extra = repayments.repayment_category_ids(db, household_id)
+    if mortgage is None or extra is None:
+        return None, set()
+    loans = set(
+        db.execute(
+            select(models.Account.id).where(
+                models.Account.household_id == household_id,
+                models.Account.type == "home_loan",
+            )
+        ).scalars()
+    )
+    return extra, loans
+
+
+def _repayment(
+    t: models.Transaction, other: models.Transaction | None, view: RepaymentView | None
+) -> str | None:
+    """Regular or extra, for either side of a home loan repayment: the paying side's
+    category says, and the loan's side shows the same."""
+    if view is None or view[0] is None or other is None or t.transfer_kind != LOAN_REPAYMENT:
+        return None
+    paying, loan = (t, other) if t.amount_cents < 0 else (other, t)
+    if loan.account_id not in view[1] or paying.amount_cents >= 0:
+        return None
+    return "extra" if paying.category_id == view[0] else "regular"
+
+
 def _to_out(
     t: models.Transaction,
     cats: dict[str, str],
     accts: dict[str, str],
     other: models.Transaction | None = None,
+    repayment: RepaymentView | None = None,
 ) -> schemas.TransactionOut:
     return schemas.TransactionOut(
         id=t.id,
@@ -118,6 +153,7 @@ def _to_out(
         counterpart_id=other.id if other is not None else None,
         counterpart_account_name=accts.get(other.account_id) if other is not None else None,
         note_suggestion=None if t.notes else suggest_note(t.raw_description),
+        repayment=_repayment(t, other, repayment),
     )
 
 
@@ -282,8 +318,9 @@ def list_transactions(
     cats = _cat_names(db, user.household_id)
     accts = _acct_names(db, user.household_id)
     others = counterparts(db, user.household_id, list(rows))
+    view = repayment_view(db, user.household_id)
     return schemas.TransactionListOut(
-        items=[_to_out(t, cats, accts, others.get(t.id)) for t in rows],
+        items=[_to_out(t, cats, accts, others.get(t.id), view) for t in rows],
         total=int(total),
         page=page,
         page_size=page_size,

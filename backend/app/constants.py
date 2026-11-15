@@ -25,6 +25,10 @@ TRANSFER_CATEGORY = "Internal transfers"
 CARD_PAYMENT_CATEGORY = "Credit-card payments"
 CASH_DEPOSIT_CATEGORY = "Cash deposit"
 MORTGAGE_CATEGORY = "Mortgage"
+# A home loan repayment beyond the usual one. Built-in households before 0.18.1 called it
+# "Offset/Extra repayments"; start-up renames that one (see dbinit).
+EXTRA_REPAYMENT_CATEGORY = "Extra repayments"
+OLD_EXTRA_REPAYMENT_CATEGORY = "Offset/Extra repayments"
 LOAN_REPAYMENT_CATEGORY = "Loan repayments"
 
 # What a linked pair of transactions is. Decided by the account the money went into.

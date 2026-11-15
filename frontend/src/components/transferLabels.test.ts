@@ -29,4 +29,29 @@ describe("transferLabel", () => {
     expect(transferLabel(t({ is_transfer: true }))).toBe("transfer");
     expect(transferLabel(t({}))).toBeNull();
   });
+
+  it("names an extra home loan repayment as one", () => {
+    expect(
+      transferLabel(
+        t({ transfer_kind: "loan_repayment", repayment: "extra", counterpart_account_name: "Westpac" }),
+      ),
+    ).toBe("Extra repayment → Westpac");
+    expect(
+      transferLabel(
+        t({ transfer_kind: "loan_repayment", repayment: "regular", counterpart_account_name: "Westpac" }),
+      ),
+    ).toBe("Loan repayment → Westpac");
+    // Seen from the loan's side.
+    expect(
+      transferLabel(
+        t({
+          amount_cents: 500000,
+          transfer_kind: "loan_repayment",
+          repayment: "extra",
+          counterpart_account_name: "Savings",
+        }),
+      ),
+    ).toBe("Extra repayment ← Savings");
+  });
 });
+
