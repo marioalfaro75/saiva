@@ -182,22 +182,27 @@ def set_by_rule(t: models.Transaction) -> bool:
 
 def rules_may_change(t: models.Transaction) -> bool:
     """Rules decide blank and automatic categories only: never a locked row, a person's
-    choice, a transfer (filed by transfer detection), or one part of a split."""
+    choice, a transfer or either side of a linked pair (filed by its kind), or one part
+    of a split."""
     return (
         not t.category_locked
         and not t.is_transfer
+        and t.transfer_group_id is None
         and t.split_parent_id is None
         and not set_by_person(t)
     )
 
 
 def _rule_scope(db: Session, household_id: str) -> list[models.Transaction]:
-    """Every transaction a rule can be asked about: transfers and split parts excluded."""
+    """Every transaction a rule can be asked about: transfers, either side of a linked
+    pair (filed by its kind -- a loan repayment's paying side counts as spending, but
+    the link decides its category, not a rule) and split parts excluded."""
     return list(
         db.execute(
             select(models.Transaction).where(
                 models.Transaction.household_id == household_id,
                 models.Transaction.is_transfer.is_(False),
+                models.Transaction.transfer_group_id.is_(None),
                 models.Transaction.split_parent_id.is_(None),
             )
         )

@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session
 from .. import models, schemas
 from ..db import get_db
 from ..deps import get_current_user, require_owner, require_writer
+from ..services.transfers import wording_of
 
 router = APIRouter(prefix="/accounts", tags=["accounts"])
 
@@ -33,7 +34,23 @@ def _to_out(db: Session, account: models.Account) -> schemas.AccountOut:
         owner_user_id=account.owner_user_id,
         balance_cents=account.opening_balance_cents + int(total or 0),
         txn_count=int(count or 0),
+        bank_identifier=account.bank_identifier,
+        transfer_wording=list(account.transfer_wording or []),
     )
+
+
+def _clean_wording(phrases: list[str]) -> list[str]:
+    """Trimmed, one of each (compared as wording: case, digits and punctuation aside),
+    and only phrases with words in them -- digits alone would match nothing."""
+    kept: list[str] = []
+    seen: set[str] = set()
+    for phrase in phrases:
+        text = " ".join(phrase.split())
+        key = wording_of(text)
+        if key and key not in seen:
+            seen.add(key)
+            kept.append(text)
+    return kept
 
 
 def _get_owned(db: Session, account_id: str, household_id: str) -> models.Account:
@@ -90,6 +107,10 @@ def update_account(
 ) -> schemas.AccountOut:
     account = _get_owned(db, account_id, user.household_id)
     for key, value in payload.model_dump(exclude_unset=True).items():
+        if key == "transfer_wording":
+            value = _clean_wording(value or [])
+        elif value is None and key in ("name", "type"):
+            continue  # an explicit null is "leave it": these columns are not nullable
         setattr(account, key, value)
     db.commit()
     db.refresh(account)

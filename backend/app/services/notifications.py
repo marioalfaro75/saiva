@@ -35,7 +35,9 @@ from .mailer import send_email
 LARGE_TXN_LOOKBACK_DAYS = 7
 BILL_LOOKAHEAD_DAYS = 7
 LOW_BALANCE_HORIZON_DAYS = 30
-INSIGHT_ALERT_TYPES = {"mover", "creep", "fee", "duplicate"}
+# The types insights.py actually produces. These were "mover", "creep" and "fee",
+# names no insight ever had, so of the four only duplicate charges ever alerted.
+INSIGHT_ALERT_TYPES = {"top_mover", "creeping", "fees", "duplicate"}
 
 
 @dataclass

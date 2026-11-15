@@ -217,7 +217,9 @@ def _fees(leaves: list[models.Transaction]) -> list[Insight]:
 def _duplicates(leaves: list[models.Transaction]) -> list[Insight]:
     groups: dict[tuple[str, int], list[models.Transaction]] = defaultdict(list)
     for t in leaves:
-        if t.amount_cents < 0:
+        # A linked pair's paying side -- a weekly loan repayment -- is the same money
+        # going to the household's own loan each week, not a merchant charging twice.
+        if t.amount_cents < 0 and t.transfer_group_id is None:
             merchant = t.merchant or t.raw_description.strip().lower()[:40]
             groups[(merchant, t.amount_cents)].append(t)
     out: list[Insight] = []

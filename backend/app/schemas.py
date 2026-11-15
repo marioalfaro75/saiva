@@ -102,12 +102,25 @@ class AccountCreate(BaseModel):
     owner_user_id: str | None = None
 
 
+AccountType = Literal[
+    "everyday", "savings", "credit_card", "home_loan",
+    "offset", "personal_loan", "cash", "investment",
+]
+
+
 class AccountUpdate(BaseModel):
-    name: str | None = Field(default=None, max_length=120)
-    type: str | None = None
+    name: str | None = Field(default=None, min_length=1, max_length=120)
+    # Was a free string: any word was saved as an account's type, and nothing that
+    # reads the type would know it.
+    type: AccountType | None = None
     institution: str | None = None
     opening_balance_cents: int | None = None
     owner_user_id: str | None = None
+    # The whole list: phrases that, in another account's description, mean money is
+    # moving to or from this one ("By Authority To Cc").
+    transfer_wording: list[Annotated[str, Field(min_length=2, max_length=80)]] | None = Field(
+        default=None, max_length=30
+    )
 
 
 class AccountOut(BaseModel):
@@ -121,6 +134,9 @@ class AccountOut(BaseModel):
     owner_user_id: str | None
     balance_cents: int = 0
     txn_count: int = 0
+    # The account number an import recorded, which links transfers that mention it.
+    bank_identifier: str | None = None
+    transfer_wording: list[str] = []
 
 
 # ---------------------------------------------------------------------- categories
@@ -451,7 +467,9 @@ class ImportCommitOut(BaseModel):
     batch_id: str
     added: int
     skipped: int
-    transfers_linked: int
+    transfers_linked: int  # legs linked: two per transfer
+    transfers_to_review: int = 0  # pairs that only agree on amount and dates
+    cash_deposits: int = 0
 
 
 # -------------------------------------------------------------------- transactions
@@ -476,6 +494,63 @@ class TransactionOut(BaseModel):
     notes: str | None
     tags: list[str]
     split_parent_id: str | None
+    # A linked pair: what it is, and the other side of it.
+    transfer_group_id: str | None = None
+    transfer_kind: str | None = None
+    counterpart_id: str | None = None
+    counterpart_account_name: str | None = None
+    # A note worth offering, from the description ("To John Smith · Birthday gift"),
+    # when the transaction has none.
+    note_suggestion: str | None = None
+
+
+TransferKind = Literal["card_payment", "own_accounts", "loan_repayment"]
+
+
+class TransferScanOut(BaseModel):
+    linked: int  # legs linked: two per transfer
+    to_review: int  # pairs that only agree on amount and dates
+    cash_deposits: int
+
+
+class TransferPairIn(BaseModel):
+    outflow_id: str
+    inflow_id: str
+
+
+class TransferAcceptIn(TransferPairIn):
+    kind: TransferKind | None = None  # None = by the account the money went into
+    learn: bool = True  # remember the wording, so the next one links by itself
+
+
+class TransferLinkIn(BaseModel):
+    first_id: str
+    second_id: str
+    kind: TransferKind | None = None
+
+
+class TransferKindIn(BaseModel):
+    kind: TransferKind
+
+
+class TransferSuggestionOut(BaseModel):
+    outflow: TransactionOut
+    inflow: TransactionOut
+    kind: TransferKind
+    days_apart: int
+
+
+class TransferGroupOut(BaseModel):
+    group_id: str
+    kind: str | None
+    outflow: TransactionOut | None
+    inflow: TransactionOut | None
+
+
+class TransferAcceptOut(BaseModel):
+    group: TransferGroupOut
+    learned: str | None  # the wording remembered for the receiving account, if any
+    learned_for: str | None  # that account's name
 
 
 class TransactionListOut(BaseModel):

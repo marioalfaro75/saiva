@@ -15,6 +15,7 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from .. import models
+from ..constants import CASH_ACCOUNT_TYPES
 from . import recurring as recurring_service
 from .dashboard import _spendable_leaves
 
@@ -42,15 +43,24 @@ class Forecast:
 
 
 def _starting_balance(db: Session, household_id: str) -> int:
+    """What the household can spend today: its cash accounts -- everyday, savings, offset,
+    cash. Cards and loans are debts; adding a mortgage to a balance dragged it far below
+    zero, and set off the low-balance alert on a household with money in the bank."""
+    cash = select(models.Account.id).where(
+        models.Account.household_id == household_id,
+        models.Account.type.in_(CASH_ACCOUNT_TYPES),
+    )
     opening = db.execute(
         select(func.coalesce(func.sum(models.Account.opening_balance_cents), 0)).where(
-            models.Account.household_id == household_id
+            models.Account.household_id == household_id,
+            models.Account.type.in_(CASH_ACCOUNT_TYPES),
         )
     ).scalar_one()
     moved = db.execute(
         select(func.coalesce(func.sum(models.Transaction.amount_cents), 0)).where(
             models.Transaction.household_id == household_id,
             models.Transaction.split_parent_id.is_(None),
+            models.Transaction.account_id.in_(cash),
         )
     ).scalar_one()
     return int(opening) + int(moved)

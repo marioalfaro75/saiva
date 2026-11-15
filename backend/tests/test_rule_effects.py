@@ -560,24 +560,31 @@ def test_on_upgrade_old_guesses_and_unscored_imports_become_automatic(
 # --------------------------------------------------------------------------------------
 
 
-def test_transfer_detection_marks_what_it_files_so_a_release_can_undo_it(
+def test_transfer_detection_keeps_a_persons_category_and_a_release_gives_it_back(
     auth_client: TestClient,
 ) -> None:
-    # A person filed this leg as Coffee (1.0); detection then moved it to Internal
-    # transfers but kept the 1.0, so once released it read as a person's choice of
-    # Internal transfers and stayed there, out of every rule's reach.
+    # A person filed this leg as Coffee (1.0) before its other half arrived. Linking
+    # used to replace that with Internal transfers -- and, keeping the 1.0, made it read
+    # as a person's choice of Internal transfers. Now the pair is linked and left out of
+    # spending, the person's category stays, and releasing the pair gives it back.
     everyday = create_account(auth_client)["id"]
     savings = create_account(auth_client, name="Savings", type_="savings")["id"]
-    coffee, internal = _cat(auth_client, "Coffee"), _cat(auth_client, "Internal transfers")
+    coffee = _cat(auth_client, "Coffee")
     out_id = _add(auth_client, everyday, "TRANSFER TO SAVINGS 77", cents=-50000)
     in_id = _add(auth_client, savings, "TRANSFER FROM EVERYDAY 77", cents=50000)
     _choose(auth_client, in_id, coffee)
 
     assert auth_client.post("/api/transactions/detect-transfers").status_code == 200
-    assert _state(in_id) == (internal, ML_MAX_CONFIDENCE)
+    with SessionLocal() as db:
+        leg = db.get(models.Transaction, in_id)
+        assert leg is not None and leg.is_transfer and leg.transfer_group_id
+    assert _state(in_id) == (coffee, 1.0)
 
     auth_client.delete(f"/api/transactions/{out_id}")
-    assert _state(in_id) == (None, None)
+    assert _state(in_id) == (coffee, 1.0)
+    with SessionLocal() as db:
+        leg = db.get(models.Transaction, in_id)
+        assert leg is not None and not leg.is_transfer and leg.transfer_group_id is None
 
 
 def test_on_upgrade_look_alikes_of_a_persons_change_stay_theirs(auth_client: TestClient) -> None:
