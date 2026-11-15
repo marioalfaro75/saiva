@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import datetime as dt
+
 from fastapi import APIRouter, Depends, HTTPException, Response, status
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
@@ -9,7 +11,7 @@ from sqlalchemy.orm import Session
 from .. import models, schemas
 from ..db import get_db
 from ..deps import get_current_user, require_owner, require_writer
-from ..services import repayments, transfers
+from ..services import balances, networth, repayments, transfers
 from ..services.transfers import wording_of
 
 router = APIRouter(prefix="/accounts", tags=["accounts"])
@@ -42,6 +44,7 @@ def _to_out(db: Session, account: models.Account) -> schemas.AccountOut:
             for p in repayments.schedule_of(account)
         ],
         repayment_suggestion=_suggestion(db, account),
+        in_net_worth=bool(account.in_net_worth),
     )
 
 
@@ -84,13 +87,19 @@ def _clean_wording(phrases: list[str]) -> list[str]:
     return kept
 
 
-def _clean_schedule(periods: list[dict]) -> list[dict] | None:
+def clean_schedule(periods: list[dict]) -> list[dict] | None:
     """Oldest first, one period a date -- a second for the same date replaces the first;
     an undated one is "from the start". Empty is none."""
     by_since: dict[str | None, dict] = {}
     for p in periods:
         by_since[p.get("since")] = p
     return sorted(by_since.values(), key=lambda p: p.get("since") or "") or None
+
+
+def latest_today() -> dt.date:
+    """The latest date that is today somewhere: the server's clock is UTC, and in an
+    Australian morning the household's today is already tomorrow there."""
+    return dt.date.today() + dt.timedelta(days=1)
 
 
 def _get_owned(db: Session, account_id: str, household_id: str) -> models.Account:
@@ -146,14 +155,23 @@ def update_account(
     db: Session = Depends(get_db),
 ) -> schemas.AccountUpdateOut:
     account = _get_owned(db, account_id, user.household_id)
+    balance_on = payload.balance_on or dt.date.today()
+    if payload.balance_cents is not None and balance_on > latest_today():
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_ENTITY, "The balance's date can't be in the future."
+        )
     old_type = account.type
     for key, value in payload.model_dump(exclude_unset=True, mode="json").items():
+        if key in ("balance_cents", "balance_on"):
+            continue  # below, once the rest is set
         if key == "transfer_wording":
             value = _clean_wording(value or [])
         elif key == "repayment_schedule":
-            value = _clean_schedule(value or [])
-        elif value is None and key in ("name", "type"):
+            value = clean_schedule(value or [])
+        elif value is None and key in ("name", "type", "in_net_worth", "opening_balance_cents"):
             continue  # an explicit null is "leave it": these columns are not nullable
+        elif key == "opening_balance_cents":
+            balances.clear_anchor(account)  # what the household sets now
         setattr(account, key, value)
     # The type decides what money into the account is: what was linked under the old
     # one is counted by the new one.
@@ -164,7 +182,13 @@ def update_account(
     if account.type != old_type or "repayment_schedule" in payload.model_fields_set:
         db.flush()
         repayments.sort_repayments(db, user.household_id)
+    if payload.balance_cents is not None:
+        try:
+            balances.set_balance(db, account, payload.balance_cents, balance_on)
+        except balances.BalanceTooLarge as e:
+            raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, str(e)) from e
     db.commit()
+    networth.record_snapshot_if_used(db, user.household_id)
     db.refresh(account)
     return schemas.AccountUpdateOut(
         **_to_out(db, account).model_dump(), transfers_rekinded=rekinded
@@ -185,6 +209,17 @@ def delete_account(
         raise HTTPException(
             status.HTTP_409_CONFLICT, "Account has transactions; delete those first."
         )
+    # Its Mortgage setup goes with it, and it stops offsetting any other loan.
+    for setup in db.execute(
+        select(models.Mortgage).where(models.Mortgage.household_id == user.household_id)
+    ).scalars():
+        if setup.account_id == account.id:
+            db.delete(setup)
+        elif account.id in (setup.offset_account_ids or []):
+            setup.offset_account_ids = [
+                i for i in setup.offset_account_ids or [] if i != account.id
+            ] or None
+    db.flush()
     db.delete(account)
     db.commit()
     return Response(status_code=status.HTTP_204_NO_CONTENT)

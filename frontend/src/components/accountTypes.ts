@@ -1,3 +1,5 @@
+import type { RepaymentPeriod } from "../api/types";
+
 /** The kinds of account Saiva knows; the type decides how transfers into it are counted. */
 export const ACCOUNT_TYPES = [
   "everyday",
@@ -45,4 +47,31 @@ export function parseDollars(text: string): number | null {
   if (!/^(\d{1,3}(,\d{3})+|\d+)(\.\d{1,2})?$/.test(clean)) return null;
   const cents = Math.round(Number(clean.replace(/,/g, "")) * 100);
   return cents > 0 ? cents : null;
+}
+
+/** Like parseDollars, but $0 is an amount too (nothing in the offset, nothing extra). */
+export function parseDollarsOrZero(text: string): number | null {
+  const clean = text.trim().replace(/^\$\s*/, "");
+  if (/^0+(\.0{1,2})?$/.test(clean)) return 0;
+  return parseDollars(clean);
+}
+
+/** Like parseDollarsOrZero, but a balance can be below zero: "-123.45". */
+export function parseSignedDollars(text: string): number | null {
+  const clean = text.trim();
+  if (clean.startsWith("-")) {
+    const cents = parseDollarsOrZero(clean.slice(1));
+    return cents === null ? null : -cents;
+  }
+  return parseDollarsOrZero(clean);
+}
+
+/** A loan's repayment periods after editing the latest one. A later date starts a new
+ *  period from then (a rate rise), keeping those before; the same or an earlier date
+ *  corrects it, and drops the periods it now covers. */
+export function nextSchedule(schedule: RepaymentPeriod[], now: RepaymentPeriod): RepaymentPeriod[] {
+  const current = schedule.length ? schedule[schedule.length - 1] : null;
+  const since = now.since ?? "";
+  if (current && since > (current.since ?? "")) return [...schedule, now];
+  return [...schedule.slice(0, -1).filter((p) => (p.since ?? "") < since), now];
 }

@@ -47,6 +47,8 @@ export interface Account {
   repayment_schedule?: RepaymentPeriod[];
   /** For a home loan: what the history suggests, when none is set or it has moved. */
   repayment_suggestion?: RepaymentPeriod | null;
+  /** Whether its balance counts in net worth. */
+  in_net_worth?: boolean;
 }
 
 export type RepaymentEvery = "weekly" | "fortnightly" | "monthly";
@@ -296,12 +298,135 @@ export interface NetWorthPoint {
   net_cents: number;
 }
 
+export interface NetWorthAccount {
+  id: string;
+  name: string;
+  type: string;
+  balance_cents: number;
+  in_net_worth: boolean;
+}
+
 export interface NetWorth {
   assets_cents: number;
   liabilities_cents: number;
   net_cents: number;
   items: NetWorthItem[];
   history: NetWorthPoint[];
+  /** Every account, and whether its balance counts. */
+  accounts?: NetWorthAccount[];
+}
+
+// ---- Mortgage (0.19.0)
+
+export interface MortgageRate {
+  since: string | null;
+  percent: number;
+}
+
+export interface MortgageOffset {
+  account_id: string;
+  name: string;
+  balance_cents: number;
+}
+
+export interface MortgageOutcome {
+  /** null: not paid off within 50 years. */
+  payoff: string | null;
+  interest_cents: number;
+  /** Never paid off: the repayments don't cover the interest. */
+  stalls?: boolean;
+}
+
+export interface MortgageYear {
+  year: number;
+  regular_cents: number;
+  extra_cents: number;
+  interest_cents: number;
+  owing_cents: number;
+}
+
+export interface MortgagePaidMonth {
+  month: string;
+  regular_cents: number;
+  extra_cents: number;
+}
+
+export interface MortgagePoint {
+  month: string;
+  as_you_pay?: number;
+  regular_only?: number;
+  what_if?: number;
+}
+
+export interface MortgageProjection {
+  owing_cents: number;
+  estimated: boolean;
+  known_on: string;
+  known_cents: number;
+  offset_cents: number;
+  /** A month, over the last six. */
+  usual_extra_cents: number;
+  next_due: string;
+  next_cents: number;
+  every: RepaymentEvery;
+  rate: number;
+  contract_end: string | null;
+  needed_cents: number | null;
+  as_you_pay: MortgageOutcome;
+  regular_only: MortgageOutcome;
+  without_offset: MortgageOutcome;
+  /** The extra repayments over the last year, and the regular repayments without them. */
+  extras_made_cents?: number;
+  without_extras_made?: MortgageOutcome | null;
+  what_if: MortgageOutcome | null;
+  what_if_needed_cents: number | null;
+  points: MortgagePoint[];
+  schedule: MortgageYear[];
+  what_if_schedule: MortgageYear[] | null;
+}
+
+export interface MortgageLoan {
+  account_id: string;
+  name: string;
+  set_up: boolean;
+}
+
+export interface Mortgage extends MortgageLoan {
+  original_cents: number | null;
+  start_date: string | null;
+  term_months: number | null;
+  rates: MortgageRate[];
+  offsets: MortgageOffset[];
+  balance_as_of: string | null;
+  repayment_schedule: RepaymentPeriod[];
+  repayment_suggestion: RepaymentPeriod | null;
+  offset_choices: MortgageOffset[];
+  /** Liabilities entered by hand on Net worth: maybe this loan, counted twice. */
+  manual_liabilities?: string[];
+  /** What it still needs: "setup", "rate", "repayment". */
+  missing: string[];
+  paid: MortgagePaidMonth[];
+  projection: MortgageProjection | null;
+}
+
+export interface MortgageSetupBody {
+  original_cents: number | null;
+  start_date: string | null;
+  term_months: number | null;
+  rates: MortgageRate[];
+  offsets: { account_id: string; balance_cents?: number | null }[];
+  owing_cents?: number | null;
+  owing_on?: string | null;
+  repayment_schedule?: RepaymentPeriod[] | null;
+  /** The household's today, for the offsets' balances. */
+  today?: string;
+}
+
+export interface MortgageWhatIf {
+  extra_cents?: number;
+  lump_cents?: number;
+  rate_change?: number;
+  offset_change_cents?: number;
 }
 
 export interface BenchmarkItem {

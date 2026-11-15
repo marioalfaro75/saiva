@@ -116,6 +116,26 @@ class RepaymentPeriodIn(BaseModel):
     every: Literal["weekly", "fortnightly", "monthly"]
 
 
+# A date outside this range is not one anyone typed by mistake. Unbounded, a single
+# row dated 9999-12-31 stretched every chart axis and every period the forecast walks,
+# and one dated 0001-01-01 did the same in the other direction.
+MIN_TXN_DATE = dt.date(1900, 1, 1)
+MAX_TXN_DATE = dt.date(2100, 12, 31)
+
+
+def _bounded_date(value: dt.date) -> dt.date:
+    if not MIN_TXN_DATE <= value <= MAX_TXN_DATE:
+        raise ValueError(f"date must be between {MIN_TXN_DATE} and {MAX_TXN_DATE}")
+    return value
+
+
+BoundedDate = Annotated[dt.date, AfterValidator(_bounded_date)]
+
+
+# Twenty million dollars: within the opening balance column (a 32-bit integer on Postgres).
+MAX_BALANCE_CENTS = 2_000_000_000
+
+
 class AccountUpdate(BaseModel):
     name: str | None = Field(default=None, min_length=1, max_length=120)
     # Was a free string: any word was saved as an account's type, and nothing that
@@ -131,6 +151,12 @@ class AccountUpdate(BaseModel):
     )
     # A home loan's regular repayment; [] or null clears it.
     repayment_schedule: list[RepaymentPeriodIn] | None = Field(default=None, max_length=50)
+    # Whether its balance counts in net worth.
+    in_net_worth: bool | None = None
+    # What the balance is at the end of `balance_on` (today without one): the opening
+    # balance is set to match, so the account reads it.
+    balance_cents: int | None = Field(default=None, ge=-MAX_BALANCE_CENTS, le=MAX_BALANCE_CENTS)
+    balance_on: BoundedDate | None = None
 
 
 class AccountOut(BaseModel):
@@ -151,6 +177,7 @@ class AccountOut(BaseModel):
     # For a home loan: a regular repayment the history shows, when none is set or the
     # recent repayments have moved away from it. For a person to confirm.
     repayment_suggestion: RepaymentPeriodIn | None = None
+    in_net_worth: bool = False
 
 
 class AccountUpdateOut(AccountOut):
@@ -379,24 +406,9 @@ class AccountAssignment(BaseModel):
     skip: bool = False
 
 
-# A transaction outside this range is not a date anyone typed by mistake. Unbounded,
-# a single row dated 9999-12-31 stretched every chart axis and every period the
-# forecast walks, and one dated 0001-01-01 did the same in the other direction.
 # Mirrors importers.MAX_AMOUNT_CENTS: an amount a caller supplies directly needs
 # the same ceiling as one read out of a file, or the column overflows on commit.
 MAX_AMOUNT_CENTS = 100_000_000_000_000
-
-MIN_TXN_DATE = dt.date(1900, 1, 1)
-MAX_TXN_DATE = dt.date(2100, 12, 31)
-
-
-def _bounded_date(value: dt.date) -> dt.date:
-    if not MIN_TXN_DATE <= value <= MAX_TXN_DATE:
-        raise ValueError(f"date must be between {MIN_TXN_DATE} and {MAX_TXN_DATE}")
-    return value
-
-
-BoundedDate = Annotated[dt.date, AfterValidator(_bounded_date)]
 
 
 class MatchNeighbour(BaseModel):
@@ -732,12 +744,12 @@ class BudgetOut(BaseModel):
 class NetWorthItemCreate(BaseModel):
     name: str = Field(min_length=1, max_length=120)
     kind: Literal["asset", "liability"]
-    value_cents: int = Field(ge=0)
+    value_cents: int = Field(ge=0, le=MAX_BALANCE_CENTS)
 
 
 class NetWorthItemUpdate(BaseModel):
     name: str | None = Field(default=None, min_length=1, max_length=120)
-    value_cents: int | None = Field(default=None, ge=0)
+    value_cents: int | None = Field(default=None, ge=0, le=MAX_BALANCE_CENTS)
 
 
 class NetWorthItemOut(BaseModel):
@@ -755,12 +767,132 @@ class NetWorthPoint(BaseModel):
     net_cents: int
 
 
+class NetWorthAccountOut(BaseModel):
+    id: str
+    name: str
+    type: str
+    balance_cents: int
+    in_net_worth: bool
+
+
 class NetWorthOut(BaseModel):
     assets_cents: int
     liabilities_cents: int
     net_cents: int
     items: list[NetWorthItemOut]
     history: list[NetWorthPoint]
+    # Every account, and whether its balance counts: in credit an asset, owing a liability.
+    accounts: list[NetWorthAccountOut] = []
+
+
+# ------------------------------------------------------------------------- mortgage
+
+
+class MortgageRate(BaseModel):
+    since: BoundedDate | None = None  # None: from the start
+    percent: float = Field(ge=0, le=30)
+
+
+class MortgageOffsetIn(BaseModel):
+    account_id: str = Field(min_length=1, max_length=32)
+    # Its balance today, when Saiva's is not right; null leaves it.
+    balance_cents: int | None = Field(default=None, ge=-MAX_BALANCE_CENTS, le=MAX_BALANCE_CENTS)
+
+
+class MortgageIn(BaseModel):
+    """A home loan's setup, as the household enters it."""
+
+    original_cents: int | None = Field(default=None, gt=0, le=MAX_BALANCE_CENTS)
+    start_date: BoundedDate | None = None
+    term_months: int | None = Field(default=None, ge=1, le=600)
+    rates: list[MortgageRate] = Field(default_factory=list, max_length=100)
+    offsets: list[MortgageOffsetIn] = Field(default_factory=list, max_length=10)
+    # What is owed at the end of `owing_on` (today without one); null leaves it.
+    owing_cents: int | None = Field(default=None, ge=0, le=MAX_BALANCE_CENTS)
+    owing_on: BoundedDate | None = None
+    # The loan's regular repayment (its account's); null leaves it.
+    repayment_schedule: list[RepaymentPeriodIn] | None = Field(default=None, max_length=50)
+    # The household's today, for the offsets' balances (the server's clock is UTC).
+    today: BoundedDate | None = None
+
+
+class MortgageLoanOut(BaseModel):
+    account_id: str
+    name: str
+    set_up: bool
+
+
+class MortgageOffsetOut(BaseModel):
+    account_id: str
+    name: str
+    balance_cents: int
+
+
+class MortgageOutcome(BaseModel):
+    payoff: dt.date | None  # None: not paid off within 50 years
+    interest_cents: int
+    stalls: bool = False  # never paid off: the repayments don't cover the interest
+
+
+class MortgageYear(BaseModel):
+    year: int
+    regular_cents: int
+    extra_cents: int
+    interest_cents: int
+    owing_cents: int  # at the end of the year
+
+
+class MortgagePaidMonth(BaseModel):
+    month: str
+    regular_cents: int
+    extra_cents: int
+
+
+class MortgageProjectionOut(BaseModel):
+    owing_cents: int
+    estimated: bool
+    known_on: dt.date
+    known_cents: int
+    offset_cents: int
+    usual_extra_cents: int
+    next_due: dt.date
+    next_cents: int
+    every: str
+    rate: float
+    contract_end: dt.date | None
+    needed_cents: int | None
+    as_you_pay: MortgageOutcome
+    regular_only: MortgageOutcome
+    without_offset: MortgageOutcome
+    # The extra repayments over the last year, and the regular repayments without them.
+    extras_made_cents: int = 0
+    without_extras_made: MortgageOutcome | None = None
+    what_if: MortgageOutcome | None
+    what_if_needed_cents: int | None
+    points: list[dict[str, int | str]]
+    schedule: list[MortgageYear]
+    what_if_schedule: list[MortgageYear] | None
+
+
+class MortgageOut(BaseModel):
+    account_id: str
+    name: str
+    set_up: bool
+    original_cents: int | None = None
+    start_date: dt.date | None = None
+    term_months: int | None = None
+    rates: list[MortgageRate] = []
+    offsets: list[MortgageOffsetOut] = []
+    balance_as_of: dt.date | None = None
+    repayment_schedule: list[RepaymentPeriodIn] = []
+    repayment_suggestion: RepaymentPeriodIn | None = None
+    # Accounts that could be offsets: everyday, savings and offset ones.
+    offset_choices: list[MortgageOffsetOut] = []
+    # Liabilities entered by hand on Net worth, which may be this loan counted twice.
+    manual_liabilities: list[str] = []
+    missing: list[str] = []
+    paid: list[MortgagePaidMonth] = []
+    projection: MortgageProjectionOut | None = None
 
 
 # -------------------------------------------------------------------- savings goals

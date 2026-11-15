@@ -8,6 +8,7 @@ from uuid import uuid4
 
 from sqlalchemy import (
     JSON,
+    BigInteger,
     Boolean,
     Date,
     DateTime,
@@ -120,6 +121,34 @@ class Account(Base, TimestampMixin):
     transfer_wording: Mapped[list | None] = mapped_column(JSON, nullable=True)
     # A loan's regular repayment, as periods: [{"since", "cents", "every"}] (0.18.1).
     repayment_schedule: Mapped[list | None] = mapped_column(JSON, nullable=True)
+    # What the household said the balance was at the end of a day (0.19.0). The opening
+    # balance is kept so the account reads that then, whatever is imported later.
+    balance_anchor_cents: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    balance_anchor_on: Mapped[dt.date | None] = mapped_column(Date, nullable=True)
+    balance_anchor_at: Mapped[dt.datetime | None] = mapped_column(DateTime, nullable=True)
+    # Whether its balance counts in net worth: once the household says it is right.
+    in_net_worth: Mapped[bool] = mapped_column(Boolean, default=False)
+
+
+class Mortgage(Base, TimestampMixin):
+    """A home loan's details, for the Mortgage page: what was borrowed and when, the
+    term, the interest rate over time, and the accounts that offset it. The balance
+    owing lives on the loan's account (its balance anchor is what the household said)."""
+
+    __tablename__ = "mortgages"
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_uuid)
+    household_id: Mapped[str] = mapped_column(ForeignKey("households.id"), index=True)
+    account_id: Mapped[str] = mapped_column(
+        ForeignKey("accounts.id", ondelete="CASCADE"), nullable=False
+    )
+    original_cents: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    start_date: Mapped[dt.date | None] = mapped_column(Date, nullable=True)
+    term_months: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    rates: Mapped[list | None] = mapped_column(JSON, nullable=True)
+    offset_account_ids: Mapped[list | None] = mapped_column(JSON, nullable=True)
+
+    __table_args__ = (UniqueConstraint("account_id", name="uq_mortgage_account"),)
 
 
 class Category(Base, TimestampMixin):

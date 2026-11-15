@@ -17,7 +17,7 @@ from .. import models, schemas
 from ..constants import LOAN_REPAYMENT
 from ..db import get_db
 from ..deps import get_current_user, optional_period, require_writer
-from ..services import periods, repayments, transfers
+from ..services import balances, periods, repayments, transfers
 from ..services.categorise import (
     PERSON_CONFIDENCE,
     RuleDefinition,
@@ -374,6 +374,7 @@ def create_manual(
         ),
     )
     db.add(txn)
+    balances.reanchor(db, [txn.account_id])
     db.commit()
     db.refresh(txn)
     return _to_out(txn, _cat_names(db, user.household_id), _acct_names(db, user.household_id))
@@ -671,5 +672,6 @@ def delete_txn(
         ):
             transfers.release(db, other)
     db.delete(t)
+    balances.reanchor(db, [t.account_id])
     db.commit()
     return Response(status_code=status.HTTP_204_NO_CONTENT)

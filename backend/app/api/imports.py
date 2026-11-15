@@ -15,7 +15,7 @@ from .. import models, schemas
 from ..db import get_db
 from ..deps import get_current_user, require_writer
 from ..ratelimit import rate_limit_import
-from ..services import audit, dedup, importers
+from ..services import audit, balances, dedup, importers, networth
 from ..services.categorise import build_categoriser
 from ..services.transfers import classify_transfers
 
@@ -689,12 +689,14 @@ async def commit(
 
     added = 0
     skipped = 0
+    touched: set[str] = set()
     resolve = _resolver(multi, targets, single)
     decisions, _ = _decide(db, parsed, resolve)
     for index, p, target, verdict in decisions:
         if target.account_id is None or not _will_import(verdict, index, forced, skipped_rows):
             skipped += 1
             continue
+        touched.add(target.account_id)
         result = categoriser.categorise(p.raw_description, p.merchant)
         db.add(
             models.Transaction(
@@ -718,12 +720,15 @@ async def commit(
 
     batch.added_count = added
     batch.skipped_count = skipped
+    # A balance the household stated on a day keeps: older rows were already in it.
+    balances.reanchor(db, touched)
     db.commit()
     # Scoped to the dates this file covered. Re-deciding the whole history after every
     # import is how a crafted row could reach back years and pair itself with a real
     # expense, taking both out of every figure the app reports.
     earliest = min((p.txn_date for p in parsed), default=None)
     scan = classify_transfers(db, user.household_id, since=earliest)
+    networth.record_snapshot_if_used(db, user.household_id)
     audit.record(
         db, action="import_commit", household_id=user.household_id, actor_user_id=user.id,
         entity="import_batch", entity_id=batch.id, detail={"added": added, "skipped": skipped},
