@@ -5,6 +5,50 @@ All notable changes to Saiva are documented here. The project follows
 
 ## [Unreleased]
 
+## [0.18.0] — 2026-11-15
+
+Apply it with **Update now** in Settings. On first start, Saiva sorts the transfers
+already in your accounts once (see below). Check each account's type on **Accounts →
+Edit**, since the type decides how money going into it counts.
+
+### Added
+
+- **Transfers by kind.** When money leaves one of your accounts and the same amount
+  arrives in another within three days, Saiva links the two and says what it is:
+  - **Card payment** — to a credit card. Left out of spending, as the purchases on the
+    card already count.
+  - **Between accounts** — e.g. everyday to savings. Left out of spending and income.
+  - **Loan repayment** — to a home or personal loan. Counts as spending once (Mortgage or
+    Loan repayments), on the account that paid it.
+- **Transactions → Transfers.** Pairs Saiva isn't sure about wait here for you: **Accept**
+  or **Not a transfer** (it won't be suggested again). Below is everything linked, to
+  change its kind or unlink it. The tab shows how many are waiting.
+- **Your bank's wording.** On **Accounts → Edit**, list the words your bank uses for a
+  payment to that account, one per line — e.g. "By Authority To Cc" for the credit card.
+  Payments with that wording link by themselves. Accepting a pair can remember its
+  wording for you.
+- **Link by hand.** The ⇄ button on a transaction links it with its other half, or
+  unlinks it.
+- **Cash deposits.** Money into a savings or offset account that came from none of your
+  accounts — a gift, say — is filed as **Cash deposit**, which counts as income.
+- **Notes.** Add a note to any transaction ("Gift from Mum") in its ⋯ window; Saiva
+  suggests one from the description. Notes show under the description.
+- **Hide transfers** on the transactions list.
+- An account's type can now be changed on **Accounts → Edit**.
+
+### Changed
+
+- A linked transaction is tagged with its kind and the other account, e.g. "Card payment
+  → Credit card".
+- Importing a statement says how many transfers it linked, how many are left to review
+  and the cash deposits it found, with a link to the review.
+- Linked transfers are no longer flagged as possible duplicates, and the cash-flow
+  forecast starts from your everyday, savings, offset and cash accounts only.
+
+### Fixed
+
+- The message after an import ("Imported 42 transactions…") never showed. It does now.
+
 
 ## [0.17.6] — 2026-11-14
 
