@@ -306,7 +306,9 @@ def test_unlinking_releases_both_sides_and_is_remembered(auth_client: TestClient
     for leg in (out, inflow):
         row = _row(leg)
         assert (row.transfer_group_id, row.transfer_kind, row.is_transfer) == (None, None, False)
-        assert row.category_id is None  # Internal transfers was the link's, not a choice
+    assert _row(out).category_id is None  # Internal transfers was the link's, not a choice
+    # Not from Everyday after all, and from none of the other accounts: a cash deposit.
+    assert _row(inflow).category_id == _cat(auth_client, "Cash deposit")
     _scan(auth_client)
     assert _row(out).transfer_group_id is None
 

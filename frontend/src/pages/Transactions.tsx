@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 
 import { api, ApiError } from "../api/client";
@@ -77,6 +77,12 @@ export function Transactions() {
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [bulkCat, setBulkCat] = useState("");
   const [dialogTxn, setDialogTxn] = useState<Transaction | null>(null);
+  // Which ⋯ window is open when a save comes back: the person may have closed it, or
+  // opened another, while it was on its way.
+  const openDialogId = useRef<string | null>(null);
+  useEffect(() => {
+    openDialogId.current = dialogTxn?.id ?? null;
+  }, [dialogTxn]);
   const [transferTxn, setTransferTxn] = useState<Transaction | null>(null);
   const [dialogError, setDialogError] = useState<string | null>(null);
   const [flash, setFlash] = useState<string | null>(null);
@@ -180,26 +186,35 @@ export function Transactions() {
         throw new SaveFailed(e, noteSaved);
       }
     },
-    onSuccess: (r) => {
+    onSuccess: (r, v) => {
       invalidate();
-      setDialogTxn(null);
+      if (openDialogId.current === v.txn.id) {
+        setDialogTxn(null);
+        setDialogError(null);
+      }
       showFlash(
         r
           ? `Updated ${r.updated_count} transaction${r.updated_count === 1 ? "" : "s"}`
           : "Note saved",
       );
     },
-    onError: (e) => {
+    onError: (e, v) => {
       // The note goes first, so it may be saved when the rest is not: say which, show
       // what is there now, and keep the window open with the person's choices in it.
       invalidate();
       const reason = e instanceof SaveFailed ? e.reason : e;
       const why = reason instanceof ApiError ? ` ${reason.message}` : "";
-      setDialogError(
-        e instanceof SaveFailed && e.noteSaved
-          ? `Note saved, but the category wasn't changed.${why}`
-          : `Not saved.${why}`,
-      );
+      const noteSaved = e instanceof SaveFailed && e.noteSaved;
+      const message = noteSaved ? `Note saved, but the rest wasn't saved.${why}` : `Not saved.${why}`;
+      if (openDialogId.current !== v.txn.id) {
+        showFlash(message); // its window is gone: say it on the page instead
+        return;
+      }
+      if (noteSaved) {
+        // What is stored now, so a second Apply compares the note with it.
+        setDialogTxn((t) => (t && t.id === v.txn.id ? { ...t, notes: v.body.notes ?? null } : t));
+      }
+      setDialogError(message);
     },
   });
   const lockToggle = useMutation({
@@ -680,17 +695,19 @@ export function Transactions() {
                         <td className="num">{g.count}</td>
                         <td className="num">{formatCents(g.total_cents)}</td>
                         <td>
-                          <CategoryPicker
-                            className="pill-select"
-                            aria-label="Category for this group"
-                            categories={allCategories}
-                            value=""
-                            disabled={groupApply.isPending}
-                            onChange={(id) => {
-                              if (id) groupApply.mutate({ sampleId: g.sample_id, categoryId: id });
-                            }}
-                            placeholder="Choose…"
-                          />
+                          {canEdit && (
+                            <CategoryPicker
+                              className="pill-select"
+                              aria-label="Category for this group"
+                              categories={allCategories}
+                              value=""
+                              disabled={groupApply.isPending}
+                              onChange={(id) => {
+                                if (id) groupApply.mutate({ sampleId: g.sample_id, categoryId: id });
+                              }}
+                              placeholder="Choose…"
+                            />
+                          )}
                         </td>
                       </tr>
                     ))}
@@ -723,7 +740,10 @@ export function Transactions() {
             setDialogTxn(null);
             setDialogError(null);
           }}
-          onSubmit={(body) => dialogApply.mutate({ txn: dialogTxn, body })}
+          onSubmit={(body) => {
+            setDialogError(null);
+            dialogApply.mutate({ txn: dialogTxn, body });
+          }}
         />
       )}
     </div>

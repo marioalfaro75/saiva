@@ -65,9 +65,14 @@ export function AccountDialog({ account, onClose, onDone }: Props) {
     },
     onSuccess: ({ scan, scanFailed, rekinded }) => {
       void qc.invalidateQueries();
-      const recounted = rekinded
-        ? ` ${plural(rekinded, "linked transfer")} changed to ${TRANSFER_KIND_LABELS[kindForType(type)]}.`
-        : "";
+      // Between two loan types the kind stays a loan repayment; what moves is where the
+      // repayment is filed.
+      const sameKind = kindForType(account.type) === kindForType(type);
+      const recounted = !rekinded
+        ? ""
+        : sameKind && kindForType(type) === "loan_repayment"
+          ? ` ${plural(rekinded, "loan repayment")} now filed as ${type === "home_loan" ? "Mortgage" : "Loan repayments"}.`
+          : ` ${plural(rekinded, "linked transfer")} changed to ${TRANSFER_KIND_LABELS[kindForType(type)]}.`;
       onDone(
         scanFailed
           ? `Saved.${recounted} Couldn't look through your transactions again: try Transactions → Transfers → Look again.`

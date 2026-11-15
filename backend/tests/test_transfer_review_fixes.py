@@ -268,11 +268,11 @@ def test_unlinking_keeps_a_persons_unscored_category_and_clears_an_older_release
     auth_client: TestClient,
 ) -> None:
     everyday = create_account(auth_client, "Everyday")["id"]
-    savings = create_account(auth_client, "Savings", "savings")["id"]
+    other = create_account(auth_client, "Other", "everyday")["id"]
     gifts = _cat(auth_client, "Gifts")
     internal = _cat(auth_client, "Internal transfers")
     out = _add(auth_client, everyday, "2026-06-05", -5000, "X")
-    inflow = _add(auth_client, savings, "2026-06-05", 5000, "Y")
+    inflow = _add(auth_client, other, "2026-06-05", 5000, "Y")
     _set(out, is_transfer=True, transfer_group_id="g", transfer_kind="own_accounts",
          category_id=gifts, confidence=None)
     _set(inflow, is_transfer=True, transfer_group_id="g", transfer_kind="own_accounts",
@@ -814,3 +814,126 @@ def test_a_kind_left_behind_by_an_older_image_is_cleared_on_start(
 
     assert _row(stale).transfer_kind is None
 
+
+
+# --------------------------------------------------------------------------------------
+# The third review
+# --------------------------------------------------------------------------------------
+
+
+def _held_back(client: TestClient) -> tuple[str, str, str]:
+    """An outflow offered with the card's "Payment received", and a deposit it could
+    also be the other half of -- held back from being a cash deposit while it waits."""
+    everyday = create_account(client, "Everyday")["id"]
+    savings = create_account(client, "Savings", "savings")["id"]
+    card = create_account(client, "Visa", "credit_card")["id"]
+    atm = _add(client, everyday, "2026-06-04", -50000, "ATM WITHDRAWAL")
+    paid = _add(client, card, "2026-06-05", 50000, "PAYMENT RECEIVED THANK YOU")
+    lodged = _add(client, savings, "2026-06-05", 50000, "BRANCH CASH LODGEMENT")
+    assert _scan(client)["to_review"] == 1
+    assert _row(lodged).category_id is None
+    return atm, paid, lodged
+
+
+def test_accepting_without_new_wording_looks_again(auth_client: TestClient) -> None:
+    atm, paid, lodged = _held_back(auth_client)
+
+    resp = auth_client.post(
+        "/api/transfers/accept", json={"outflow_id": atm, "inflow_id": paid, "learn": False}
+    )
+
+    assert resp.status_code == 200, resp.text
+    assert _row(lodged).category_id == _cat(auth_client, "Cash deposit")
+
+
+def test_linking_by_hand_looks_again(auth_client: TestClient) -> None:
+    atm, paid, lodged = _held_back(auth_client)
+
+    resp = auth_client.post("/api/transfers/link", json={"first_id": atm, "second_id": paid})
+
+    assert resp.status_code == 200, resp.text
+    assert _row(lodged).category_id == _cat(auth_client, "Cash deposit")
+
+
+def test_the_review_list_never_offers_a_persons_cash_deposit(auth_client: TestClient) -> None:
+    everyday = create_account(auth_client, "Everyday")["id"]
+    savings = create_account(auth_client, "Savings", "savings")["id"]
+    cash = _cat(auth_client, "Cash deposit")
+    with SessionLocal() as db:  # adopted from a household's own category, kind expense
+        category = db.get(models.Category, cash)
+        assert category is not None
+        category.kind = "expense"
+        db.commit()
+    deposit = _add(auth_client, savings, "2026-03-03", 20000, "BRANCH LODGEMENT")
+    _set(deposit, category_id=cash, confidence=PERSON_CONFIDENCE)
+    _add(auth_client, everyday, "2026-03-04", -20000, "ATM WITHDRAWAL")
+
+    assert _suggestions(auth_client) == []
+
+
+def test_a_kind_a_person_chose_survives_an_older_image_splitting_a_leg(
+    auth_client: TestClient,
+) -> None:
+    everyday = create_account(auth_client, "Everyday")["id"]
+    loan = create_account(auth_client, "Home loan", "home_loan")["id"]
+    _wording(auth_client, loan, "By Authority To Westpac")
+    out = _add(auth_client, everyday, "2026-06-05", -200000, "By Authority To Westpac")
+    inflow = _add(auth_client, loan, "2026-06-05", 200000, "REPAYMENT")
+    _scan(auth_client)
+    group = _row(out).transfer_group_id
+    auth_client.post(f"/api/transfers/{group}/kind", json={"kind": "own_accounts"})
+    # 0.17 splits the loan's leg: its parts get the group, not the kind.
+    parts = _split(auth_client, inflow, 120000, 80000)
+    for part in parts:
+        _set(part, transfer_kind=None)
+
+    _classify_transfers_once(engine)
+
+    assert _row(out).transfer_kind == "own_accounts"
+    assert all(_row(p).transfer_kind == "own_accounts" for p in parts)
+
+
+def test_a_kind_left_behind_takes_its_automatic_category_with_it(auth_client: TestClient) -> None:
+    savings = create_account(auth_client, "Savings", "savings")["id"]
+    stale = _add(auth_client, savings, "2026-06-20", -50000, "By Authority To Cc")
+    mine = _add(auth_client, savings, "2026-06-21", -900, "R")
+    card_payments = _cat(auth_client, "Credit-card payments")
+    _set(stale, transfer_kind="card_payment", category_id=card_payments, confidence=0.98)
+    _set(mine, transfer_kind="card_payment", category_id=card_payments,
+         confidence=PERSON_CONFIDENCE)
+
+    _classify_transfers_once(engine)
+
+    assert (_row(stale).transfer_kind, _row(stale).category_id) == (None, None)
+    assert _row(mine).category_id == card_payments
+
+
+def test_counting_what_learned_wording_linked_loads_no_row_again(auth_client: TestClient) -> None:
+    savings = create_account(auth_client, "Savings", "savings")["id"]
+
+    def accept_with(n: int) -> int:
+        card = create_account(auth_client, f"Card {n}", "credit_card")["id"]
+        ids = []
+        for i in range(n):
+            day = f"2026-06-{2 * i + 1:02d}"
+            ids.append((
+                _add(auth_client, savings, day, -(1000 * n + i), f"Pay Card Number {n}"),
+                _add(auth_client, card, day, 1000 * n + i, "CREDIT"),
+            ))
+        _scan(auth_client)
+        statements: list[str] = []
+
+        def record(conn, cursor, statement, parameters, context, executemany):  # noqa: ANN001
+            statements.append(statement)
+
+        event.listen(engine, "before_cursor_execute", record)
+        try:
+            resp = auth_client.post(
+                "/api/transfers/accept", json={"outflow_id": ids[0][0], "inflow_id": ids[0][1]}
+            )
+        finally:
+            event.remove(engine, "before_cursor_execute", record)
+        assert resp.json()["also_linked"] == n - 1
+        return sum(1 for s in statements if s.lstrip().upper().startswith("SELECT"))
+
+    assert accept_with(8) == accept_with(2)

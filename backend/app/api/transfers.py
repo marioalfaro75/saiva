@@ -110,14 +110,14 @@ def _link_learned(
     return sum(
         1
         for p in scan.linked
-        if p.inflow.account_id == destination.id
-        and transfers.has_phrase(transfers.wording_of(p.outflow.raw_description or ""), learned)
+        if p.destination_id == destination.id and transfers.has_phrase(p.outflow_words, learned)
     )
 
 
 def _resettle(db: Session, household_id: str, *dates: dt.date) -> None:
-    """After a person's decision, look again around it: an inflow no longer waiting may
-    be a cash deposit after all, and another may now be the one offered."""
+    """After a person's decision -- accept, link, unlink, dismiss -- look again around
+    it: an inflow no longer held back may be a cash deposit after all, and another may
+    now be the one offered."""
     try:
         transfers.classify_transfers(db, household_id, since=min(dates))
     except Exception:  # noqa: BLE001 - the decision stands; the next scan settles it
@@ -159,9 +159,14 @@ def accept(
     transfers.apply_kind(db, out, inflow, kind)
     learned = transfers.learn_wording(destination, out.raw_description) if payload.learn else None
     db.commit()
-    also = _link_learned(db, user.household_id, destination, learned) if learned else 0
+    group_id, dates = out.transfer_group_id or "", (out.txn_date, inflow.txn_date)
+    if learned:
+        also = _link_learned(db, user.household_id, destination, learned)
+    else:
+        also = 0
+        _resettle(db, user.household_id, *dates)
     return schemas.TransferAcceptOut(
-        group=_group_out(db, user.household_id, out.transfer_group_id or ""),
+        group=_group_out(db, user.household_id, group_id),
         learned=learned,
         learned_for=destination.name if learned else None,
         also_linked=also,
@@ -194,7 +199,9 @@ def link(
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Account not found")
     transfers.apply_kind(db, out, inflow, payload.kind or transfers.kind_for(destination))
     db.commit()
-    return _group_out(db, user.household_id, out.transfer_group_id or "")
+    group_id = out.transfer_group_id or ""
+    _resettle(db, user.household_id, out.txn_date, inflow.txn_date)
+    return _group_out(db, user.household_id, group_id)
 
 
 @router.get("/candidates/{txn_id}", response_model=list[schemas.TransactionOut])
@@ -286,10 +293,12 @@ def unlink(
 ) -> schemas.CountOut:
     """Not a transfer after all: both sides become ordinary transactions again, and the
     pair is never linked again."""
+    dates = [t.txn_date for t in transfers.group_legs(db, user.household_id, group_id)]
     released = transfers.unlink(db, user.household_id, group_id)
     if not released:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Transfer not found")
     db.commit()
+    _resettle(db, user.household_id, *dates)
     return schemas.CountOut(updated=released)
 
 

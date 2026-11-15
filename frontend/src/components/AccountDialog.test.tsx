@@ -198,5 +198,20 @@ describe("AccountDialog", () => {
     );
     expect(onClose).toHaveBeenCalled();
   });
+
+  it("says where loan repayments are filed when a loan's type changes", async () => {
+    vi.spyOn(api, "updateAccount").mockResolvedValue({ ...ACCOUNT, transfers_rekinded: 2 });
+    vi.spyOn(api, "detectTransfers").mockResolvedValue({ linked: 0, to_review: 0, cash_deposits: 0 });
+    show({ ...ACCOUNT, type: "home_loan" });
+    fireEvent.change(screen.getByRole("combobox", { name: "Type" }), {
+      target: { value: "personal_loan" },
+    });
+    save();
+    await waitFor(() =>
+      expect(onDone).toHaveBeenCalledWith(
+        "Saved. 2 loan repayments now filed as Loan repayments. 0 transfers linked, 0 to review.",
+      ),
+    );
+  });
 });
 

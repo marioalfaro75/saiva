@@ -276,7 +276,7 @@ describe("Transactions: the ⋯ window", () => {
     fireEvent.click(within(dialog).getByRole("button", { name: "Apply" }));
 
     expect(await within(dialog).findByRole("alert")).toHaveTextContent(
-      "Note saved, but the category wasn't changed. Unknown category",
+      "Note saved, but the rest wasn't saved. Unknown category",
     );
     recategorise.mockRestore();
   });
@@ -314,6 +314,118 @@ describe("Transactions: the ⋯ window", () => {
       fireEvent.keyDown(picker, { key: "Enter" });
     }, { category_id: "c1" });
     recategorise.mockRestore();
+  });
+
+  it("reports a failed save on the page when its window was closed in the meantime", async () => {
+    let fail: (e: unknown) => void = () => undefined;
+    const recategorise = vi.spyOn(api, "recategorise").mockReturnValue(
+      new Promise((_, reject) => {
+        fail = reject;
+      }),
+    );
+    const dialog = await openFor("Woolworths");
+    fireEvent.click(within(dialog).getByLabelText("Lock — exempt from auto-categorisation"));
+    fireEvent.click(within(dialog).getByRole("button", { name: "Apply" }));
+    await waitFor(() => expect(recategorise).toHaveBeenCalled());
+    fireEvent.click(within(dialog).getByRole("button", { name: "Cancel" }));
+    // Another transaction's window is open when the answer comes back.
+    fireEvent.click(within(rowOf("Deposit")).getByRole("button", { name: "More actions" }));
+    const other = await screen.findByRole("dialog", { name: "Categorise" });
+
+    fail(new ApiError(400, "Unknown category"));
+
+    expect(await screen.findByRole("status")).toHaveTextContent("Not saved. Unknown category");
+    expect(within(other).queryByRole("alert")).toBeNull();
+    recategorise.mockRestore();
+  });
+
+  it("leaves another transaction's window open when an earlier save finishes", async () => {
+    type Result = Awaited<ReturnType<typeof api.recategorise>>;
+    let finish: (v: Result) => void = () => undefined;
+    const recategorise = vi.spyOn(api, "recategorise").mockReturnValue(
+      new Promise<Result>((resolve) => {
+        finish = resolve;
+      }),
+    );
+    const dialog = await openFor("Woolworths");
+    fireEvent.click(within(dialog).getByLabelText("Lock — exempt from auto-categorisation"));
+    fireEvent.click(within(dialog).getByRole("button", { name: "Apply" }));
+    await waitFor(() => expect(recategorise).toHaveBeenCalled());
+    fireEvent.click(within(dialog).getByRole("button", { name: "Cancel" }));
+    fireEvent.click(within(rowOf("Deposit")).getByRole("button", { name: "More actions" }));
+    await screen.findByRole("dialog", { name: "Categorise" });
+
+    finish({ updated_count: 1 } as Result);
+
+    expect(await screen.findByText("Updated 1 transaction")).toBeInTheDocument();
+    expect(screen.getByRole("dialog", { name: "Categorise" })).toHaveTextContent("Deposit");
+    recategorise.mockRestore();
+  });
+
+  it("after a partial save, compares the note with what was saved", async () => {
+    const recategorise = vi
+      .spyOn(api, "recategorise")
+      .mockRejectedValueOnce(new ApiError(400, "Unknown category"))
+      .mockResolvedValue({ updated_count: 1 } as Awaited<ReturnType<typeof api.recategorise>>);
+    const update = vi.spyOn(api, "updateTransaction");
+    const dialog = await openFor("Deposit"); // its note is "Gift from Mum"
+    const note = within(dialog).getByRole("textbox", { name: "Note" });
+    fireEvent.click(within(dialog).getByLabelText("Lock — exempt from auto-categorisation"));
+    fireEvent.change(note, { target: { value: "Gift from Dad" } });
+    fireEvent.click(within(dialog).getByRole("button", { name: "Apply" }));
+    await within(dialog).findByRole("alert");
+
+    fireEvent.change(note, { target: { value: "Gift from Mum" } });
+    fireEvent.click(within(dialog).getByRole("button", { name: "Apply" }));
+
+    await waitFor(() => expect(recategorise).toHaveBeenCalledTimes(2));
+    expect(update.mock.calls.map((c) => c[1])).toEqual([
+      { notes: "Gift from Dad" },
+      { notes: "Gift from Mum" },
+    ]);
+    recategorise.mockRestore();
+    update.mockRestore();
+  });
+
+  it("clears the last error when Apply is pressed again", async () => {
+    let fail: (e: unknown) => void = () => undefined;
+    const recategorise = vi
+      .spyOn(api, "recategorise")
+      .mockRejectedValueOnce(new ApiError(400, "Unknown category"))
+      .mockReturnValueOnce(
+        new Promise((_, reject) => {
+          fail = reject;
+        }),
+      );
+    const dialog = await openFor("Woolworths");
+    fireEvent.click(within(dialog).getByLabelText("Lock — exempt from auto-categorisation"));
+    fireEvent.click(within(dialog).getByRole("button", { name: "Apply" }));
+    await within(dialog).findByRole("alert");
+
+    fireEvent.click(within(dialog).getByRole("button", { name: "Apply" }));
+
+    await waitFor(() => expect(within(dialog).queryByRole("alert")).toBeNull());
+    fail(new ApiError(400, "Unknown category"));
+    expect(await within(dialog).findByRole("alert")).toBeInTheDocument();
+    recategorise.mockRestore();
+  });
+});
+
+describe("Transactions: group review for a viewer", () => {
+  it("offers no picker that would re-file a group", async () => {
+    role.value = "viewer";
+    stubApi({
+      "/transactions/groups": {
+        by: "merchant",
+        groups: [
+          { key: "woolworths", sample_id: "t3", sample_description: "Woolworths", count: 3, total_cents: -9000 },
+        ],
+      },
+      ...STUBS,
+    });
+    await show("/transactions?period=fy:2026&tab=groups");
+    await screen.findByText("Woolworths");
+    expect(screen.queryByRole("combobox", { name: "Category for this group" })).toBeNull();
   });
 });
 

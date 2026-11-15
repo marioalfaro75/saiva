@@ -189,6 +189,9 @@ class Pair:
     inflow: models.Transaction
     kind: str
     evidence: str | None  # None = only the amount and dates agree: for review
+    # Read when the pair was found, so counting after a commit loads nothing again.
+    destination_id: str = ""
+    outflow_words: str = ""
 
     @property
     def sure(self) -> bool:
@@ -251,6 +254,14 @@ def _income_ids(db: Session, household_id: str) -> set[str]:
             )
         ).tuples()
     }
+
+
+def _offered_income_ids(db: Session, household_id: str) -> set[str]:
+    """Income categories, and Cash deposit whatever kind a household's own category of
+    that name had when it was adopted: a person's or a rule's is never offered as half a
+    transfer. One set for the review list and the scan, so they agree."""
+    cash = _category_ids(db, household_id).get(CASH_DEPOSIT_CATEGORY)
+    return _income_ids(db, household_id) | ({cash} if cash else set())
 
 
 def _income_already(t: models.Transaction, income_ids: set[str]) -> bool:
@@ -362,7 +373,14 @@ def _pairing(
             if edge_out.id in used or edge_in.id in used:
                 continue
             pairs.append(
-                Pair(edge_out, edge_in, kind_for(accounts[edge_in.account_id]), edge_why)
+                Pair(
+                    edge_out,
+                    edge_in,
+                    kind_for(accounts[edge_in.account_id]),
+                    edge_why,
+                    destination_id=edge_in.account_id,
+                    outflow_words=wording_of(edge_out.raw_description or ""),
+                )
             )
             used.update({edge_out.id, edge_in.id})
     linked = {leg.id for p in pairs if p.sure for leg in (p.outflow, p.inflow)}
@@ -393,7 +411,7 @@ def find_pairs(
         household_id,
         since=since,
         window_days=window_days,
-        income_ids=_income_ids(db, household_id),
+        income_ids=_offered_income_ids(db, household_id),
     ).pairs
 
 
@@ -520,9 +538,7 @@ def classify_transfers(
     accounts = _accounts(db, household_id)
     categories = _category_ids(db, household_id)
     cash = categories.get(CASH_DEPOSIT_CATEGORY)
-    # Cash deposit is income, whatever kind a household's own category of that name had
-    # when it was adopted: a person's or a rule's is never offered as half a transfer.
-    income_ids = _income_ids(db, household_id) | ({cash} if cash else set())
+    income_ids = _offered_income_ids(db, household_id)
     scan = TransferScan()
     pairing = _pairing(
         db, household_id, since=since, window_days=window_days, income_ids=income_ids
@@ -798,8 +814,14 @@ def classify_existing(db: Session, household_id: str) -> int:
                 for t in legs:
                     release(db, t)
             continue
-        destination = accounts.get(pair[1].account_id)
-        kind = kind_for(destination) if destination is not None else OWN_ACCOUNTS
+        known = {leg.transfer_kind for leg in pair if leg.transfer_kind}
+        if len(known) == 1 and all(leg.transfer_kind for leg in pair):
+            # The legs already say what they are (a person may have chosen it): only
+            # the rest of the group -- parts an older image split off -- needs it.
+            kind = next(iter(known))
+        else:
+            destination = accounts.get(pair[1].account_id)
+            kind = kind_for(destination) if destination is not None else OWN_ACCOUNTS
         apply_kind(db, pair[0], pair[1], kind, accounts, categories)
         classified += 1
     for t in db.execute(
@@ -809,6 +831,6 @@ def classify_existing(db: Session, household_id: str) -> int:
             models.Transaction.transfer_kind.is_not(None),
         )
     ).scalars():
-        t.transfer_kind = None
+        release(db, t)  # its kind's automatic category goes with the kind
     db.flush()
     return classified
