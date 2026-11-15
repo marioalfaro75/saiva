@@ -401,6 +401,8 @@ function LoanView({ accountId }: { accountId: string }) {
   const [message, setMessage] = useState<string | null>(null);
   const [text, setText] = useState<WhatIfText>(NO_WHAT_IF);
   const [applied, setApplied] = useState<WhatIfText>(NO_WHAT_IF);
+  // Bumped by Clear: an answer from before it isn't carried into the next what-if.
+  const [round, setRound] = useState(0);
   const [showWhatIf, setShowWhatIf] = useState(false);
   // Ask once typing pauses, not on every key.
   useEffect(() => {
@@ -415,20 +417,21 @@ function LoanView({ accountId }: { accountId: string }) {
   // The loan as it is; and, apart, the what-if. A what-if that fails leaves the page.
   const base = useQuery({ queryKey: ["mortgage", accountId], queryFn: () => api.mortgage(accountId) });
   const whatIf = useQuery({
-    queryKey: ["mortgage", accountId, values],
+    queryKey: ["mortgage", accountId, values, round],
     queryFn: () => api.mortgage(accountId, values ?? {}),
     enabled: trying,
     // While the next answer comes, keep the last one only if there was one.
     placeholderData: (previous, previousQuery) =>
-      previousQuery?.state.data ? keepPreviousData(previous) : undefined,
+      previousQuery?.queryKey[3] === round ? keepPreviousData(previous) : undefined,
   });
   const clear = () => {
     setText(NO_WHAT_IF);
     setApplied(NO_WHAT_IF);
+    setRound((r) => r + 1);
   };
   const whatIfFailed = !trying || !whatIf.isError
     ? null
-    : whatIf.error instanceof ApiError && whatIf.error.status < 500
+    : whatIf.error instanceof ApiError && whatIf.error.status === 422
       ? "That's too large to try."
       : "Couldn't try that. Please try again.";
 
@@ -436,10 +439,19 @@ function LoanView({ accountId }: { accountId: string }) {
   if (!base.data) return <div className="error">Couldn't load your home loan.</div>;
   const data = (trying && whatIf.data) || base.data;
   const p = data.projection;
-  const notice = message && (
-    <p className="notice" role="status">
-      {message}
-    </p>
+  const notice = (
+    <>
+      {message && (
+        <p className="notice" role="status">
+          {message}
+        </p>
+      )}
+      {base.isError && (
+        <p className="notice notice-warn" role="status">
+          Couldn't refresh. Showing what Saiva had.
+        </p>
+      )}
+    </>
   );
 
   if (!data.set_up || editing) {
@@ -463,11 +475,6 @@ function LoanView({ accountId }: { accountId: string }) {
   return (
     <div>
       {notice}
-      {base.isError && (
-        <p className="notice notice-warn" role="status">
-          Couldn't refresh. Showing what Saiva had.
-        </p>
-      )}
       {doubled.length > 0 && (
         <p className="notice notice-warn" role="status">
           <Link to="/net-worth">Net worth</Link> also has {doubled.map((n) => `“${n}”`).join(", ")}{" "}
@@ -620,7 +627,7 @@ export function Mortgage() {
       </PageHead>
       {loans.isLoading ? (
         <p className="muted">Loading…</p>
-      ) : loans.isError ? (
+      ) : loans.isError && !loans.data ? (
         <div className="error">Couldn't load your home loans.</div>
       ) : !accountId ? (
         <EmptyState title="No home loan yet">

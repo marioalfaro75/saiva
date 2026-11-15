@@ -109,11 +109,9 @@ export function MortgageSetup({ loan, onDone, onCancel }: Props) {
 
   // The page's own figures first, then the rest of the app in the background.
   const refresh = async () => {
-    await Promise.all([
-      qc.invalidateQueries({ queryKey: ["mortgage", loan.account_id] }),
-      qc.invalidateQueries({ queryKey: ["mortgages"] }),
-    ]);
-    void qc.invalidateQueries();
+    const mine = (key: readonly unknown[]) => key[0] === "mortgage" || key[0] === "mortgages";
+    await qc.invalidateQueries({ predicate: (q) => mine(q.queryKey) });
+    void qc.invalidateQueries({ predicate: (q) => !mine(q.queryKey) });
   };
 
   const save = useMutation({
@@ -142,7 +140,9 @@ export function MortgageSetup({ loan, onDone, onCancel }: Props) {
       });
     },
     // The page shows the new figures before it says so.
-    onSuccess: async () => {
+    onSuccess: async (saved) => {
+      // What was saved shows even if fetching it again fails.
+      qc.setQueryData(["mortgage", loan.account_id], saved);
       await refresh();
       onDone("Saved.");
     },

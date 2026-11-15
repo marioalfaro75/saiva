@@ -25,6 +25,7 @@ from .accounts import clean_schedule, latest_today
 
 # A liability entered by hand on Net worth with one of these in its name may be this loan.
 LIKE_A_HOME_LOAN = re.compile(r"mortgage|home|house|property", re.IGNORECASE)
+SAME_LOAN_SHARE = 0.2  # or one for within a fifth of what this loan owes
 
 router = APIRouter(prefix="/mortgages", tags=["mortgages"])
 
@@ -76,6 +77,25 @@ def _offset_choices(db: Session, household_id: str) -> list[models.Account]:
     )
 
 
+def _like_this_loan(db: Session, loan: models.Account) -> list[str]:
+    """Liabilities entered by hand on Net worth that may be this loan: named like a home
+    loan, or for about what it owes."""
+    owing = max(-mortgage_service.balance_through(db, loan, None), 0)
+    return [
+        item.name
+        for item in db.execute(
+            select(models.NetWorthItem)
+            .where(
+                models.NetWorthItem.household_id == loan.household_id,
+                models.NetWorthItem.kind == "liability",
+            )
+            .order_by(models.NetWorthItem.name)
+        ).scalars()
+        if LIKE_A_HOME_LOAN.search(item.name)
+        or (owing and abs(item.value_cents - owing) <= SAME_LOAN_SHARE * owing)
+    ]
+
+
 def _detail(
     db: Session, loan: models.Account, what_if: mortgage_service.WhatIf | None = None
 ) -> schemas.MortgageOut:
@@ -103,16 +123,7 @@ def _detail(
             for a in _offset_choices(db, loan.household_id)
         ],
         paid=[schemas.MortgagePaidMonth(**dataclasses.asdict(m)) for m in past.months],
-        manual_liabilities=[
-            name
-            for name in db.execute(
-                select(models.NetWorthItem.name).where(
-                    models.NetWorthItem.household_id == loan.household_id,
-                    models.NetWorthItem.kind == "liability",
-                )
-            ).scalars()
-            if LIKE_A_HOME_LOAN.search(name)
-        ],
+        manual_liabilities=_like_this_loan(db, loan),
     )
     if setup is None:
         out.missing = ["setup"]

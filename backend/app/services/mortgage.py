@@ -85,24 +85,30 @@ def _last_txn_date(db: Session, account: models.Account, today: dt.date) -> dt.d
 
 
 def charge_day_of(db: Session, loan: models.Account) -> int | None:
-    """The day of the month the lender charges interest, from the loan's statement: the
-    commonest day of its debits (31 for a month's last day). None without any."""
-    days = db.execute(
-        select(models.Transaction.txn_date)
+    """The day of the month the lender charges interest, from the loan's statement (31
+    for a month's last day): the day of its debits that say "interest", or else the day
+    the most is debited on -- interest dwarfs a fee. None without any debits."""
+    rows = db.execute(
+        select(
+            models.Transaction.txn_date,
+            models.Transaction.amount_cents,
+            models.Transaction.raw_description,
+        )
         .where(
             models.Transaction.account_id == loan.id,
             models.Transaction.amount_cents < 0,
             models.Transaction.split_parent_id.is_(None),
         )
         .order_by(models.Transaction.txn_date.desc())
-        .limit(12)
-    ).scalars().all()
-    if not days:
-        return None
-    counts = Counter(
-        31 if d.day == calendar.monthrange(d.year, d.month)[1] else d.day for d in days
-    )
-    return max(counts, key=lambda d: counts[d])
+        .limit(24)
+    ).tuples().all()
+    interest = [r for r in rows if "interest" in (r[2] or "").lower()]
+    totals: Counter[int] = Counter()
+    for day, cents, _ in interest or rows:
+        totals[31 if day.day == calendar.monthrange(day.year, day.month)[1] else day.day] += abs(
+            cents
+        )
+    return max(totals, key=lambda d: totals[d]) if totals else None
 
 
 def known_owing(db: Session, loan: models.Account, today: dt.date) -> tuple[dt.date, int]:
@@ -343,7 +349,8 @@ def simulate(
             ):
                 run.stalls = True
                 break
-            last_year_owing = owing
+            # Compared from the first year-end after the last change, not across it.
+            last_year_owing = owing if day >= settled else None
     year.owing_cents = owing
     if year.regular_cents or year.extra_cents or year.interest_cents:
         run.years.append(year)
@@ -437,10 +444,18 @@ def history(db: Session, loan: models.Account, today: dt.date, since: dt.date) -
         for k in range(1, USUAL_EXTRA_MONTHS + 1)
     ]
     first_paid = min((p.day for p in paid), default=None)
-    counted = [m for m in whole if first_paid and m >= first_paid.strftime("%Y-%m")]
+    # The months the repayments seen cover: the first only if they start near its 1st.
+    first_whole = None
+    if first_paid:
+        first_whole = first_paid if first_paid.day <= 3 else first_paid + relativedelta(
+            months=1
+        )
+    counted = [m for m in whole if first_whole and m >= first_whole.strftime("%Y-%m")]
     extras = [months[m][1] for m in counted]
-    # With only a month or two to go by, an extra is usual only if it was paid in each.
-    usual = round(statistics.median(extras) if len(extras) >= 3 else min(extras, default=0))
+    # The typical month: at least half the months had this much extra (the lower middle,
+    # so lumps in half the months aren't halved into a monthly extra). With only a month
+    # or two to go by, an extra is usual only if it was paid in each.
+    usual = round(statistics.median_low(extras) if len(extras) >= 3 else min(extras, default=0))
     return History(
         paid=paid,
         months=[PaidMonth(m, r, e) for m, (r, e) in sorted(months.items(), reverse=True)],
@@ -577,14 +592,20 @@ def project(
     # (not the weekly ones before a change to monthly, say).
     last_regular = max(past.regular_days, default=None)
     timing = None
+    paced_from: dt.date | None = None  # when the pace in force began (None: always)
     if last_regular:
         pace = _period(schedule, last_regular)
+        if in_force(schedule, last_regular) is not None:
+            i = schedule.index(pace)
+            while i > 0 and schedule[i - 1].every == pace.every:
+                i -= 1  # a new amount at the same pace is the same pace
+            paced_from = schedule[i].since if i > 0 else None
         timing = usual_timing(
-            [d for d in past.regular_days if pace.since is None or d >= pace.since], pace.every
+            [d for d in past.regular_days if paced_from is None or d >= paced_from], pace.every
         )
     if timing:
         anchor, day_of_month = timing
-        if last_regular and pace.since and anchor < pace.since <= last_regular:
+        if last_regular and paced_from and anchor < paced_from <= last_regular:
             anchor = last_regular
     else:
         anchor = next(

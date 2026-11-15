@@ -744,12 +744,12 @@ class BudgetOut(BaseModel):
 class NetWorthItemCreate(BaseModel):
     name: str = Field(min_length=1, max_length=120)
     kind: Literal["asset", "liability"]
-    value_cents: int = Field(ge=0)
+    value_cents: int = Field(ge=0, le=MAX_BALANCE_CENTS)
 
 
 class NetWorthItemUpdate(BaseModel):
     name: str | None = Field(default=None, min_length=1, max_length=120)
-    value_cents: int | None = Field(default=None, ge=0)
+    value_cents: int | None = Field(default=None, ge=0, le=MAX_BALANCE_CENTS)
 
 
 class NetWorthItemOut(BaseModel):

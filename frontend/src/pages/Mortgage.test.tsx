@@ -368,6 +368,7 @@ describe("Mortgage page", () => {
     type("One-off payment now ($)", "50");
     expect(await screen.findByText("Working it out…")).toBeInTheDocument();
     expect(screen.queryByText(/Paid off Jan 2038/)).not.toBeInTheDocument();
+    expect(screen.queryByText("What if:")).not.toBeInTheDocument(); // nor in the chart
   });
 
   it("says when a rate change is too big, or the amount too large to try", async () => {
@@ -391,6 +392,29 @@ describe("Mortgage page", () => {
     expect(await screen.findByText("Saved.")).toBeInTheDocument();
     expect(screen.getByText("Couldn't refresh. Showing what Saiva had.")).toBeInTheDocument();
     expect(screen.getByText("$450,000.00")).toBeInTheDocument();
+  });
+
+  it("shows a first setup as saved even when fetching it again fails", async () => {
+    const get = show(SETUP_NEEDED);
+    vi.spyOn(api, "saveMortgage").mockResolvedValue(SET_UP);
+    await screen.findByText("Set up your home loan");
+    type("Rate (%)", "6.24");
+    type("You owe ($)", "450,000");
+    get.mockRejectedValue(new Error("down"));
+    vi.spyOn(api, "mortgages").mockRejectedValue(new Error("down"));
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    expect(await screen.findByText("Saved.")).toBeInTheDocument();
+    expect(screen.getByText("Couldn't refresh. Showing what Saiva had.")).toBeInTheDocument();
+    expect(screen.getByText("$450,000.00")).toBeInTheDocument();
+    expect(screen.queryByText("Set up your home loan")).not.toBeInTheDocument();
+  });
+
+  it("says a what-if that isn't about size couldn't be tried, not that it's too large", async () => {
+    const get = show(SET_UP);
+    await screen.findByText("$450,000.00");
+    get.mockRejectedValue(new ApiError(401, "Not signed in"));
+    type("Extra each week ($)", "200");
+    expect(await screen.findByText("Couldn't try that. Please try again.")).toBeInTheDocument();
   });
 
   it("won't save with the repayment emptied: it would lose the history", async () => {
