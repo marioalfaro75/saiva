@@ -68,6 +68,11 @@ class Household(Base, TimestampMixin):
     rules_applied_at: Mapped[dt.datetime | None] = mapped_column(
         DateTime, nullable=True, default=dt.datetime.utcnow
     )
+    # When dbinit classified this household's transfers by kind: once, for history from
+    # before kinds existed. Set at creation by this code, like rules_applied_at.
+    transfers_classified_at: Mapped[dt.datetime | None] = mapped_column(
+        DateTime, nullable=True, default=dt.datetime.utcnow
+    )
 
     users: Mapped[list[User]] = relationship(back_populates="household")
 
@@ -109,6 +114,10 @@ class Account(Base, TimestampMixin):
     # set from values that survive a round trip: a fragment like a card's last four, or
     # a number Excel has turned into "7.34364E+11", identifies nothing later.
     bank_identifier: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    # Phrases that, in another account's description, mean money is moving to or from
+    # this one ("By Authority To Cc"): set by the household or learned from a suggestion
+    # they accepted. Lower case. None = none yet.
+    transfer_wording: Mapped[list | None] = mapped_column(JSON, nullable=True)
 
 
 class Category(Base, TimestampMixin):
@@ -207,6 +216,8 @@ class Transaction(Base, TimestampMixin):
     category_id: Mapped[str | None] = mapped_column(ForeignKey("categories.id"), nullable=True)
     is_transfer: Mapped[bool] = mapped_column(Boolean, default=False)
     transfer_group_id: Mapped[str | None] = mapped_column(String(32), nullable=True, index=True)
+    # What a linked pair is, on both legs: see TRANSFER_KINDS. None = not linked.
+    transfer_kind: Mapped[str | None] = mapped_column(String(16), nullable=True)
     is_recurring: Mapped[bool] = mapped_column(Boolean, default=False)
     # When set, auto-categorisation (rule backfills, re-runs) leaves this row alone.
     category_locked: Mapped[bool] = mapped_column(Boolean, default=False)
@@ -291,6 +302,23 @@ class SavingsGoal(Base, TimestampMixin):
     account_id: Mapped[str | None] = mapped_column(ForeignKey("accounts.id"), nullable=True)
     current_cents: Mapped[int] = mapped_column(Integer, default=0)
     sort: Mapped[int] = mapped_column(Integer, default=0)
+
+
+class TransferDismissal(Base):
+    """A pair a person said is not one transfer: never suggested or linked again."""
+
+    __tablename__ = "transfer_dismissals"
+    __table_args__ = (
+        UniqueConstraint("outflow_id", "inflow_id", name="uq_transfer_dismissal_pair"),
+    )
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_uuid)
+    household_id: Mapped[str] = mapped_column(ForeignKey("households.id"), index=True)
+    outflow_id: Mapped[str] = mapped_column(String(32), nullable=False)
+    inflow_id: Mapped[str] = mapped_column(String(32), nullable=False)
+    created_at: Mapped[dt.datetime] = mapped_column(
+        DateTime, default=dt.datetime.utcnow, nullable=False
+    )
 
 
 class AuditLog(Base):

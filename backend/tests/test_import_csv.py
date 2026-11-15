@@ -59,6 +59,8 @@ def test_preview_commit_dedup_and_categorisation(auth_client: TestClient) -> Non
         "added": 0,
         "skipped": 6,
         "transfers_linked": recommit.json()["transfers_linked"],
+        "transfers_to_review": recommit.json()["transfers_to_review"],
+        "cash_deposits": recommit.json()["cash_deposits"],
     }
 
     # Starter rules categorised Woolworths as Supermarkets (PRD R11).

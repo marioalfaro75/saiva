@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { api } from "./client";
+import { api, ApiError, describeDetail } from "./client";
 
 function mockFetch(body: unknown, status = 200) {
   const res = {
@@ -281,3 +281,27 @@ describe("CSRF handling", () => {
     expect(fn.mock.calls).toHaveLength(1);
   });
 });
+
+describe("a refusal's reason", () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  it("reads a list of validation errors as sentences, not [object Object]", async () => {
+    mockFetch(
+      {
+        detail: [
+          { loc: ["body", "transfer_wording", 0], msg: "String should have at least 2 characters" },
+          { loc: ["body", "name"], msg: "Field required" },
+        ],
+      },
+      422,
+    );
+    const error = await api.updateAccount("a1", { transfer_wording: ["x"] }).catch((e) => e);
+    expect(error).toBeInstanceOf(ApiError);
+    expect(error.message).toBe("String should have at least 2 characters; Field required");
+  });
+
+  it("keeps a plain reason as it is", () => {
+    expect(describeDetail("Too short.")).toBe("Too short.");
+  });
+});
+

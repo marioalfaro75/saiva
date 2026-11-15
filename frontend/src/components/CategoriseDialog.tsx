@@ -9,6 +9,8 @@ interface Props {
   txn: Transaction;
   categories: Category[];
   busy?: boolean;
+  /** Why the last Apply failed, shown in the window. */
+  error?: string | null;
   onClose: () => void;
   onSubmit: (body: {
     category_id: string | null;
@@ -16,6 +18,8 @@ interface Props {
     pattern?: string | null;
     make_rule: boolean;
     lock: boolean;
+    /** What it was for; null clears it. Absent when unchanged. */
+    notes?: string | null;
   }) => void;
 }
 
@@ -26,13 +30,14 @@ const SCOPE_LABELS: Record<RecategoriseScope, string> = {
   contains: "All containing text…",
 };
 
-export function CategoriseDialog({ txn, categories, busy, onClose, onSubmit }: Props) {
+export function CategoriseDialog({ txn, categories, busy, error, onClose, onSubmit }: Props) {
   const fid = useId();
   const [categoryId, setCategoryId] = useState(txn.category_id ?? "");
   const [scope, setScope] = useState<RecategoriseScope>("none");
   const [pattern, setPattern] = useState(txn.merchant ?? txn.raw_description);
   const [makeRule, setMakeRule] = useState(false);
   const [lock, setLock] = useState(txn.category_locked);
+  const [note, setNote] = useState(txn.notes ?? "");
   // Escape, a focus trap, focus return, and dismissal only when the gesture began
   // outside — so drag-selecting the pattern field no longer discards the edit.
   const panel = useDismissable<HTMLDivElement>(true, onClose);
@@ -88,6 +93,26 @@ export function CategoriseDialog({ txn, categories, busy, onClose, onSubmit }: P
           </div>
         )}
 
+        <div className="field">
+          <label htmlFor={`${fid}-note`}>Note</label>
+          <input
+            id={`${fid}-note`}
+            value={note}
+            onChange={(e) => setNote(e.target.value)}
+            placeholder="What it was for (optional)"
+            maxLength={500}
+          />
+          {!note && txn.note_suggestion && (
+            <button
+              type="button"
+              className="btn btn-ghost note-suggestion"
+              onClick={() => setNote(txn.note_suggestion ?? "")}
+            >
+              Use “{txn.note_suggestion}”
+            </button>
+          )}
+        </div>
+
         <div className="check-row">
           <input
             id="make-rule"
@@ -107,6 +132,12 @@ export function CategoriseDialog({ txn, categories, busy, onClose, onSubmit }: P
           <label htmlFor="lock-txn">Lock — exempt from auto-categorisation</label>
         </div>
 
+        {error && (
+          <div className="error" role="alert">
+            {error}
+          </div>
+        )}
+
         <div className="modal-actions">
           <button className="btn btn-ghost" onClick={onClose}>
             Cancel
@@ -121,6 +152,7 @@ export function CategoriseDialog({ txn, categories, busy, onClose, onSubmit }: P
                 pattern: scope === "contains" ? pattern : null,
                 make_rule: makeRule,
                 lock,
+                ...(note.trim() !== (txn.notes ?? "") ? { notes: note.trim() || null } : {}),
               })
             }
           >

@@ -447,7 +447,8 @@ label {
   margin-bottom: 6px;
 }
 input,
-select {
+select,
+textarea {
   width: 100%;
   background: var(--bg);
   border: 1px solid var(--border);
@@ -456,8 +457,14 @@ select {
   border-radius: 9px;
   font-size: 14px;
 }
+textarea {
+  font-family: inherit;
+  line-height: 1.45;
+  resize: vertical;
+}
 input:focus-visible,
-select:focus-visible {
+select:focus-visible,
+textarea:focus-visible {
   border-color: var(--accent);
 }
 .field {
@@ -1414,4 +1421,57 @@ tr.rule-new > td {
 }
 .rules-builtin[open] > summary {
   margin-bottom: 8px;
+}
+
+/* ---- Transfers: review, linked, notes ---- */
+.tab-count {
+  display: inline-block;
+  margin-left: 6px;
+  padding: 0 7px;
+  border-radius: 999px;
+  background: var(--accent-strong);
+  color: #fff;
+  font-size: 12px;
+  line-height: 18px;
+}
+.transfer-list {
+  list-style: none;
+  margin: 8px 0 0;
+  padding: 0;
+}
+.transfer-item {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px 16px;
+  padding: 10px 0;
+  border-top: 1px solid var(--border);
+}
+.transfer-sides {
+  min-width: 0;
+  flex: 1 1 320px;
+}
+.transfer-sides .muted {
+  font-size: 13px;
+  overflow-wrap: anywhere;
+}
+.transfer-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+.txn-note {
+  font-size: 12.5px;
+}
+.note-suggestion {
+  margin-top: 6px;
+  padding: 4px 10px;
+  font-size: 13px;
+}
+.link-candidates {
+  max-height: 260px;
+  overflow: auto;
+  margin-bottom: 12px;
 }

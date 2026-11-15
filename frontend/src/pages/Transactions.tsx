@@ -1,8 +1,9 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 
-import { api } from "../api/client";
+import { api, ApiError } from "../api/client";
+import { useAuth } from "../auth/AuthContext";
 import { usePeriod } from "../period/context";
 import { FilterRow, FilterToggle } from "../table/FilterRow";
 import { SortHeader } from "../table/SortHeader";
@@ -12,6 +13,9 @@ import { useTable } from "../table/useTable";
 import { CategoriseDialog } from "../components/CategoriseDialog";
 import { CategoryPicker } from "../components/CategoryPicker";
 import { RulesManager } from "../components/RulesManager";
+import { TransferDialog } from "../components/TransferDialog";
+import { TransfersPanel } from "../components/TransfersPanel";
+import { transferLabel } from "../components/transferLabels";
 import { matchesAtMount, PHONE, useMediaQuery } from "../hooks/useMediaQuery";
 import { FilterFields, SortChips } from "../table/MobileControls";
 import { TABLE_MIN, TableWrap } from "../table/TableWrap";
@@ -36,13 +40,31 @@ const GROUP_COLUMNS: ColumnSpec<TxnGroup>[] = [
   { key: "total", sort: (g) => g.total_cents, text: (g) => formatCents(g.total_cents) },
 ];
 
-type Tab = "transactions" | "groups" | "rules";
+/** A save that failed partway: whether the note, which goes first, was saved. */
+class SaveFailed extends Error {
+  constructor(
+    readonly reason: unknown,
+    readonly noteSaved: boolean,
+  ) {
+    super("save failed");
+  }
+}
+
+type Tab = "transactions" | "transfers" | "groups" | "rules";
+const TABS: Tab[] = ["transactions", "transfers", "groups", "rules"];
 type GroupBy = "merchant" | "description";
 
 export function Transactions() {
   const qc = useQueryClient();
+  const { me } = useAuth();
+  // A viewer can look at links but not make or undo them: the server refuses.
+  const canEdit = me !== null && me.user.role !== "viewer";
   const [searchParams] = useSearchParams();
-  const [tab, setTab] = useState<Tab>("transactions");
+  // Deep-linkable: the import result links straight to the transfers waiting for review.
+  const [tab, setTab] = useState<Tab>(() => {
+    const asked = searchParams.get("tab");
+    return TABS.find((t) => t === asked) ?? "transactions";
+  });
   // Group review is a third view of the same data, not a mode within the list.
   const view = tab === "groups" ? "groups" : "list";
   const [groupBy, setGroupBy] = useState<GroupBy>("merchant");
@@ -50,10 +72,19 @@ export function Transactions() {
   const [accountId, setAccountId] = useState(searchParams.get("account_id") ?? "");
   const [categoryId, setCategoryId] = useState(searchParams.get("category_id") ?? "");
   const [uncategorised, setUncategorised] = useState(searchParams.get("uncategorised") === "true");
+  const [hideTransfers, setHideTransfers] = useState(false);
   const [page, setPage] = useState(1);
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [bulkCat, setBulkCat] = useState("");
   const [dialogTxn, setDialogTxn] = useState<Transaction | null>(null);
+  // Which ⋯ window is open when a save comes back: the person may have closed it, or
+  // opened another, while it was on its way.
+  const openDialogId = useRef<string | null>(null);
+  useEffect(() => {
+    openDialogId.current = dialogTxn?.id ?? null;
+  }, [dialogTxn]);
+  const [transferTxn, setTransferTxn] = useState<Transaction | null>(null);
+  const [dialogError, setDialogError] = useState<string | null>(null);
   const [flash, setFlash] = useState<string | null>(null);
 
   const showFlash = (message: string) => {
@@ -79,6 +110,7 @@ export function Transactions() {
       accountId,
       categoryId,
       uncategorised,
+      hideTransfers,
       page,
       pageSize,
       period,
@@ -90,6 +122,7 @@ export function Transactions() {
         account_id: accountId || undefined,
         category_id: categoryId || undefined,
         uncategorised: uncategorised || undefined,
+        include_transfers: hideTransfers ? false : undefined,
         period,
         page,
         page_size: pageSize,
@@ -97,6 +130,12 @@ export function Transactions() {
       }),
     enabled: tab === "transactions",
   });
+  // Counted on the tab, so pairs waiting for a decision are seen from the list.
+  const suggestions = useQuery({
+    queryKey: ["transfer-suggestions"],
+    queryFn: api.transferSuggestions,
+  });
+  const toReview = suggestions.data?.length ?? 0;
   const groups = useQuery({
     queryKey: ["txn-groups", groupBy],
     queryFn: () => api.transactionGroups(groupBy, true),
@@ -121,12 +160,61 @@ export function Transactions() {
     onSuccess: invalidate,
   });
   const dialogApply = useMutation({
-    mutationFn: (v: { id: string; body: Parameters<typeof api.recategorise>[1] }) =>
-      api.recategorise(v.id, v.body),
-    onSuccess: (r) => {
+    mutationFn: async (v: {
+      txn: Transaction;
+      body: Parameters<typeof api.recategorise>[1] & { notes?: string | null };
+    }) => {
+      const { notes, ...body } = v.body;
+      let noteSaved = false;
+      if (notes !== undefined) {
+        await api.updateTransaction(v.txn.id, { notes });
+        noteSaved = true;
+      }
+      // Only a note written: the category is left as it was. Re-filing it under the
+      // same category would record it as a person's choice, which stops transfer
+      // detection and cash deposits from ever placing it.
+      const noteOnly =
+        notes !== undefined &&
+        body.scope === "none" &&
+        !body.make_rule &&
+        body.lock === v.txn.category_locked &&
+        (body.category_id ?? null) === (v.txn.category_id ?? null);
+      if (noteOnly) return null;
+      try {
+        return await api.recategorise(v.txn.id, body);
+      } catch (e) {
+        throw new SaveFailed(e, noteSaved);
+      }
+    },
+    onSuccess: (r, v) => {
       invalidate();
-      setDialogTxn(null);
-      showFlash(`Updated ${r.updated_count} transaction${r.updated_count === 1 ? "" : "s"}`);
+      if (openDialogId.current === v.txn.id) {
+        setDialogTxn(null);
+        setDialogError(null);
+      }
+      showFlash(
+        r
+          ? `Updated ${r.updated_count} transaction${r.updated_count === 1 ? "" : "s"}`
+          : "Note saved",
+      );
+    },
+    onError: (e, v) => {
+      // The note goes first, so it may be saved when the rest is not: say which, show
+      // what is there now, and keep the window open with the person's choices in it.
+      invalidate();
+      const reason = e instanceof SaveFailed ? e.reason : e;
+      const why = reason instanceof ApiError ? ` ${reason.message}` : "";
+      const noteSaved = e instanceof SaveFailed && e.noteSaved;
+      const message = noteSaved ? `Note saved, but the rest wasn't saved.${why}` : `Not saved.${why}`;
+      if (openDialogId.current !== v.txn.id) {
+        showFlash(message); // its window is gone: say it on the page instead
+        return;
+      }
+      if (noteSaved) {
+        // What is stored now, so a second Apply compares the note with it.
+        setDialogTxn((t) => (t && t.id === v.txn.id ? { ...t, notes: v.body.notes ?? null } : t));
+      }
+      setDialogError(message);
     },
   });
   const lockToggle = useMutation({
@@ -189,47 +277,67 @@ export function Transactions() {
   // One definition per interactive control, laid out two ways below: a table on a
   // wide screen, a stack of cards on a phone. Two copies of a picker wired to a
   // mutation is exactly the kind of thing that drifts.
-  const pickBox = (t: Transaction) => (
-    <input
-      type="checkbox"
-      style={{ width: "auto" }}
-      checked={selected.has(t.id)}
-      aria-label={`Select ${t.merchant ?? t.raw_description}`}
-      onChange={() => toggleSel(t.id)}
-    />
-  );
-  const categoryPicker = (t: Transaction) => (
-    <CategoryPicker
-      className="pill-select"
-      aria-label="Category"
-      categories={allCategories}
-      value={t.category_id ?? ""}
-      onChange={(id) => quickCat.mutate({ id: t.id, categoryId: id })}
-      emptyLabel="Uncategorised"
-    />
-  );
-  const rowActions = (t: Transaction) => (
-    <>
-      <button
-        className={`icon-btn ${t.category_locked ? "on" : ""}`}
-        title={t.category_locked ? "Locked — click to unlock" : "Lock"}
-        aria-label={t.category_locked ? "Unlock category" : "Lock category"}
-        onClick={() => lockToggle.mutate({ id: t.id, locked: !t.category_locked })}
-      >
-        {t.category_locked ? "🔒" : "🔓"}
-      </button>
-      <button
-        className="icon-btn"
-        title="Apply to similar, make a rule…"
-        aria-label="More actions"
-        onClick={() => setDialogTxn(t)}
-      >
-        ⋯
-      </button>
-    </>
-  );
-  const transferTag = (t: Transaction) =>
-    t.is_transfer ? <span className="tag transfer">transfer</span> : null;
+  // A viewer sees what is there; every control here writes, and the server refuses them.
+  const pickBox = (t: Transaction) =>
+    canEdit ? (
+      <input
+        type="checkbox"
+        style={{ width: "auto" }}
+        checked={selected.has(t.id)}
+        aria-label={`Select ${t.merchant ?? t.raw_description}`}
+        onChange={() => toggleSel(t.id)}
+      />
+    ) : null;
+  const categoryPicker = (t: Transaction) =>
+    canEdit ? (
+      <CategoryPicker
+        className="pill-select"
+        aria-label="Category"
+        categories={allCategories}
+        value={t.category_id ?? ""}
+        onChange={(id) => quickCat.mutate({ id: t.id, categoryId: id })}
+        emptyLabel="Uncategorised"
+      />
+    ) : (
+      <span className="muted">{t.category_name ?? "Uncategorised"}</span>
+    );
+  const rowActions = (t: Transaction) =>
+    canEdit ? (
+      <>
+        <button
+          className={`icon-btn ${t.category_locked ? "on" : ""}`}
+          title={t.category_locked ? "Locked — click to unlock" : "Lock"}
+          aria-label={t.category_locked ? "Unlock category" : "Lock category"}
+          onClick={() => lockToggle.mutate({ id: t.id, locked: !t.category_locked })}
+        >
+          {t.category_locked ? "🔒" : "🔓"}
+        </button>
+        <button
+          className={`icon-btn ${t.transfer_group_id ? "on" : ""}`}
+          title={t.transfer_group_id ? "Linked transfer: change or unlink" : "Link as a transfer…"}
+          aria-label={t.transfer_group_id ? "Transfer link" : "Link as a transfer"}
+          onClick={() => setTransferTxn(t)}
+        >
+          ⇄
+        </button>
+        <button
+          className="icon-btn"
+          title="Apply to similar, make a rule, add a note…"
+          aria-label="More actions"
+          onClick={() => {
+            setDialogError(null);
+            setDialogTxn(t);
+          }}
+        >
+          ⋯
+        </button>
+      </>
+    ) : null;
+  const transferTag = (t: Transaction) => {
+    const label = transferLabel(t);
+    return label ? <span className="tag transfer">{label}</span> : null;
+  };
+  const note = (t: Transaction) => (t.notes ? <div className="txn-note muted">{t.notes}</div> : null);
 
   return (
     <div>
@@ -241,6 +349,20 @@ export function Transactions() {
           onClick={() => setTab("transactions")}
         >
           Transactions
+        </button>
+        <button
+          className={`tab ${tab === "transfers" ? "active" : ""}`}
+          onClick={() => {
+            setTab("transfers");
+            setSelected(new Set());
+          }}
+        >
+          Transfers
+          {toReview > 0 && (
+            <span className="tab-count" aria-label={`${toReview} to review`}>
+              {toReview}
+            </span>
+          )}
         </button>
         <button
           className={`tab ${tab === "groups" ? "active" : ""}`}
@@ -256,10 +378,16 @@ export function Transactions() {
         </button>
       </div>
 
-      {flash && <div className="notice">{flash}</div>}
+      {flash && (
+        <div className="notice" role="status">
+          {flash}
+        </div>
+      )}
 
       {tab === "rules" ? (
         <RulesManager categories={categories.data ?? []} onFlash={showFlash} />
+      ) : tab === "transfers" ? (
+        <TransfersPanel onFlash={showFlash} canEdit={canEdit} />
       ) : (
         <>
           <div className="toolbar">
@@ -315,6 +443,21 @@ export function Transactions() {
                   />
                   Needs review
                 </label>
+                <label
+                  className="muted"
+                  style={{ display: "flex", alignItems: "center", gap: 6, margin: 0 }}
+                >
+                  <input
+                    type="checkbox"
+                    style={{ width: "auto" }}
+                    checked={hideTransfers}
+                    onChange={(e) => {
+                      setPage(1);
+                      setHideTransfers(e.target.checked);
+                    }}
+                  />
+                  Hide transfers
+                </label>
               </>
             ) : (
               <>
@@ -349,7 +492,7 @@ export function Transactions() {
                 <>
                   <SortChips table={server} labels={TXN_LABELS} columns={TXN_FILTER_KEYS} />
                   <FilterFields table={server} labels={TXN_LABELS} columns={TXN_FILTER_KEYS} />
-                  {pageItems.length > 0 && (
+                  {canEdit && pageItems.length > 0 && (
                     <label className="select-all">
                       <input
                         type="checkbox"
@@ -365,7 +508,10 @@ export function Transactions() {
                       <li key={t.id} className={selected.has(t.id) ? "txn-card picked" : "txn-card"}>
                         <div className="txn-card-head">
                           {pickBox(t)}
-                          <span className="txn-card-desc">{t.merchant ?? t.raw_description}</span>
+                          <span className="txn-card-desc">
+                            {t.merchant ?? t.raw_description}
+                            {note(t)}
+                          </span>
                           <span
                             className={`num ${t.amount_cents < 0 ? "negative" : "positive"}`}
                           >
@@ -393,13 +539,15 @@ export function Transactions() {
                     <thead>
                       <tr>
                         <th className="pick">
-                          <input
-                            type="checkbox"
-                            style={{ width: "auto" }}
-                            aria-label="Select all on this page"
-                            checked={allOnPageSelected}
-                            onChange={toggleAllOnPage}
-                          />
+                          {canEdit && (
+                            <input
+                              type="checkbox"
+                              style={{ width: "auto" }}
+                              aria-label="Select all on this page"
+                              checked={allOnPageSelected}
+                              onChange={toggleAllOnPage}
+                            />
+                          )}
                         </th>
                         <SortHeader table={server} col="date">
                           Date
@@ -439,6 +587,7 @@ export function Transactions() {
                           <td className="muted">{formatDate(t.txn_date)}</td>
                           <td>
                             {t.merchant ?? t.raw_description} {transferTag(t)}
+                            {note(t)}
                           </td>
                           <td className="muted">{t.account_name}</td>
                           <td>{categoryPicker(t)}</td>
@@ -546,17 +695,19 @@ export function Transactions() {
                         <td className="num">{g.count}</td>
                         <td className="num">{formatCents(g.total_cents)}</td>
                         <td>
-                          <CategoryPicker
-                            className="pill-select"
-                            aria-label="Category for this group"
-                            categories={allCategories}
-                            value=""
-                            disabled={groupApply.isPending}
-                            onChange={(id) => {
-                              if (id) groupApply.mutate({ sampleId: g.sample_id, categoryId: id });
-                            }}
-                            placeholder="Choose…"
-                          />
+                          {canEdit && (
+                            <CategoryPicker
+                              className="pill-select"
+                              aria-label="Category for this group"
+                              categories={allCategories}
+                              value=""
+                              disabled={groupApply.isPending}
+                              onChange={(id) => {
+                                if (id) groupApply.mutate({ sampleId: g.sample_id, categoryId: id });
+                              }}
+                              placeholder="Choose…"
+                            />
+                          )}
                         </td>
                       </tr>
                     ))}
@@ -571,13 +722,28 @@ export function Transactions() {
         </>
       )}
 
+      {transferTxn && (
+        <TransferDialog
+          txn={transferTxn}
+          onClose={() => setTransferTxn(null)}
+          onDone={showFlash}
+        />
+      )}
+
       {dialogTxn && (
         <CategoriseDialog
           txn={dialogTxn}
           categories={categories.data ?? []}
           busy={dialogApply.isPending}
-          onClose={() => setDialogTxn(null)}
-          onSubmit={(body) => dialogApply.mutate({ id: dialogTxn.id, body })}
+          error={dialogError}
+          onClose={() => {
+            setDialogTxn(null);
+            setDialogError(null);
+          }}
+          onSubmit={(body) => {
+            setDialogError(null);
+            dialogApply.mutate({ txn: dialogTxn, body });
+          }}
         />
       )}
     </div>

@@ -131,6 +131,39 @@ describe("Import: preview before commit", () => {
   });
 });
 
+describe("Import: what the import did", () => {
+  const commitWith = async (counts: Record<string, number>) => {
+    stubApi({
+      ...STUBS,
+      "/imports/commit": { added: 3, skipped: 1, transfers_linked: 4, ...counts },
+    });
+    await startImport();
+    fireEvent.click(previewButton());
+    await waitFor(() => expect(importButton()).toBeEnabled());
+    fireEvent.click(importButton());
+    return screen.findByText(/^Imported 3 transactions/);
+  };
+
+  it("counts transfers, the ones to review and cash deposits, and links to the review", async () => {
+    const notice = await commitWith({ transfers_to_review: 1, cash_deposits: 2 });
+    expect(notice).toHaveTextContent(
+      "Imported 3 transactions — 1 skipped, 2 transfers linked, 1 to review, 2 cash deposits.",
+    );
+    expect(within(notice).getByRole("link", { name: "Review the transfers" })).toHaveAttribute(
+      "href",
+      "/transactions?tab=transfers",
+    );
+  });
+
+  it("offers no review when there is nothing to review", async () => {
+    const notice = await commitWith({ transfers_linked: 2, transfers_to_review: 0, cash_deposits: 1 });
+    expect(notice).toHaveTextContent(
+      "Imported 3 transactions — 1 skipped, 1 transfer linked, 1 cash deposit.",
+    );
+    expect(within(notice).queryByRole("link")).toBeNull();
+  });
+});
+
 describe("Import: a preview stops being an answer when the question changes", () => {
   beforeEach(() => stubApi(STUBS));
 

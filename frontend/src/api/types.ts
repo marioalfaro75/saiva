@@ -39,6 +39,10 @@ export interface Account {
   owner_user_id: string | null;
   balance_cents: number;
   txn_count: number;
+  /** The account number an import recorded; transfers that mention it link. */
+  bank_identifier?: string | null;
+  /** Phrases that, in another account's description, mean money moving to or from this one. */
+  transfer_wording?: string[];
 }
 
 export interface Category {
@@ -89,6 +93,46 @@ export interface Transaction {
   notes: string | null;
   tags: string[];
   split_parent_id: string | null;
+  /** A linked pair: what it is, and the other side of it. */
+  transfer_group_id?: string | null;
+  transfer_kind?: TransferKind | null;
+  counterpart_id?: string | null;
+  counterpart_account_name?: string | null;
+  /** A note worth offering, from the description, when there is none. */
+  note_suggestion?: string | null;
+}
+
+/** What a linked pair is: decided by the account the money went into. */
+export type TransferKind = "card_payment" | "own_accounts" | "loan_repayment";
+
+export interface TransferSuggestion {
+  outflow: Transaction;
+  inflow: Transaction;
+  kind: TransferKind;
+  days_apart: number;
+}
+
+export interface TransferGroup {
+  group_id: string;
+  kind: TransferKind | null;
+  outflow: Transaction | null;
+  inflow: Transaction | null;
+}
+
+export interface TransferAccept {
+  group: TransferGroup;
+  /** The wording remembered for the receiving account, if any. */
+  learned: string | null;
+  learned_for: string | null;
+  /** Other pairs the learned wording linked straight away. */
+  also_linked?: number;
+}
+
+export interface TransferScan {
+  /** Legs linked: two per transfer. */
+  linked: number;
+  to_review: number;
+  cash_deposits: number;
 }
 
 export type MatchType = "contains" | "starts_with" | "regex" | "merchant" | "equals";
@@ -583,6 +627,8 @@ export interface ImportCommit {
   added: number;
   skipped: number;
   transfers_linked: number;
+  transfers_to_review?: number;
+  cash_deposits?: number;
 }
 
 export interface SetupBody {

@@ -27,7 +27,8 @@ from ..services.categorise import (
 )
 from ..services.importers import dedup_hash
 from ..services.merchants import normalise_merchant
-from ..services.transfers import detect_transfers
+from ..services.notes import suggest_note
+from ..services.transfers import classify_transfers
 
 router = APIRouter(prefix="/transactions", tags=["transactions"])
 
@@ -54,8 +55,45 @@ def _acct_names(db: Session, household_id: str) -> dict[str, str]:
     }
 
 
+def counterparts(
+    db: Session, household_id: str, txns: list[models.Transaction]
+) -> dict[str, models.Transaction]:
+    """The other side of each linked transaction among these, by the transaction's id."""
+    groups = {t.transfer_group_id for t in txns if t.transfer_group_id}
+    if not groups:
+        return {}
+    legs = (
+        db.execute(
+            select(models.Transaction).where(
+                models.Transaction.household_id == household_id,
+                models.Transaction.transfer_group_id.in_(groups),
+            )
+        )
+        .scalars()
+        .all()
+    )
+    by_group: dict[str, list[models.Transaction]] = {}
+    for leg in legs:
+        by_group.setdefault(leg.transfer_group_id or "", []).append(leg)
+    opposite: dict[str, models.Transaction] = {}
+    for group_legs in by_group.values():
+        pair = transfers.outflow_and_inflow(group_legs)
+        if pair is None:
+            continue
+        out_leg, in_leg = pair
+        opposite[out_leg.id], opposite[in_leg.id] = in_leg, out_leg
+        for part in group_legs:
+            # A leg split after linking: its parts are linked with the other leg too.
+            if part.split_parent_id in (out_leg.id, in_leg.id):
+                opposite[part.id] = in_leg if part.split_parent_id == out_leg.id else out_leg
+    return {t.id: opposite[t.id] for t in txns if t.id in opposite}
+
+
 def _to_out(
-    t: models.Transaction, cats: dict[str, str], accts: dict[str, str]
+    t: models.Transaction,
+    cats: dict[str, str],
+    accts: dict[str, str],
+    other: models.Transaction | None = None,
 ) -> schemas.TransactionOut:
     return schemas.TransactionOut(
         id=t.id,
@@ -75,6 +113,11 @@ def _to_out(
         notes=t.notes,
         tags=list(t.tags or []),
         split_parent_id=t.split_parent_id,
+        transfer_group_id=t.transfer_group_id,
+        transfer_kind=t.transfer_kind,
+        counterpart_id=other.id if other is not None else None,
+        counterpart_account_name=accts.get(other.account_id) if other is not None else None,
+        note_suggestion=None if t.notes else suggest_note(t.raw_description),
     )
 
 
@@ -238,19 +281,25 @@ def list_transactions(
     )
     cats = _cat_names(db, user.household_id)
     accts = _acct_names(db, user.household_id)
+    others = counterparts(db, user.household_id, list(rows))
     return schemas.TransactionListOut(
-        items=[_to_out(t, cats, accts) for t in rows],
+        items=[_to_out(t, cats, accts, others.get(t.id)) for t in rows],
         total=int(total),
         page=page,
         page_size=page_size,
     )
 
 
-@router.post("/detect-transfers")
+@router.post("/detect-transfers", response_model=schemas.TransferScanOut)
 def run_detect_transfers(
     user: models.User = Depends(require_writer), db: Session = Depends(get_db)
-) -> dict[str, int]:
-    return {"linked": detect_transfers(db, user.household_id)}
+) -> schemas.TransferScanOut:
+    """Look through the whole history again: after wording was added to an account, or
+    an account's type changed."""
+    scan = classify_transfers(db, user.household_id)
+    return schemas.TransferScanOut(
+        linked=2 * len(scan.linked), to_review=len(scan.to_review), cash_deposits=scan.cash_deposits
+    )
 
 
 @router.post("", response_model=schemas.TransactionOut, status_code=status.HTTP_201_CREATED)
@@ -302,8 +351,13 @@ def update_txn(
 ) -> schemas.TransactionOut:
     t = _get_owned(db, txn_id, user.household_id)
     for key, value in payload.model_dump(exclude_unset=True).items():
-        if key == "is_transfer" and value is False and t.is_transfer:
-            transfers.release(db, t)
+        if key == "is_transfer" and value is False and (t.is_transfer or t.transfer_group_id):
+            if t.transfer_group_id:
+                # Both sides, and remembered: one leg released alone left its partner
+                # flagged as half of a pair that no longer existed.
+                transfers.unlink(db, user.household_id, t.transfer_group_id)
+            else:
+                transfers.release(db, t)
         else:
             setattr(t, key, value)
     db.commit()
@@ -533,6 +587,7 @@ def split_txn(
             # household's figures with money that never entered or left it.
             is_transfer=parent.is_transfer,
             transfer_group_id=parent.transfer_group_id,
+            transfer_kind=parent.transfer_kind,
             dedup_hash=dedup_hash(
                 parent.account_id, parent.txn_date, s.amount_cents,
                 f"{parent.raw_description}#split{i}",

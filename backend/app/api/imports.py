@@ -17,7 +17,7 @@ from ..deps import get_current_user, require_writer
 from ..ratelimit import rate_limit_import
 from ..services import audit, dedup, importers
 from ..services.categorise import build_categoriser
-from ..services.transfers import detect_transfers
+from ..services.transfers import classify_transfers
 
 router = APIRouter(prefix="/imports", tags=["imports"])
 MAX_UPLOAD_BYTES = 10 * 1024 * 1024
@@ -723,11 +723,16 @@ async def commit(
     # import is how a crafted row could reach back years and pair itself with a real
     # expense, taking both out of every figure the app reports.
     earliest = min((p.txn_date for p in parsed), default=None)
-    transfers_linked = detect_transfers(db, user.household_id, since=earliest)
+    scan = classify_transfers(db, user.household_id, since=earliest)
     audit.record(
         db, action="import_commit", household_id=user.household_id, actor_user_id=user.id,
         entity="import_batch", entity_id=batch.id, detail={"added": added, "skipped": skipped},
     )
     return schemas.ImportCommitOut(
-        batch_id=batch.id, added=added, skipped=skipped, transfers_linked=transfers_linked
+        batch_id=batch.id,
+        added=added,
+        skipped=skipped,
+        transfers_linked=2 * len(scan.linked),
+        transfers_to_review=len(scan.to_review),
+        cash_deposits=scan.cash_deposits,
     )

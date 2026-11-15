@@ -6,6 +6,11 @@ import { setViewport } from "../setupTests";
 import { renderApp, stubApi } from "../testing/harness";
 import { Transactions } from "./Transactions";
 
+const role = vi.hoisted(() => ({ value: "owner" }));
+vi.mock("../auth/AuthContext", () => ({
+  useAuth: () => ({ me: { user: { role: role.value } } }),
+}));
+
 /**
  * Below 640px the transactions list is a stack of cards rather than a seven-column
  * table. It is the same data and the same controls; these tests pin that the phone
@@ -101,6 +106,18 @@ const showList = async () => {
   return result;
 };
 
+const showFor = async (text: string) => {
+  const result = renderApp(
+    <PeriodProvider>
+      <Transactions />
+    </PeriodProvider>,
+    { route: "/transactions?period=fy:2024" },
+  );
+  await screen.findByText(text);
+  await waitFor(() => expect(urlsFetched()).toContain("/api/periods/resolve"));
+  return result;
+};
+
 const urlsFetched = () =>
   vi.mocked(fetch).mock.calls.map((c) => String(c[0]).split("?")[0]);
 
@@ -143,6 +160,17 @@ describe("Transactions on a phone", () => {
   it("still offers select-all, which lives in the header on a wide screen", async () => {
     await showList();
     expect(screen.getByLabelText(/Select all 2 on this page/)).toBeInTheDocument();
+  });
+
+  it("offers a viewer no selection, which only leads to changes", async () => {
+    role.value = "viewer";
+    try {
+      const { container } = await showFor("Woolworths");
+      expect(container.querySelectorAll(".txn-card")).toHaveLength(2);
+      expect(screen.queryByLabelText(/Select all/)).toBeNull();
+    } finally {
+      role.value = "owner";
+    }
   });
 
   it("replaces the column headers with sort chips and stacked filters", async () => {

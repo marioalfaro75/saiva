@@ -1,10 +1,15 @@
-import { screen } from "@testing-library/react";
+import { fireEvent, screen, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { PeriodProvider } from "../period/PeriodProvider";
 import { renderApp, stubApi } from "../testing/harness";
 import { Accounts } from "./Accounts";
 import { Overview } from "./Overview";
+
+const role = vi.hoisted(() => ({ value: "owner" }));
+vi.mock("../auth/AuthContext", () => ({
+  useAuth: () => ({ me: { user: { role: role.value } } }),
+}));
 
 /**
  * Overview and Accounts used to be dead ends: nothing on them was clickable, even
@@ -120,5 +125,32 @@ describe("Accounts", () => {
     renderApp(<Accounts />);
     const link = await screen.findByRole("link", { name: "Everyday" });
     expect(link).toHaveAttribute("href", "/transactions?account_id=a1");
+  });
+
+  it("opens the editor for an account from its Edit button", async () => {
+    stubApi({
+      "/accounts": [
+        { id: "a1", name: "Everyday", type: "everyday", institution: null, balance_cents: 0, txn_count: 1 },
+        { id: "a2", name: "Credit card", type: "credit_card", institution: null, balance_cents: 0, txn_count: 1 },
+      ],
+    });
+    renderApp(<Accounts />);
+    fireEvent.click(await screen.findByRole("button", { name: "Edit Credit card" }));
+    const dialog = await screen.findByRole("dialog", { name: "Edit account" });
+    expect(within(dialog).getByRole("textbox", { name: "Name" })).toHaveValue("Credit card");
+    expect(within(dialog).getByRole("combobox", { name: "Type" })).toHaveValue("credit_card");
+  });
+
+  it("offers a viewer no Edit button", async () => {
+    role.value = "viewer";
+    stubApi({
+      "/accounts": [
+        { id: "a1", name: "Everyday", type: "everyday", institution: null, balance_cents: 0, txn_count: 1 },
+      ],
+    });
+    renderApp(<Accounts />);
+    await screen.findByRole("link", { name: "Everyday" });
+    expect(screen.queryByRole("button", { name: "Edit Everyday" })).toBeNull();
+    role.value = "owner";
   });
 });

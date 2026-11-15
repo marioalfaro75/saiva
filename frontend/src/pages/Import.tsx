@@ -1,3 +1,4 @@
+import { Link } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import { Fragment, useMemo, useRef, useState } from "react";
 
@@ -116,6 +117,7 @@ export function ImportPage() {
   const [scan, setScan] = useState<AccountScanRow[] | null>(null);
   const [choices, setChoices] = useState<Record<string, Choice>>({});
   const [result, setResult] = useState<string | null>(null);
+  const [reviewTransfers, setReviewTransfers] = useState(0);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   // Bumped to remount the file input: clearing `file` leaves the native control
@@ -508,12 +510,21 @@ export function ImportPage() {
           },
           accountAssignments,
         );
-        setResult(
-          `Imported ${r.added} transactions — ${r.skipped} skipped, ${r.transfers_linked} transfers linked.`,
-        );
+        // Cleared first: reset() empties the result too, and the last state set wins.
         setFile(null);
         setFileInputKey((n) => n + 1);
         reset();
+        const linked = r.transfers_linked / 2;
+        const review = r.transfers_to_review ?? 0;
+        const deposits = r.cash_deposits ?? 0;
+        setResult(
+          `Imported ${r.added} transactions — ${r.skipped} skipped, ` +
+            `${linked} transfer${linked === 1 ? "" : "s"} linked` +
+            (review ? `, ${review} to review` : "") +
+            (deposits ? `, ${deposits} cash deposit${deposits === 1 ? "" : "s"}` : "") +
+            ".",
+        );
+        setReviewTransfers(review);
       } else {
         const run = new AbortController();
         previewRun.current = run;
@@ -547,7 +558,17 @@ export function ImportPage() {
     <div>
       <PageHead title="Import transactions" />
       {error && <div className="error">{error}</div>}
-      {result && <div className="notice">{result}</div>}
+      {result && (
+        <div className="notice">
+          {result}
+          {reviewTransfers > 0 && (
+            <>
+              {" "}
+              <Link to="/transactions?tab=transfers">Review the transfers</Link>
+            </>
+          )}
+        </div>
+      )}
 
       <div className="card">
         {/* Nothing but the file until there is one. Anything else on screen at this

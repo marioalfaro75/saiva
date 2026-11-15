@@ -34,6 +34,7 @@ from sqlalchemy import and_, inspect, or_, select, update
 from sqlalchemy.engine import URL, Engine
 from sqlalchemy.orm import Session
 
+from .constants import CASH_DEPOSIT_CATEGORY
 from .db import engine
 from .models import Category, Household, Transaction
 from .schema_state import SchemaState, ahead_warning, alembic_config, read_schema_state
@@ -43,6 +44,7 @@ from .services.categorise import (
     UNTOUCHED,
     apply_all_rules,
 )
+from .services.transfers import classify_existing, classify_transfers
 
 BASELINE_REVISION = "0001"
 
@@ -132,6 +134,7 @@ def main(db: Engine | None = None, cfg: Config | None = None) -> SchemaState:
         _record_category_keys(db)
         _mark_automatic_categories(db)
         _apply_rules_once(db)
+        _classify_transfers_once(db)
     return state
 
 
@@ -301,6 +304,126 @@ def _apply_rules_once(db: Engine) -> None:
                     "earlier transaction(s).",
                     flush=True,
                 )
+
+
+def _ensure_cash_deposit_category(session: Session, household_id: str) -> None:
+    """Give a household that predates it the built-in "Cash deposit" category, under
+    Income. A category the household already made by that name is adopted rather than
+    duplicated (names are unique in a household)."""
+    if session.execute(
+        select(Category.id).where(
+            Category.household_id == household_id, Category.system_key == CASH_DEPOSIT_CATEGORY
+        )
+    ).first():
+        return
+    mine = session.execute(
+        select(Category).where(Category.household_id == household_id)
+    ).scalars().all()
+    same_name = [c for c in mine if c.name.casefold() == CASH_DEPOSIT_CATEGORY.casefold()]
+    if same_name:
+        if same_name[0].system_key is None:
+            same_name[0].system_key = CASH_DEPOSIT_CATEGORY
+        return
+    income = next((c for c in mine if c.system_key == "Income" and c.parent_id is None), None)
+    if income is None:
+        return
+    session.add(
+        Category(
+            household_id=household_id,
+            name=CASH_DEPOSIT_CATEGORY,
+            parent_id=income.id,
+            kind="income",
+            is_system=True,
+            system_key=CASH_DEPOSIT_CATEGORY,
+            sort=max((c.sort for c in mine), default=0) + 1,
+        )
+    )
+    session.flush()
+
+
+def _classify_transfers_once(db: Engine) -> None:
+    """Classify each household's transfers by kind, once.
+
+    Before 0.18.0 every linked pair was "Internal transfers", whatever the accounts: a
+    card payment, a loan repayment and money moved to savings alike, all left out of
+    spending -- a home loan repayment included. This gives existing pairs their kind
+    (so a repayment counts as Mortgage spending), adds the Cash deposit category, then
+    looks through the whole history once the way an import now does. Recorded in
+    households.transfers_classified_at; a failure is logged and retried at the next
+    start, never a reason not to start.
+    """
+    inspector = inspect(db)
+    if "households" not in inspector.get_table_names():
+        return
+    if "transfers_classified_at" not in {c["name"] for c in inspector.get_columns("households")}:
+        return
+    if "transfer_kind" not in {c["name"] for c in inspector.get_columns("transactions")}:
+        return
+    with Session(db) as session:
+        pending = (
+            session.execute(select(Household).where(Household.transfers_classified_at.is_(None)))
+            .scalars()
+            .all()
+        )
+        for household in pending:
+            try:
+                _ensure_cash_deposit_category(session, household.id)
+                classified = classify_existing(session, household.id)
+                scan = classify_transfers(session, household.id)
+                household.transfers_classified_at = dt.datetime.utcnow()
+                session.commit()
+            except Exception as exc:  # noqa: BLE001 - logged, and retried next start
+                session.rollback()
+                print(
+                    f"Saiva: could not classify transfers ({exc!r}); "
+                    "will try again on the next start.",
+                    file=sys.stderr,
+                    flush=True,
+                )
+                continue
+            print(
+                f"Saiva: classified {classified} earlier transfer(s) by kind, linked "
+                f"{len(scan.linked)} more, {len(scan.to_review)} to review, "
+                f"{scan.cash_deposits} cash deposit(s).",
+                flush=True,
+            )
+        # Every start, not once: an older image run after a rollback links pairs the old
+        # way, with no kind (a loan repayment left out of spending), and unlinks without
+        # clearing the kind. One query finds them, and there are none on almost every
+        # start.
+        try:
+            unkinded = (
+                session.execute(
+                    select(Transaction.household_id)
+                    .where(
+                        or_(
+                            and_(
+                                Transaction.transfer_group_id.is_not(None),
+                                Transaction.transfer_kind.is_(None),
+                            ),
+                            # Unlinked by an older image, which leaves the kind behind.
+                            and_(
+                                Transaction.transfer_group_id.is_(None),
+                                Transaction.transfer_kind.is_not(None),
+                            ),
+                        )
+                    )
+                    .distinct()
+                )
+                .scalars()
+                .all()
+            )
+            for household_id in unkinded:
+                classify_existing(session, household_id)
+            session.commit()
+        except Exception as exc:  # noqa: BLE001 - logged, and retried next start
+            session.rollback()
+            print(
+                f"Saiva: could not classify transfers ({exc!r}); "
+                "will try again on the next start.",
+                file=sys.stderr,
+                flush=True,
+            )
 
 
 def _migrate(db: Engine, cfg: Config, tables: set[str]) -> SchemaState:

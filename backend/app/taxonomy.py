@@ -6,7 +6,8 @@ category (with a `kind`) to its example subcategories.
 
 DEFAULT_TAXONOMY: list[dict] = [
     {"name": "Income", "kind": "income", "children": [
-        "Salary/Wages", "Government benefits", "Investment/Interest", "Refunds", "Other income"]},
+        "Salary/Wages", "Government benefits", "Investment/Interest", "Refunds", "Cash deposit",
+        "Other income"]},
     {"name": "Housing", "kind": "expense", "children": [
         "Mortgage", "Rent", "Offset/Extra repayments", "Strata/Body corporate",
         "Council rates", "Home insurance", "Repairs & maintenance"]},

@@ -1,5 +1,5 @@
-"""Overview aggregations (PRD R17–R19). Transfers are excluded; split parents are
-excluded in favour of their child rows to avoid double counting."""
+"""Overview aggregations (PRD R17–R19). Transfers and loan accounts are excluded; split
+parents are excluded in favour of their child rows to avoid double counting."""
 
 from __future__ import annotations
 
@@ -11,6 +11,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from .. import models
+from ..constants import LOAN_ACCOUNT_TYPES
 from ..schemas import (
     CategoryBreakdownItem,
     CategoryBreakdownOut,
@@ -31,22 +32,35 @@ def _split_parent_ids(db: Session, household_id: str) -> set[str]:
     return {r[0] for r in rows if r[0]}
 
 
+def _loan_account_ids(db: Session, household_id: str) -> list[str]:
+    return list(
+        db.execute(
+            select(models.Account.id).where(
+                models.Account.household_id == household_id,
+                models.Account.type.in_(LOAN_ACCOUNT_TYPES),
+            )
+        ).scalars()
+    )
+
+
 def _spendable_leaves(
     db: Session, household_id: str, start: dt.date, end: dt.date
 ) -> list[models.Transaction]:
+    """What spending and income are made of: no transfers, a split's parts rather than
+    the split, and nothing in a loan account. A loan's interest and fees are paid by the
+    repayments, which count on the account that paid them; counting the loan's own
+    debits too would count the interest twice."""
     parent_ids = _split_parent_ids(db, household_id)
-    txns = (
-        db.execute(
-            select(models.Transaction).where(
-                models.Transaction.household_id == household_id,
-                models.Transaction.txn_date >= start,
-                models.Transaction.txn_date <= end,
-                models.Transaction.is_transfer.is_(False),
-            )
-        )
-        .scalars()
-        .all()
-    )
+    conditions = [
+        models.Transaction.household_id == household_id,
+        models.Transaction.txn_date >= start,
+        models.Transaction.txn_date <= end,
+        models.Transaction.is_transfer.is_(False),
+    ]
+    loans = _loan_account_ids(db, household_id)
+    if loans:
+        conditions.append(models.Transaction.account_id.not_in(loans))
+    txns = db.execute(select(models.Transaction).where(*conditions)).scalars().all()
     return [t for t in txns if t.id not in parent_ids]
 
 
