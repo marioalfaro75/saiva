@@ -40,6 +40,16 @@ const GROUP_COLUMNS: ColumnSpec<TxnGroup>[] = [
   { key: "total", sort: (g) => g.total_cents, text: (g) => formatCents(g.total_cents) },
 ];
 
+/** A save that failed partway: whether the note, which goes first, was saved. */
+class SaveFailed extends Error {
+  constructor(
+    readonly reason: unknown,
+    readonly noteSaved: boolean,
+  ) {
+    super("save failed");
+  }
+}
+
 type Tab = "transactions" | "transfers" | "groups" | "rules";
 const TABS: Tab[] = ["transactions", "transfers", "groups", "rules"];
 type GroupBy = "merchant" | "description";
@@ -68,6 +78,7 @@ export function Transactions() {
   const [bulkCat, setBulkCat] = useState("");
   const [dialogTxn, setDialogTxn] = useState<Transaction | null>(null);
   const [transferTxn, setTransferTxn] = useState<Transaction | null>(null);
+  const [dialogError, setDialogError] = useState<string | null>(null);
   const [flash, setFlash] = useState<string | null>(null);
 
   const showFlash = (message: string) => {
@@ -148,7 +159,11 @@ export function Transactions() {
       body: Parameters<typeof api.recategorise>[1] & { notes?: string | null };
     }) => {
       const { notes, ...body } = v.body;
-      if (notes !== undefined) await api.updateTransaction(v.txn.id, { notes });
+      let noteSaved = false;
+      if (notes !== undefined) {
+        await api.updateTransaction(v.txn.id, { notes });
+        noteSaved = true;
+      }
       // Only a note written: the category is left as it was. Re-filing it under the
       // same category would record it as a person's choice, which stops transfer
       // detection and cash deposits from ever placing it.
@@ -158,7 +173,12 @@ export function Transactions() {
         !body.make_rule &&
         body.lock === v.txn.category_locked &&
         (body.category_id ?? null) === (v.txn.category_id ?? null);
-      return noteOnly ? null : api.recategorise(v.txn.id, body);
+      if (noteOnly) return null;
+      try {
+        return await api.recategorise(v.txn.id, body);
+      } catch (e) {
+        throw new SaveFailed(e, noteSaved);
+      }
     },
     onSuccess: (r) => {
       invalidate();
@@ -170,10 +190,16 @@ export function Transactions() {
       );
     },
     onError: (e) => {
-      // Part of it may have been saved (the note goes first): show what is there now.
+      // The note goes first, so it may be saved when the rest is not: say which, show
+      // what is there now, and keep the window open with the person's choices in it.
       invalidate();
-      setDialogTxn(null);
-      showFlash(e instanceof ApiError ? `Not saved. ${e.message}` : "Not saved.");
+      const reason = e instanceof SaveFailed ? e.reason : e;
+      const why = reason instanceof ApiError ? ` ${reason.message}` : "";
+      setDialogError(
+        e instanceof SaveFailed && e.noteSaved
+          ? `Note saved, but the category wasn't changed.${why}`
+          : `Not saved.${why}`,
+      );
     },
   });
   const lockToggle = useMutation({
@@ -236,36 +262,41 @@ export function Transactions() {
   // One definition per interactive control, laid out two ways below: a table on a
   // wide screen, a stack of cards on a phone. Two copies of a picker wired to a
   // mutation is exactly the kind of thing that drifts.
-  const pickBox = (t: Transaction) => (
-    <input
-      type="checkbox"
-      style={{ width: "auto" }}
-      checked={selected.has(t.id)}
-      aria-label={`Select ${t.merchant ?? t.raw_description}`}
-      onChange={() => toggleSel(t.id)}
-    />
-  );
-  const categoryPicker = (t: Transaction) => (
-    <CategoryPicker
-      className="pill-select"
-      aria-label="Category"
-      categories={allCategories}
-      value={t.category_id ?? ""}
-      onChange={(id) => quickCat.mutate({ id: t.id, categoryId: id })}
-      emptyLabel="Uncategorised"
-    />
-  );
-  const rowActions = (t: Transaction) => (
-    <>
-      <button
-        className={`icon-btn ${t.category_locked ? "on" : ""}`}
-        title={t.category_locked ? "Locked — click to unlock" : "Lock"}
-        aria-label={t.category_locked ? "Unlock category" : "Lock category"}
-        onClick={() => lockToggle.mutate({ id: t.id, locked: !t.category_locked })}
-      >
-        {t.category_locked ? "🔒" : "🔓"}
-      </button>
-      {canEdit && (
+  // A viewer sees what is there; every control here writes, and the server refuses them.
+  const pickBox = (t: Transaction) =>
+    canEdit ? (
+      <input
+        type="checkbox"
+        style={{ width: "auto" }}
+        checked={selected.has(t.id)}
+        aria-label={`Select ${t.merchant ?? t.raw_description}`}
+        onChange={() => toggleSel(t.id)}
+      />
+    ) : null;
+  const categoryPicker = (t: Transaction) =>
+    canEdit ? (
+      <CategoryPicker
+        className="pill-select"
+        aria-label="Category"
+        categories={allCategories}
+        value={t.category_id ?? ""}
+        onChange={(id) => quickCat.mutate({ id: t.id, categoryId: id })}
+        emptyLabel="Uncategorised"
+      />
+    ) : (
+      <span className="muted">{t.category_name ?? "Uncategorised"}</span>
+    );
+  const rowActions = (t: Transaction) =>
+    canEdit ? (
+      <>
+        <button
+          className={`icon-btn ${t.category_locked ? "on" : ""}`}
+          title={t.category_locked ? "Locked — click to unlock" : "Lock"}
+          aria-label={t.category_locked ? "Unlock category" : "Lock category"}
+          onClick={() => lockToggle.mutate({ id: t.id, locked: !t.category_locked })}
+        >
+          {t.category_locked ? "🔒" : "🔓"}
+        </button>
         <button
           className={`icon-btn ${t.transfer_group_id ? "on" : ""}`}
           title={t.transfer_group_id ? "Linked transfer: change or unlink" : "Link as a transfer…"}
@@ -274,17 +305,19 @@ export function Transactions() {
         >
           ⇄
         </button>
-      )}
-      <button
-        className="icon-btn"
-        title="Apply to similar, make a rule, add a note…"
-        aria-label="More actions"
-        onClick={() => setDialogTxn(t)}
-      >
-        ⋯
-      </button>
-    </>
-  );
+        <button
+          className="icon-btn"
+          title="Apply to similar, make a rule, add a note…"
+          aria-label="More actions"
+          onClick={() => {
+            setDialogError(null);
+            setDialogTxn(t);
+          }}
+        >
+          ⋯
+        </button>
+      </>
+    ) : null;
   const transferTag = (t: Transaction) => {
     const label = transferLabel(t);
     return label ? <span className="tag transfer">{label}</span> : null;
@@ -330,7 +363,11 @@ export function Transactions() {
         </button>
       </div>
 
-      {flash && <div className="notice">{flash}</div>}
+      {flash && (
+        <div className="notice" role="status">
+          {flash}
+        </div>
+      )}
 
       {tab === "rules" ? (
         <RulesManager categories={categories.data ?? []} onFlash={showFlash} />
@@ -440,7 +477,7 @@ export function Transactions() {
                 <>
                   <SortChips table={server} labels={TXN_LABELS} columns={TXN_FILTER_KEYS} />
                   <FilterFields table={server} labels={TXN_LABELS} columns={TXN_FILTER_KEYS} />
-                  {pageItems.length > 0 && (
+                  {canEdit && pageItems.length > 0 && (
                     <label className="select-all">
                       <input
                         type="checkbox"
@@ -487,13 +524,15 @@ export function Transactions() {
                     <thead>
                       <tr>
                         <th className="pick">
-                          <input
-                            type="checkbox"
-                            style={{ width: "auto" }}
-                            aria-label="Select all on this page"
-                            checked={allOnPageSelected}
-                            onChange={toggleAllOnPage}
-                          />
+                          {canEdit && (
+                            <input
+                              type="checkbox"
+                              style={{ width: "auto" }}
+                              aria-label="Select all on this page"
+                              checked={allOnPageSelected}
+                              onChange={toggleAllOnPage}
+                            />
+                          )}
                         </th>
                         <SortHeader table={server} col="date">
                           Date
@@ -679,7 +718,11 @@ export function Transactions() {
           txn={dialogTxn}
           categories={categories.data ?? []}
           busy={dialogApply.isPending}
-          onClose={() => setDialogTxn(null)}
+          error={dialogError}
+          onClose={() => {
+            setDialogTxn(null);
+            setDialogError(null);
+          }}
           onSubmit={(body) => dialogApply.mutate({ txn: dialogTxn, body })}
         />
       )}

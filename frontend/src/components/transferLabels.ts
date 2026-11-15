@@ -21,3 +21,10 @@ export function transferLabel(t: Transaction): string | null {
   }
   return t.is_transfer ? "transfer" : null;
 }
+
+/** What a pair into an account of this type is: the server's kind_for_type. */
+export function kindForType(type: string): TransferKind {
+  if (type === "credit_card") return "card_payment";
+  if (type === "home_loan" || type === "personal_loan") return "loan_repayment";
+  return "own_accounts";
+}

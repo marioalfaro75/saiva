@@ -133,7 +133,7 @@ export function TransfersPanel({ onFlash, canEdit = true }: Props) {
           )}
         </div>
         <p className="muted">
-          These match on amount and date, but nothing else links them. Accept the ones that
+          Saiva isn't sure about these: they match on amount and date. Accept the ones that
           are money moving between your accounts.
         </p>
         {canEdit && (

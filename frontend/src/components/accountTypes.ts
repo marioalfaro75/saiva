@@ -22,10 +22,12 @@ export function wordingProblem(phrases: string[]): string | null {
   if (phrases.length > MAX_PHRASES) return `At most ${MAX_PHRASES} lines.`;
   const long = phrases.find((p) => p.length > MAX_LENGTH);
   if (long) return `“${long.slice(0, 30)}…” is too long: at most ${MAX_LENGTH} characters a line.`;
-  const short = phrases.find((p) => {
-    const letters = p.toLowerCase().replace(/[^a-z]/g, "");
-    return letters.length > 0 && letters.length < MIN_LETTERS;
-  });
+  const letters = (p: string) => p.toLowerCase().replace(/[^a-z]/g, "");
+  const wordless = phrases.find((p) => letters(p).length === 0);
+  if (wordless) {
+    return `“${wordless}” has no words in it. Use your bank's wording, e.g. “By Authority To Cc”; the account number is read from your statements.`;
+  }
+  const short = phrases.find((p) => letters(p).length < MIN_LETTERS);
   if (short) {
     return `“${short}” is too short to recognise a payment by. Use more of your bank's wording, e.g. “By Authority To Cc”.`;
   }

@@ -388,15 +388,25 @@ def _classify_transfers_once(db: Engine) -> None:
                 flush=True,
             )
         # Every start, not once: an older image run after a rollback links pairs the old
-        # way, with no kind (a loan repayment left out of spending). One query finds
-        # them, and there are none on almost every start.
+        # way, with no kind (a loan repayment left out of spending), and unlinks without
+        # clearing the kind. One query finds them, and there are none on almost every
+        # start.
         try:
             unkinded = (
                 session.execute(
                     select(Transaction.household_id)
                     .where(
-                        Transaction.transfer_group_id.is_not(None),
-                        Transaction.transfer_kind.is_(None),
+                        or_(
+                            and_(
+                                Transaction.transfer_group_id.is_not(None),
+                                Transaction.transfer_kind.is_(None),
+                            ),
+                            # Unlinked by an older image, which leaves the kind behind.
+                            and_(
+                                Transaction.transfer_group_id.is_(None),
+                                Transaction.transfer_kind.is_not(None),
+                            ),
+                        )
                     )
                     .distinct()
                 )

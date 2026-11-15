@@ -96,12 +96,42 @@ def _pair(
     return (a, b) if a.amount_cents < 0 else (b, a)
 
 
+def _link_learned(
+    db: Session, household_id: str, destination: models.Account, learned: str
+) -> int:
+    """What the wording now explains is linked at once, rather than left in the list.
+    Counted: the pairs into this account the learned wording explains. The accept itself
+    is already saved, so a failure here costs only the follow-up."""
+    try:
+        scan = transfers.classify_transfers(db, household_id)
+    except Exception:  # noqa: BLE001 - the accept stands; a later scan links the rest
+        db.rollback()
+        return 0
+    return sum(
+        1
+        for p in scan.linked
+        if p.inflow.account_id == destination.id
+        and transfers.has_phrase(transfers.wording_of(p.outflow.raw_description or ""), learned)
+    )
+
+
+def _resettle(db: Session, household_id: str, *dates: dt.date) -> None:
+    """After a person's decision, look again around it: an inflow no longer waiting may
+    be a cash deposit after all, and another may now be the one offered."""
+    try:
+        transfers.classify_transfers(db, household_id, since=min(dates))
+    except Exception:  # noqa: BLE001 - the decision stands; the next scan settles it
+        db.rollback()
+
+
 @router.get("/suggestions", response_model=list[schemas.TransferSuggestionOut])
 def list_suggestions(
     user: models.User = Depends(get_current_user), db: Session = Depends(get_db)
 ) -> list[schemas.TransferSuggestionOut]:
-    """Pairs that agree on amount and dates but nothing else links: for a person."""
-    pairs = [p for p in transfers.find_pairs(db, user.household_id) if not p.sure]
+    """Pairs not yet linked, for a person. Almost always the ones nothing but the amount
+    and dates (or one side's wording) ties together; one with evidence shows here only
+    until the next scan links it -- a transaction added by hand, say."""
+    pairs = transfers.find_pairs(db, user.household_id)
     pairs.sort(key=lambda p: (p.outflow.txn_date, p.outflow.id), reverse=True)
     cats, accts = _cat_names(db, user.household_id), _acct_names(db, user.household_id)
     return [
@@ -129,9 +159,7 @@ def accept(
     transfers.apply_kind(db, out, inflow, kind)
     learned = transfers.learn_wording(destination, out.raw_description) if payload.learn else None
     db.commit()
-    # What the wording now explains is linked at once, rather than leaving the next
-    # suggestion with the same wording to drop off the list without being linked.
-    also = len(transfers.classify_transfers(db, user.household_id).linked) if learned else 0
+    also = _link_learned(db, user.household_id, destination, learned) if learned else 0
     return schemas.TransferAcceptOut(
         group=_group_out(db, user.household_id, out.transfer_group_id or ""),
         learned=learned,
@@ -150,6 +178,7 @@ def dismiss(
     out, inflow = _pair(db, user.household_id, payload.outflow_id, payload.inflow_id)
     transfers.dismiss(db, user.household_id, out.id, inflow.id)
     db.commit()
+    _resettle(db, user.household_id, out.txn_date, inflow.txn_date)
 
 
 @router.post("/link", response_model=schemas.TransferGroupOut)
@@ -177,6 +206,8 @@ def link_candidates(
     """What this transaction could be linked to by hand: the other direction, another
     account, not already linked, within two weeks -- equal amounts first."""
     t = _owned(db, txn_id, user.household_id)
+    if t.split_parent_id is not None or _is_split(db, t):
+        return []  # a split, or part of one, can't be linked: nothing to offer
     part = aliased(models.Transaction)  # a split's part: a split whole is not offered
     rows = (
         db.execute(

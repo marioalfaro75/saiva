@@ -47,15 +47,21 @@ MIN_WORDING_LETTERS = 4
 
 def _clean_wording(phrases: list[str]) -> list[str]:
     """Trimmed, one of each (compared as wording: case, digits and punctuation aside).
-    A phrase too short to tell a payment to this account from anything else is refused,
-    with the reason."""
+    A phrase with no words, or too short to tell a payment to this account from anything
+    else, is refused with the reason."""
     kept: list[str] = []
     seen: set[str] = set()
     for phrase in phrases:
         text = " ".join(phrase.split())
         key = wording_of(text)
+        if not text:
+            continue  # a blank line
         if not key:
-            continue  # digits alone would match nothing
+            raise HTTPException(
+                status.HTTP_422_UNPROCESSABLE_ENTITY,
+                f"“{text}” has no words in it. Use your bank's wording, e.g. "
+                "“By Authority To Cc”; the account number is read from your statements.",
+            )
         if len(key.replace(" ", "")) < MIN_WORDING_LETTERS:
             raise HTTPException(
                 status.HTTP_422_UNPROCESSABLE_ENTITY,
@@ -130,7 +136,10 @@ def update_account(
         setattr(account, key, value)
     # The type decides what money into the account is: what was linked under the old
     # one is counted by the new one.
-    rekinded = transfers.rekind_into(db, account, old_type) if account.type != old_type else 0
+    rekinded = 0
+    if account.type != old_type:
+        rekinded = transfers.rekind_into(db, account, old_type)
+        transfers.unfile_cash_deposits(db, account)
     db.commit()
     db.refresh(account)
     return schemas.AccountUpdateOut(

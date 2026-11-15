@@ -20,9 +20,11 @@ Edit**, since the type decides how money going into it counts.
   - **Between accounts** — e.g. everyday to savings. Left out of spending and income.
   - **Loan repayment** — to a home or personal loan. Counts as spending once (Mortgage or
     Loan repayments), on the account that paid it.
-- **Transactions → Transfers.** Pairs Saiva isn't sure about wait here for you: **Accept**
-  or **Not a transfer** (it won't be suggested again). Below is everything linked, to
-  change its kind or unlink it. The tab shows how many are waiting.
+- **Transactions → Transfers.** Saiva links a pair by itself only when something ties the
+  two together: your wording for the account, its account number, or transfer wording on
+  both sides. Pairs it isn't sure about wait here for you: **Accept** or **Not a
+  transfer** (it won't be suggested again). Below is everything linked, to change its
+  kind or unlink it. The tab shows how many are waiting.
 - **Your bank's wording.** On **Accounts → Edit**, list the words your bank uses for a
   payment to that account, one per line — e.g. "By Authority To Cc" for the credit card.
   Payments with that wording link by themselves. Accepting a pair can remember its

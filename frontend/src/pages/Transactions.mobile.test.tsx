@@ -106,6 +106,18 @@ const showList = async () => {
   return result;
 };
 
+const showFor = async (text: string) => {
+  const result = renderApp(
+    <PeriodProvider>
+      <Transactions />
+    </PeriodProvider>,
+    { route: "/transactions?period=fy:2024" },
+  );
+  await screen.findByText(text);
+  await waitFor(() => expect(urlsFetched()).toContain("/api/periods/resolve"));
+  return result;
+};
+
 const urlsFetched = () =>
   vi.mocked(fetch).mock.calls.map((c) => String(c[0]).split("?")[0]);
 
@@ -148,6 +160,17 @@ describe("Transactions on a phone", () => {
   it("still offers select-all, which lives in the header on a wide screen", async () => {
     await showList();
     expect(screen.getByLabelText(/Select all 2 on this page/)).toBeInTheDocument();
+  });
+
+  it("offers a viewer no selection, which only leads to changes", async () => {
+    role.value = "viewer";
+    try {
+      const { container } = await showFor("Woolworths");
+      expect(container.querySelectorAll(".txn-card")).toHaveLength(2);
+      expect(screen.queryByLabelText(/Select all/)).toBeNull();
+    } finally {
+      role.value = "owner";
+    }
   });
 
   it("replaces the column headers with sort chips and stacked filters", async () => {

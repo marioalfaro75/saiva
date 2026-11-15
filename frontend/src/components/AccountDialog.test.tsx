@@ -141,7 +141,9 @@ describe("AccountDialog", () => {
     const update = vi.spyOn(api, "updateAccount");
     show();
     fireEvent.change(wording(), { target: { value: "By Authority To Cc\nCc" } });
-    expect(screen.getByRole("alert")).toHaveTextContent("“Cc” is too short to recognise a payment by");
+    expect(screen.getByRole("status")).toHaveTextContent("“Cc” is too short to recognise a payment by");
+    expect(wording()).toHaveAttribute("aria-invalid", "true");
+    expect(wording()).toHaveAccessibleDescription(expect.stringContaining("too short"));
     expect(screen.getByRole("button", { name: "Save" })).toBeDisabled();
     expect(update).not.toHaveBeenCalled();
   });
@@ -149,13 +151,23 @@ describe("AccountDialog", () => {
   it("says when a line is too long", () => {
     show();
     fireEvent.change(wording(), { target: { value: "x".repeat(81) } });
-    expect(screen.getByRole("alert")).toHaveTextContent("too long");
+    expect(screen.getByRole("status")).toHaveTextContent("too long");
   });
 
-  it("allows a number on its own line, which matches nothing and is dropped", () => {
+  it("refuses a line with no words, the way the server does", () => {
     show();
-    fireEvent.change(wording(), { target: { value: "By Authority To Cc\n0412" } });
-    expect(screen.queryByRole("alert")).toBeNull();
+    for (const line of ["0412", "-", "7"]) {
+      fireEvent.change(wording(), { target: { value: `By Authority To Cc\n${line}` } });
+      expect(screen.getByRole("status")).toHaveTextContent(`“${line}” has no words in it`);
+      expect(screen.getByRole("button", { name: "Save" })).toBeDisabled();
+    }
+  });
+
+  it("says nothing while the wording is fine", () => {
+    show();
+    fireEvent.change(wording(), { target: { value: "By Authority To Cc\nPayment to card" } });
+    expect(screen.getByRole("status")).toBeEmptyDOMElement();
+    expect(wording()).toHaveAttribute("aria-invalid", "false");
   });
 
   it("says how many links the new type recounted", async () => {
@@ -168,7 +180,7 @@ describe("AccountDialog", () => {
     save();
     await waitFor(() =>
       expect(onDone).toHaveBeenCalledWith(
-        "Saved. 4 linked transfers now counted as home loan. 0 transfers linked, 0 to review.",
+        "Saved. 4 linked transfers changed to Loan repayment. 0 transfers linked, 0 to review.",
       ),
     );
   });

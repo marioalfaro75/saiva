@@ -410,10 +410,11 @@ def test_rules_leave_a_linked_repayment_to_its_link(auth_client: TestClient) -> 
 
 def test_an_accounts_wording_is_tidied_and_its_type_checked(auth_client: TestClient) -> None:
     card = create_account(auth_client, "Visa", "credit_card")["id"]
-    saved = _wording(
-        auth_client, card, "  By Authority   To Cc ", "BY AUTHORITY TO CC 0412", "1234"
-    )
+    saved = _wording(auth_client, card, "  By Authority   To Cc ", "BY AUTHORITY TO CC 0412", "  ")
     assert saved["transfer_wording"] == ["By Authority To Cc"]
+    digits = auth_client.patch(f"/api/accounts/{card}", json={"transfer_wording": ["1234"]})
+    assert digits.status_code == 422
+    assert "no words" in digits.json()["detail"]
     assert saved["bank_identifier"] is None
     bad = auth_client.patch(f"/api/accounts/{card}", json={"type": "piggy_bank"})
     assert bad.status_code == 422

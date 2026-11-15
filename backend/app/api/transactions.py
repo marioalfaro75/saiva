@@ -75,12 +75,18 @@ def counterparts(
     by_group: dict[str, list[models.Transaction]] = {}
     for leg in legs:
         by_group.setdefault(leg.transfer_group_id or "", []).append(leg)
-    out: dict[str, models.Transaction] = {}
-    for t in txns:
-        others = [o for o in by_group.get(t.transfer_group_id or "", []) if o.id != t.id]
-        if len(others) == 1:
-            out[t.id] = others[0]
-    return out
+    opposite: dict[str, models.Transaction] = {}
+    for group_legs in by_group.values():
+        pair = transfers.outflow_and_inflow(group_legs)
+        if pair is None:
+            continue
+        out_leg, in_leg = pair
+        opposite[out_leg.id], opposite[in_leg.id] = in_leg, out_leg
+        for part in group_legs:
+            # A leg split after linking: its parts are linked with the other leg too.
+            if part.split_parent_id in (out_leg.id, in_leg.id):
+                opposite[part.id] = in_leg if part.split_parent_id == out_leg.id else out_leg
+    return {t.id: opposite[t.id] for t in txns if t.id in opposite}
 
 
 def _to_out(

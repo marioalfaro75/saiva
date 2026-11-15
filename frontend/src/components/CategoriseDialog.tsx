@@ -9,6 +9,8 @@ interface Props {
   txn: Transaction;
   categories: Category[];
   busy?: boolean;
+  /** Why the last Apply failed, shown in the window. */
+  error?: string | null;
   onClose: () => void;
   onSubmit: (body: {
     category_id: string | null;
@@ -28,7 +30,7 @@ const SCOPE_LABELS: Record<RecategoriseScope, string> = {
   contains: "All containing text…",
 };
 
-export function CategoriseDialog({ txn, categories, busy, onClose, onSubmit }: Props) {
+export function CategoriseDialog({ txn, categories, busy, error, onClose, onSubmit }: Props) {
   const fid = useId();
   const [categoryId, setCategoryId] = useState(txn.category_id ?? "");
   const [scope, setScope] = useState<RecategoriseScope>("none");
@@ -129,6 +131,12 @@ export function CategoriseDialog({ txn, categories, busy, onClose, onSubmit }: P
           />
           <label htmlFor="lock-txn">Lock — exempt from auto-categorisation</label>
         </div>
+
+        {error && (
+          <div className="error" role="alert">
+            {error}
+          </div>
+        )}
 
         <div className="modal-actions">
           <button className="btn btn-ghost" onClick={onClose}>

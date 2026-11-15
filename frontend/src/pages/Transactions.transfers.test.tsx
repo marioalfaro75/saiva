@@ -1,4 +1,4 @@
-import { fireEvent, screen, waitFor, within } from "@testing-library/react";
+import { cleanup, fireEvent, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { api, ApiError } from "../api/client";
@@ -83,7 +83,10 @@ const STUBS = {
   ],
   "/transfers/recent": [],
   "/accounts": [{ id: "a1", name: "Savings", type: "savings", institution: null, balance_cents: 0, txn_count: 3 }],
-  "/categories": [],
+  "/categories": [
+    { id: "p1", name: "Food", parent_id: null, kind: "expense" },
+    { id: "c1", name: "Supermarkets", parent_id: "p1", kind: "expense" },
+  ],
 };
 
 /** Renders, and waits for the period to settle: the list is asked for again once it has,
@@ -188,6 +191,18 @@ describe("Transactions: transfers", () => {
     expect(within(rowOf("By Authority To Cc")).getByText("Card payment → Credit card")).toBeInTheDocument();
   });
 
+  it("gives a viewer no row controls that write, and shows the category as text", async () => {
+    role.value = "viewer";
+    await show();
+    const row = await waitFor(() => rowOf("Woolworths"));
+    for (const name of ["Lock category", "More actions"]) {
+      expect(within(row).queryByRole("button", { name })).toBeNull();
+    }
+    expect(within(row).queryByRole("combobox", { name: "Category" })).toBeNull();
+    expect(within(row).getByText("Uncategorised")).toBeInTheDocument();
+    expect(screen.queryByRole("checkbox", { name: /Select/ })).toBeNull();
+  });
+
   it("gives the Transfers tab a viewer's read-only panel", async () => {
     role.value = "viewer";
     await show("/transactions?period=fy:2026&tab=transfers");
@@ -220,7 +235,7 @@ describe("Transactions: the ⋯ window", () => {
     expect(calls().some(([, url]) => url.includes("/recategorise"))).toBe(false);
   });
 
-  it("re-files when the category changed too", async () => {
+  it("re-files when the lock changed too", async () => {
     const recategorise = vi
       .spyOn(api, "recategorise")
       .mockResolvedValue({ updated_count: 1 } as Awaited<ReturnType<typeof api.recategorise>>);
@@ -235,16 +250,69 @@ describe("Transactions: the ⋯ window", () => {
     recategorise.mockRestore();
   });
 
-  it("says when a save was refused, and shows what is there now", async () => {
+  it("says in the window when a save was refused, and keeps the choices", async () => {
+    const recategorise = vi
+      .spyOn(api, "recategorise")
+      .mockRejectedValue(new ApiError(400, "Unknown category"));
+    const dialog = await openFor("Woolworths");
+    const lock = within(dialog).getByLabelText("Lock — exempt from auto-categorisation");
+    fireEvent.click(lock);
+    fireEvent.click(within(dialog).getByRole("button", { name: "Apply" }));
+
+    expect(await within(dialog).findByRole("alert")).toHaveTextContent("Not saved. Unknown category");
+    expect(lock).toBeChecked();
+    recategorise.mockRestore();
+  });
+
+  it("says when the note was saved but the rest was not", async () => {
     const recategorise = vi
       .spyOn(api, "recategorise")
       .mockRejectedValue(new ApiError(400, "Unknown category"));
     const dialog = await openFor("Woolworths");
     fireEvent.click(within(dialog).getByLabelText("Lock — exempt from auto-categorisation"));
+    fireEvent.change(within(dialog).getByRole("textbox", { name: "Note" }), {
+      target: { value: "Weekly shop" },
+    });
     fireEvent.click(within(dialog).getByRole("button", { name: "Apply" }));
 
-    expect(await screen.findByText("Not saved. Unknown category")).toBeInTheDocument();
-    expect(screen.queryByRole("dialog", { name: "Categorise" })).toBeNull();
+    expect(await within(dialog).findByRole("alert")).toHaveTextContent(
+      "Note saved, but the category wasn't changed. Unknown category",
+    );
+    recategorise.mockRestore();
+  });
+
+  it("re-files when the note comes with a new category, scope or rule", async () => {
+    const recategorise = vi
+      .spyOn(api, "recategorise")
+      .mockResolvedValue({ updated_count: 1 } as Awaited<ReturnType<typeof api.recategorise>>);
+    const apply = async (change: (dialog: HTMLElement) => void, expected: object) => {
+      recategorise.mockClear();
+      const dialog = await openFor("Woolworths");
+      change(dialog);
+      fireEvent.change(within(dialog).getByRole("textbox", { name: "Note" }), {
+        target: { value: "Weekly shop" },
+      });
+      fireEvent.click(within(dialog).getByRole("button", { name: "Apply" }));
+      await waitFor(() =>
+        expect(recategorise).toHaveBeenCalledWith("t3", expect.objectContaining(expected)),
+      );
+      cleanup();
+    };
+
+    await apply(
+      (d) => fireEvent.change(within(d).getByLabelText("Apply to"), { target: { value: "merchant" } }),
+      { scope: "merchant" },
+    );
+    await apply(
+      (d) => fireEvent.click(within(d).getByLabelText(/create a rule/)),
+      { make_rule: true },
+    );
+    await apply((d) => {
+      const picker = within(d).getByRole("combobox", { name: "Category" });
+      fireEvent.focus(picker);
+      fireEvent.change(picker, { target: { value: "Supermarkets" } });
+      fireEvent.keyDown(picker, { key: "Enter" });
+    }, { category_id: "c1" });
     recategorise.mockRestore();
   });
 });

@@ -87,11 +87,27 @@ def test_the_stronger_evidence_wins_over_the_nearer_pair(auth_client: TestClient
     assert _row(nearer).transfer_group_id is None
 
 
-def test_one_sides_wording_with_no_rival_links(auth_client: TestClient) -> None:
+def test_one_sides_wording_alone_is_for_a_person_even_with_no_rival(
+    auth_client: TestClient,
+) -> None:
     savings = create_account(auth_client, "Savings", "savings")["id"]
     card = create_account(auth_client, "Visa", "credit_card")["id"]
-    _add(auth_client, savings, "2026-06-05", -50000, "By Authority To Cc")
-    _add(auth_client, card, "2026-06-06", 50000, "PAYMENT RECEIVED THANK YOU")
+    out = _add(auth_client, savings, "2026-06-05", -50000, "By Authority To Cc")
+    arrived = _add(auth_client, card, "2026-06-06", 50000, "PAYMENT RECEIVED THANK YOU")
+
+    # Whether a pair links depends on the pair alone, not on what else is in view: the
+    # same pair can't be linked by one scan and left for review by the next.
+    scan = _scan(auth_client)
+
+    assert (scan["linked"], scan["to_review"]) == (0, 1)
+    assert _suggestions(auth_client) == [(out, arrived)]
+
+
+def test_transfer_wording_on_both_sides_links(auth_client: TestClient) -> None:
+    everyday = create_account(auth_client, "Everyday")["id"]
+    savings = create_account(auth_client, "Savings", "savings")["id"]
+    _add(auth_client, everyday, "2026-06-05", -50000, "TRANSFER TO SAVINGS")
+    _add(auth_client, savings, "2026-06-05", 50000, "TFR FROM EVERYDAY")
 
     assert _scan(auth_client)["linked"] == 2
 
@@ -214,18 +230,58 @@ def test_a_persons_own_internal_transfers_is_kept_when_linking(auth_client: Test
     assert (row.category_id, row.confidence) == (internal, PERSON_CONFIDENCE)
 
 
-def test_an_older_releases_unscored_internal_transfers_is_still_refiled(
+def test_a_category_given_by_hand_with_no_score_is_a_persons(auth_client: TestClient) -> None:
+    savings = create_account(auth_client, "Savings", "savings")["id"]
+    card = create_account(auth_client, "Visa", "credit_card")["id"]
+    card_payments = _cat(auth_client, "Credit-card payments")
+    out = _add(auth_client, savings, "2026-06-05", -5000, "TRANSFER TO VISA")
+    _set(out, category_id=card_payments, confidence=None, source="manual")
+    _add(auth_client, card, "2026-06-05", 5000, "TRANSFER FROM SAVINGS")
+    other = _add(auth_client, savings, "2026-06-20", -7000, "TRANSFER OUT")
+    _set(other, category_id=_cat(auth_client, "Internal transfers"), confidence=None)
+    _add(auth_client, card, "2026-06-20", 7000, "TRANSFER IN")
+
+    assert _scan(auth_client)["linked"] == 4
+
+    assert (_row(out).category_id, _row(out).confidence) == (card_payments, None)
+    # Not linked before: its Internal transfers is someone's, not an older release's.
+    assert _row(other).category_id == _cat(auth_client, "Internal transfers")
+
+
+def test_an_older_releases_unscored_internal_transfers_is_refiled(
     auth_client: TestClient,
 ) -> None:
     savings = create_account(auth_client, "Savings", "savings")["id"]
     card = create_account(auth_client, "Visa", "credit_card")["id"]
-    out = _add(auth_client, savings, "2026-06-05", -5000, "TRANSFER TO VISA")
-    _set(out, category_id=_cat(auth_client, "Internal transfers"), confidence=None)
-    _add(auth_client, card, "2026-06-05", 5000, "TRANSFER FROM SAVINGS")
+    internal = _cat(auth_client, "Internal transfers")
+    out = _add(auth_client, savings, "2026-06-05", -5000, "X")
+    inflow = _add(auth_client, card, "2026-06-05", 5000, "Y")
+    for txn in (out, inflow):  # linked by 0.17: no kind, no score
+        _set(txn, is_transfer=True, transfer_group_id="old", category_id=internal, confidence=None)
 
-    _scan(auth_client)
+    _classify_transfers_once(engine)
 
     assert _row(out).category_id == _cat(auth_client, "Credit-card payments")
+
+
+def test_unlinking_keeps_a_persons_unscored_category_and_clears_an_older_releases(
+    auth_client: TestClient,
+) -> None:
+    everyday = create_account(auth_client, "Everyday")["id"]
+    savings = create_account(auth_client, "Savings", "savings")["id"]
+    gifts = _cat(auth_client, "Gifts")
+    internal = _cat(auth_client, "Internal transfers")
+    out = _add(auth_client, everyday, "2026-06-05", -5000, "X")
+    inflow = _add(auth_client, savings, "2026-06-05", 5000, "Y")
+    _set(out, is_transfer=True, transfer_group_id="g", transfer_kind="own_accounts",
+         category_id=gifts, confidence=None)
+    _set(inflow, is_transfer=True, transfer_group_id="g", transfer_kind="own_accounts",
+         category_id=internal, confidence=None)
+
+    assert auth_client.post("/api/transfers/g/unlink").status_code == 200
+
+    assert _row(out).category_id == gifts
+    assert _row(inflow).category_id is None
 
 
 # --------------------------------------------------------------------------------------
@@ -454,4 +510,307 @@ def test_a_loans_own_interest_raises_no_large_payment_alert(auth_client: TestCli
     large = [a["body"] for a in alerts if a["type"] == "large_txn"]
     assert len(large) == 1
     assert "BIG TV" in large[0].upper()
+
+
+
+# --------------------------------------------------------------------------------------
+# The second review
+# --------------------------------------------------------------------------------------
+
+
+def test_a_pair_with_evidence_added_by_hand_is_offered_until_a_scan_links_it(
+    auth_client: TestClient,
+) -> None:
+    everyday = create_account(auth_client, "Everyday")["id"]
+    savings = create_account(auth_client, "Savings", "savings")["id"]
+    out = _add(auth_client, everyday, "2026-06-05", -50000, "TRANSFER TO SAVINGS")
+    inflow = _add(auth_client, savings, "2026-06-05", 50000, "TRANSFER FROM EVERYDAY")
+
+    # Added by hand: no scan has run, so it is neither linked nor hidden.
+    assert _suggestions(auth_client) == [(out, inflow)]
+    assert _scan(auth_client)["linked"] == 2
+    assert _suggestions(auth_client) == []
+
+
+def test_an_imports_scan_does_not_link_on_one_sides_wording_near_its_edge(
+    auth_client: TestClient,
+) -> None:
+    everyday = create_account(auth_client, "Everyday")["id"]
+    savings = create_account(auth_client, "Savings", "savings")["id"]
+    card = create_account(auth_client, "Visa", "credit_card")["id"]
+    _add(auth_client, savings, "2026-06-06", -50000, "BY AUTHORITY VISA")
+    _add(auth_client, everyday, "2026-06-05", -50000, "RENT JUNE")
+    arrived = _add(auth_client, card, "2026-06-08", 50000, "PAYMENT RECEIVED THANK YOU")
+    assert _scan(auth_client)["to_review"] == 1
+    atm = _add(auth_client, everyday, "2026-06-10", -50000, "ATM WITHDRAWAL")
+
+    with SessionLocal() as db:
+        classify_transfers(db, _household_id(), since=dt.date(2026, 6, 10))
+
+    assert _row(atm).transfer_group_id is None
+    assert _row(arrived).transfer_group_id is None
+
+
+def test_a_persons_cash_deposit_in_an_adopted_category_of_another_kind_is_kept(
+    auth_client: TestClient,
+) -> None:
+    everyday = create_account(auth_client, "Everyday")["id"]
+    savings = create_account(auth_client, "Savings", "savings")["id"]
+    cash = _cat(auth_client, "Cash deposit")
+    with SessionLocal() as db:  # a household's own "Cash deposit", made under Savings
+        category = db.get(models.Category, cash)
+        assert category is not None
+        category.kind = "savings"
+        db.commit()
+    deposit = _add(auth_client, savings, "2026-03-03", 20000, "BRANCH LODGEMENT")
+    _set(deposit, category_id=cash, confidence=PERSON_CONFIDENCE)
+    _add(auth_client, everyday, "2026-03-04", -20000, "ATM WITHDRAWAL")
+
+    scan = _scan(auth_client)
+
+    assert scan["to_review"] == 0
+    assert (_row(deposit).category_id, _row(deposit).confidence) == (cash, PERSON_CONFIDENCE)
+
+
+def test_an_inflow_that_could_still_be_a_transfers_other_half_is_not_a_cash_deposit(
+    auth_client: TestClient,
+) -> None:
+    everyday = create_account(auth_client, "Everyday")["id"]
+    savings = create_account(auth_client, "Savings", "savings")["id"]
+    _add(auth_client, everyday, "2026-06-01", -50000, "ATM WITHDRAWAL")
+    _add(auth_client, everyday, "2026-06-03", -50000, "EFTPOS CASH OUT")
+    _add(auth_client, savings, "2026-06-02", 50000, "BRANCH LODGEMENT")
+    _scan(auth_client)
+    sale = _add(auth_client, savings, "2026-06-05", 50000, "GUMTREE SALE PROCEEDS")
+
+    with SessionLocal() as db:
+        scan = classify_transfers(db, _household_id(), since=dt.date(2026, 6, 5))
+
+    # The cash-out on the 3rd could be its other half: not known to come from nowhere.
+    assert scan.cash_deposits == 0
+    assert _row(sale).category_id is None
+
+
+def test_saying_not_a_transfer_puts_the_cash_deposit_back(auth_client: TestClient) -> None:
+    everyday = create_account(auth_client, "Everyday")["id"]
+    savings = create_account(auth_client, "Savings", "savings")["id"]
+    deposit = _add(auth_client, savings, "2026-06-03", 50000, "DEPOSIT")
+    _scan(auth_client)
+    out = _add(auth_client, everyday, "2026-06-03", -50000, "PAYMENT")
+    _scan(auth_client)
+    assert _row(deposit).category_id is None
+
+    resp = auth_client.post(
+        "/api/transfers/dismiss", json={"outflow_id": out, "inflow_id": deposit}
+    )
+
+    assert resp.status_code == 204
+    assert _row(deposit).category_id == _cat(auth_client, "Cash deposit")
+
+
+def test_learned_wording_keeps_to_the_limits_a_person_has() -> None:
+    account = models.Account(name="Visa", type="credit_card", transfer_wording=[])
+    long = (
+        "ONLINEBANKINGMOVEMENTS CREDITCARDSETTLEMENTS AUTHORISEDBYCUSTOMER "
+        "REFERENCENUMBERS XYZ"
+    )
+    phrase = learn_wording(account, long)
+    assert phrase is not None and len(phrase) <= 80 and len(phrase.split()) >= 2
+    full = models.Account(
+        name="Amex", type="credit_card", transfer_wording=[f"wording number {i}" for i in range(30)]
+    )
+    assert learn_wording(full, "By Authority To Amex") is None
+    assert len(full.transfer_wording or []) == 30
+
+
+def test_a_split_leg_and_its_parts_still_show_the_other_account(auth_client: TestClient) -> None:
+    everyday = create_account(auth_client, "Everyday")["id"]
+    savings = create_account(auth_client, "Savings", "savings")["id"]
+    out = _add(auth_client, everyday, "2026-06-05", -100000, "TRANSFER TO SAVINGS")
+    inflow = _add(auth_client, savings, "2026-06-05", 100000, "TRANSFER FROM EVERYDAY")
+    _scan(auth_client)
+    parts = _split(auth_client, out, -60000, -40000)
+
+    listed = auth_client.get(
+        "/api/transactions", params={**JUNE_ALL, "page_size": 50}
+    ).json()["items"]
+    other = {t["id"]: t["counterpart_account_name"] for t in listed}
+
+    assert other[inflow] == "Everyday"
+    assert [other.get(p) for p in parts] == ["Savings", "Savings"]
+
+
+JUNE_ALL = {"period": "custom", "start": "2026-06-01", "end": "2026-06-30"}
+
+
+def test_nothing_is_offered_to_link_a_split_or_its_parts_with(auth_client: TestClient) -> None:
+    everyday = create_account(auth_client, "Everyday")["id"]
+    savings = create_account(auth_client, "Savings", "savings")["id"]
+    whole = _add(auth_client, everyday, "2026-06-05", -100000, "PAYMENT")
+    parts = _split(auth_client, whole, -60000, -40000)
+    _add(auth_client, savings, "2026-06-05", 100000, "DEPOSIT")
+
+    for txn in (whole, *parts):
+        assert auth_client.get(f"/api/transfers/candidates/{txn}").json() == []
+
+
+def test_a_loan_typed_as_a_home_loan_by_mistake_moves_its_repayments_to_loan_repayments(
+    auth_client: TestClient,
+) -> None:
+    savings = create_account(auth_client, "Savings", "savings")["id"]
+    car = create_account(auth_client, "Car loan", "home_loan")["id"]
+    out = _add(auth_client, savings, "2026-06-05", -45000, "TRANSFER TO LOAN")
+    _add(auth_client, car, "2026-06-05", 45000, "TRANSFER FROM SAVINGS")
+    _scan(auth_client)
+    assert _row(out).category_id == _cat(auth_client, "Mortgage")
+
+    resp = auth_client.patch(f"/api/accounts/{car}", json={"type": "personal_loan"})
+
+    assert resp.json()["transfers_rekinded"] == 1
+    assert _row(out).category_id == _cat(auth_client, "Loan repayments")
+
+
+def test_a_kind_set_by_hand_into_an_everyday_account_gets_the_category_of_its_new_type(
+    auth_client: TestClient,
+) -> None:
+    savings = create_account(auth_client, "Savings", "savings")["id"]
+    loan = create_account(auth_client, "Westpac", "everyday")["id"]
+    out = _add(auth_client, savings, "2026-06-05", -125492, "TRANSFER TO LOAN")
+    _add(auth_client, loan, "2026-06-05", 125492, "TRANSFER FROM SAVINGS")
+    _scan(auth_client)
+    group = _row(out).transfer_group_id
+    auth_client.post(f"/api/transfers/{group}/kind", json={"kind": "loan_repayment"})
+    assert _row(out).category_id == _cat(auth_client, "Loan repayments")
+
+    auth_client.patch(f"/api/accounts/{loan}", json={"type": "home_loan"})
+
+    assert _row(out).category_id == _cat(auth_client, "Mortgage")
+
+
+def test_cash_deposits_are_unfiled_when_the_account_turns_out_not_to_be_savings(
+    auth_client: TestClient,
+) -> None:
+    account = create_account(auth_client, "Visa", "savings")["id"]  # a card, typed wrong
+    refund = _add(auth_client, account, "2026-06-05", 12000, "REFUND JB HIFI")
+    mine = _add(auth_client, account, "2026-06-06", 5000, "CASH")
+    _scan(auth_client)
+    cash = _cat(auth_client, "Cash deposit")
+    assert _row(refund).category_id == cash
+    _set(mine, category_id=cash, confidence=PERSON_CONFIDENCE)
+
+    auth_client.patch(f"/api/accounts/{account}", json={"type": "credit_card"})
+
+    assert _row(refund).category_id is None
+    assert _row(mine).category_id == cash
+
+
+def test_a_pair_relinked_by_an_older_image_is_read_whole_on_start(auth_client: TestClient) -> None:
+    savings = create_account(auth_client, "Savings", "savings")["id"]
+    card = create_account(auth_client, "Visa", "credit_card")["id"]
+    out = _add(auth_client, savings, "2026-06-05", -50000, "P")
+    inflow = _add(auth_client, card, "2026-06-05", 50000, "Q")
+    stale = _add(auth_client, savings, "2026-06-20", -900, "R")
+    # 0.18 kinded the savings leg; after a rollback, 0.17 linked it to a new card inflow
+    # (no kind), and unlinked another row without clearing its kind.
+    _set(out, is_transfer=True, transfer_group_id="g17", transfer_kind="card_payment")
+    _set(inflow, is_transfer=True, transfer_group_id="g17", transfer_kind=None)
+    _set(stale, transfer_kind="card_payment")
+
+    _classify_transfers_once(engine)
+
+    assert (_row(out).transfer_group_id, _row(inflow).transfer_group_id) == ("g17", "g17")
+    assert _row(inflow).transfer_kind == "card_payment"
+    assert _row(stale).transfer_kind is None
+
+
+def test_accepting_counts_only_what_the_learned_wording_linked(auth_client: TestClient) -> None:
+    everyday = create_account(auth_client, "Everyday")["id"]
+    savings = create_account(auth_client, "Savings", "savings")["id"]
+    card = create_account(auth_client, "Visa", "credit_card")["id"]
+    first = _add(auth_client, savings, "2026-06-01", -10000, "By Authority To Cc 0412")
+    first_in = _add(auth_client, card, "2026-06-01", 10000, "CREDIT")
+    _add(auth_client, savings, "2026-06-15", -20000, "By Authority To Cc 0412")
+    _add(auth_client, card, "2026-06-15", 20000, "CREDIT")
+    _scan(auth_client)
+    # Added by hand since the scan: linked by the next one, but not by the wording.
+    _add(auth_client, everyday, "2026-06-20", -7000, "TRANSFER TO SAVINGS")
+    _add(auth_client, savings, "2026-06-20", 7000, "TRANSFER FROM EVERYDAY")
+
+    # Into the same card, linked on other wording; and the phrase, but into another card.
+    _add(auth_client, savings, "2026-06-22", -3000, "TRANSFER TO VISA")
+    _add(auth_client, card, "2026-06-22", 3000, "TRANSFER RECEIVED")
+    amex = create_account(auth_client, "Amex", "credit_card")["id"]
+    _add(auth_client, savings, "2026-06-24", -4000, "By Authority To Cc transfer")
+    _add(auth_client, amex, "2026-06-24", 4000, "TRANSFER RECEIVED")
+
+    resp = auth_client.post(
+        "/api/transfers/accept", json={"outflow_id": first, "inflow_id": first_in}
+    )
+
+    assert resp.json()["also_linked"] == 1
+
+
+def test_an_inflow_whose_only_possible_other_half_is_linked_is_a_cash_deposit(
+    auth_client: TestClient,
+) -> None:
+    everyday = create_account(auth_client, "Everyday")["id"]
+    savings = create_account(auth_client, "Savings", "savings")["id"]
+    _add(auth_client, everyday, "2026-06-05", -50000, "TRANSFER TO SAVINGS")
+    _add(auth_client, savings, "2026-06-05", 50000, "TRANSFER FROM EVERYDAY")
+    gift = _add(auth_client, savings, "2026-06-06", 50000, "DEPOSIT")
+
+    scan = _scan(auth_client)
+
+    assert (scan["linked"], scan["cash_deposits"]) == (2, 1)
+    assert _row(gift).category_id == _cat(auth_client, "Cash deposit")
+
+
+def test_unlinking_leaves_the_categories_a_person_gave_a_splits_parts(
+    auth_client: TestClient,
+) -> None:
+    everyday = create_account(auth_client, "Everyday")["id"]
+    savings = create_account(auth_client, "Savings", "savings")["id"]
+    internal = _cat(auth_client, "Internal transfers")
+    out = _add(auth_client, everyday, "2026-06-05", -100000, "TRANSFER TO SAVINGS")
+    _add(auth_client, savings, "2026-06-05", 100000, "TRANSFER FROM EVERYDAY")
+    _scan(auth_client)
+    group = _row(out).transfer_group_id
+    resp = auth_client.post(
+        f"/api/transactions/{out}/split",
+        json={"splits": [
+            {"amount_cents": -60000, "category_id": internal},
+            {"amount_cents": -40000, "category_id": _cat(auth_client, "Gifts")},
+        ]},
+    )
+    parts = [c["id"] for c in resp.json()]
+
+    auth_client.post(f"/api/transfers/{group}/unlink")
+
+    assert _row(parts[0]).category_id == internal
+
+
+def test_a_type_change_that_counts_nothing_differently_reports_nothing(
+    auth_client: TestClient,
+) -> None:
+    everyday = create_account(auth_client, "Everyday")["id"]
+    other = create_account(auth_client, "Other", "everyday")["id"]
+    _add(auth_client, everyday, "2026-06-05", -5000, "TRANSFER OUT")
+    _add(auth_client, other, "2026-06-05", 5000, "TRANSFER IN")
+    _scan(auth_client)
+
+    resp = auth_client.patch(f"/api/accounts/{other}", json={"type": "savings"})
+
+    assert resp.json()["transfers_rekinded"] == 0
+
+
+def test_a_kind_left_behind_by_an_older_image_is_cleared_on_start(
+    auth_client: TestClient,
+) -> None:
+    savings = create_account(auth_client, "Savings", "savings")["id"]
+    stale = _add(auth_client, savings, "2026-06-20", -900, "R")
+    _set(stale, transfer_kind="card_payment")  # unlinked by 0.17, which knows no kinds
+
+    _classify_transfers_once(engine)
+
+    assert _row(stale).transfer_kind is None
 

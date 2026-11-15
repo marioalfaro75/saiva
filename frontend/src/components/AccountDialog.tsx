@@ -5,6 +5,7 @@ import { api, ApiError } from "../api/client";
 import type { Account, TransferScan } from "../api/types";
 import { useDismissable } from "../hooks/useDismissable";
 import { ACCOUNT_TYPES, accountTypeLabel, wordingProblem } from "./accountTypes";
+import { kindForType, TRANSFER_KIND_LABELS } from "./transferLabels";
 
 interface Props {
   account: Account;
@@ -65,7 +66,7 @@ export function AccountDialog({ account, onClose, onDone }: Props) {
     onSuccess: ({ scan, scanFailed, rekinded }) => {
       void qc.invalidateQueries();
       const recounted = rekinded
-        ? ` ${plural(rekinded, "linked transfer")} now counted as ${accountTypeLabel(type)}.`
+        ? ` ${plural(rekinded, "linked transfer")} changed to ${TRANSFER_KIND_LABELS[kindForType(type)]}.`
         : "";
       onDone(
         scanFailed
@@ -113,13 +114,17 @@ export function AccountDialog({ account, onClose, onDone }: Props) {
             value={wording}
             onChange={(e) => setWording(e.target.value)}
             placeholder={"By Authority To Cc\nPayment to card"}
-            aria-describedby={`${fid}-wording-help`}
+            aria-invalid={problem !== null}
+            aria-describedby={`${fid}-wording-help${problem ? ` ${fid}-wording-error` : ""}`}
           />
-          {problem && (
-            <div className="error" role="alert" style={{ marginTop: 6 }}>
-              {problem}
-            </div>
-          )}
+          {/* Polite: it changes as the person types, and must not interrupt them. */}
+          <div id={`${fid}-wording-error`} role="status" aria-live="polite">
+            {problem && (
+              <div className="error" style={{ marginTop: 6 }}>
+                {problem}
+              </div>
+            )}
+          </div>
           <p id={`${fid}-wording-help`} className="muted" style={{ margin: "4px 0 0", fontSize: 13 }}>
             One per line. When a description in another of your accounts contains one of these,
             Saiva knows the money went to or came from {account.name}.
