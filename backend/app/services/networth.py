@@ -100,9 +100,14 @@ def record_snapshot(
 
 
 def record_snapshot_if_used(db: Session, household_id: str) -> None:
-    """Today's snapshot, when the household keeps a net worth: an item, or an account
-    that counts. Commits."""
+    """Today's snapshot, when the household keeps a net worth: an item, an account that
+    counts, or a history already (so taking the last account out is recorded too).
+    Commits."""
     used = db.execute(
+        select(models.NetWorthSnapshot.id)
+        .where(models.NetWorthSnapshot.household_id == household_id)
+        .limit(1)
+    ).first() or db.execute(
         select(models.NetWorthItem.id).where(models.NetWorthItem.household_id == household_id)
         .limit(1)
     ).first() or db.execute(
@@ -143,19 +148,33 @@ def get_net_worth(
     if historical and snapshots:
         latest = snapshots[-1]
         assets, liabilities, net = latest.assets_cents, latest.liabilities_cents, latest.net_cents
+    history = [
+        NetWorthPoint(
+            as_of=s.as_of,
+            assets_cents=s.assets_cents,
+            liabilities_cents=s.liabilities_cents,
+            net_cents=s.net_cents,
+        )
+        for s in snapshots
+    ]
+    if not historical and history:
+        # Today's point is today's figures: balances move with every transaction, and a
+        # snapshot is only written when something on this page or an import changes.
+        today = NetWorthPoint(
+            as_of=dt.date.today(),
+            assets_cents=assets,
+            liabilities_cents=liabilities,
+            net_cents=net,
+        )
+        if history[-1].as_of >= today.as_of:
+            history[-1] = today.model_copy(update={"as_of": history[-1].as_of})
+        else:
+            history.append(today)
     return NetWorthOut(
         assets_cents=assets,
         liabilities_cents=liabilities,
         net_cents=net,
         items=[NetWorthItemOut.model_validate(i) for i in items],
-        history=[
-            NetWorthPoint(
-                as_of=s.as_of,
-                assets_cents=s.assets_cents,
-                liabilities_cents=s.liabilities_cents,
-                net_cents=s.net_cents,
-            )
-            for s in snapshots
-        ],
+        history=history,
         accounts=accounts,
     )

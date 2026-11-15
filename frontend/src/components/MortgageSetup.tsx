@@ -4,7 +4,8 @@ import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { api, ApiError } from "../api/client";
 import type { Mortgage, MortgageRate, RepaymentEvery, RepaymentPeriod } from "../api/types";
 import { formatCents, formatDate } from "../format";
-import { EVERY_LABELS, parseDollars, parseDollarsOrZero } from "./accountTypes";
+import { EVERY_LABELS, parseDollars, parseDollarsOrZero, parseSignedDollars } from "./accountTypes";
+import { localToday } from "./mortgageText";
 
 interface Props {
   loan: Mortgage;
@@ -12,7 +13,6 @@ interface Props {
   onCancel?: () => void;
 }
 
-const today = () => new Date().toISOString().slice(0, 10);
 const dollars = (cents: number) => (cents / 100).toFixed(2);
 
 interface RateRow {
@@ -36,12 +36,17 @@ function parseRate(text: string): number | null {
 export function MortgageSetup({ loan, onDone, onCancel }: Props) {
   const fid = useId();
   const qc = useQueryClient();
+  const today = localToday();
   const [borrowed, setBorrowed] = useState(
     loan.original_cents ? dollars(loan.original_cents) : "",
   );
   const [start, setStart] = useState(loan.start_date ?? "");
   const [years, setYears] = useState(
-    loan.term_months ? String(Math.round((loan.term_months / 12) * 100) / 100) : "30",
+    loan.term_months
+      ? String(Math.round((loan.term_months / 12) * 100) / 100)
+      : loan.set_up
+        ? "" // saved without one: left without one
+        : "30",
   );
   const [rates, setRates] = useState<RateRow[]>(
     loan.rates.length
@@ -59,10 +64,10 @@ export function MortgageSetup({ loan, onDone, onCancel }: Props) {
   const suggestion = loan.repayment_suggestion;
 
   const [owing, setOwing] = useState("");
-  const [owingOn, setOwingOn] = useState(today());
+  const [owingOn, setOwingOn] = useState(today);
 
   const chosen = new Set(loan.offsets.map((o) => o.account_id));
-  const [offsets, setOffsets] = useState<Record<string, string | null>>(
+  const [offsets, setOffsets] = useState<Record<string, string>>(
     Object.fromEntries(
       loan.offset_choices
         .filter((o) => chosen.has(o.account_id))
@@ -85,9 +90,10 @@ export function MortgageSetup({ loan, onDone, onCancel }: Props) {
   if (repay.trim() && repayCents === null) problems.push("Enter the repayment as an amount, e.g. 2,950.");
   if (owing.trim() && owingCents === null) problems.push("Enter what you owe as an amount, e.g. 452,000.");
   if (!loan.set_up && !owing.trim()) problems.push("Enter what you owe now.");
-  if (owingOn > today()) problems.push("The date for what you owe can't be in the future.");
-  const badOffset = Object.entries(offsets).find(([, v]) => v !== null && v.trim() && parseDollarsOrZero(v) === null);
-  if (badOffset) problems.push("Enter each offset balance as an amount, e.g. 25,000.");
+  if (owing.trim() && !owingOn) problems.push("Enter the date for what you owe.");
+  if (owingOn > today) problems.push("The date for what you owe can't be in the future.");
+  if (Object.values(offsets).some((v) => v.trim() && parseSignedDollars(v) === null))
+    problems.push("Enter each offset balance as an amount, e.g. 25,000.");
 
   const repayment = (): RepaymentPeriod[] | null => {
     if (!repay.trim()) return schedule.length ? [] : null;
@@ -110,7 +116,7 @@ export function MortgageSetup({ loan, onDone, onCancel }: Props) {
         rates: cleanRates,
         offsets: Object.entries(offsets).map(([account_id, text]) => {
           const before = loan.offset_choices.find((o) => o.account_id === account_id);
-          const cents = text !== null && text.trim() ? parseDollarsOrZero(text) : null;
+          const cents = text.trim() ? parseSignedDollars(text) : null;
           // Only a balance that was changed is sent: the account's own is left alone.
           return {
             account_id,
@@ -122,16 +128,17 @@ export function MortgageSetup({ loan, onDone, onCancel }: Props) {
         repayment_schedule: repayment(),
       });
     },
-    onSuccess: () => {
-      void qc.invalidateQueries();
+    // The page shows the new figures before it says so.
+    onSuccess: async () => {
+      await qc.invalidateQueries();
       onDone("Saved.");
     },
   });
 
   const forget = useMutation({
     mutationFn: () => api.deleteMortgage(loan.account_id),
-    onSuccess: () => {
-      void qc.invalidateQueries();
+    onSuccess: async () => {
+      await qc.invalidateQueries();
       onDone("Setup removed. Your accounts are unchanged.");
     },
   });
@@ -159,7 +166,13 @@ export function MortgageSetup({ loan, onDone, onCancel }: Props) {
         </div>
         <div className="field">
           <label htmlFor={`${fid}-start`}>Loan started</label>
-          <input id={`${fid}-start`} type="date" value={start} onChange={(e) => setStart(e.target.value)} />
+          <input
+            id={`${fid}-start`}
+            type="date"
+            value={start}
+            max={today}
+            onChange={(e) => setStart(e.target.value)}
+          />
         </div>
         <div className="field">
           <label htmlFor={`${fid}-years`}>Loan term (years)</label>
@@ -178,7 +191,7 @@ export function MortgageSetup({ loan, onDone, onCancel }: Props) {
         {rates.map((r, i) => (
           <div className="row" key={i}>
             <div className="field">
-              <label htmlFor={`${fid}-rate-${i}`}>Rate (%)</label>
+              <label htmlFor={`${fid}-rate-${i}`}>{i === 0 ? "Rate (%)" : `New rate ${i} (%)`}</label>
               <input
                 id={`${fid}-rate-${i}`}
                 inputMode="decimal"
@@ -188,7 +201,7 @@ export function MortgageSetup({ loan, onDone, onCancel }: Props) {
               />
             </div>
             <div className="field">
-              <label htmlFor={`${fid}-rate-since-${i}`}>From</label>
+              <label htmlFor={`${fid}-rate-since-${i}`}>{i === 0 ? "From" : `New rate ${i} from`}</label>
               <input
                 id={`${fid}-rate-since-${i}`}
                 type="date"
@@ -201,6 +214,7 @@ export function MortgageSetup({ loan, onDone, onCancel }: Props) {
                 <button
                   type="button"
                   className="btn btn-ghost"
+                  aria-label={i === 0 ? "Remove the first rate" : `Remove new rate ${i}`}
                   onClick={() => setRates(rates.filter((_, j) => j !== i))}
                 >
                   Remove
@@ -212,7 +226,7 @@ export function MortgageSetup({ loan, onDone, onCancel }: Props) {
         <button
           type="button"
           className="btn btn-ghost"
-          onClick={() => setRates([...rates, { since: today(), percent: "" }])}
+          onClick={() => setRates([...rates, { since: today, percent: "" }])}
         >
           Add a rate change
         </button>
@@ -266,7 +280,7 @@ export function MortgageSetup({ loan, onDone, onCancel }: Props) {
             </select>
           </div>
           <div className="field">
-            <label htmlFor={`${fid}-repay-since`}>From</label>
+            <label htmlFor={`${fid}-repay-since`}>Repayment since</label>
             <input
               id={`${fid}-repay-since`}
               type="date"
@@ -314,7 +328,7 @@ export function MortgageSetup({ loan, onDone, onCancel }: Props) {
               id={`${fid}-owing-on`}
               type="date"
               value={owingOn}
-              max={today()}
+              max={today}
               onChange={(e) => setOwingOn(e.target.value)}
             />
           </div>
@@ -352,7 +366,9 @@ export function MortgageSetup({ loan, onDone, onCancel }: Props) {
                 </label>
                 {on && (
                   <div className="field">
-                    <label htmlFor={`${fid}-offset-${o.account_id}`}>Balance today ($)</label>
+                    <label htmlFor={`${fid}-offset-${o.account_id}`}>
+                      {o.name} balance today ($)
+                    </label>
                     <input
                       id={`${fid}-offset-${o.account_id}`}
                       inputMode="decimal"
@@ -370,6 +386,10 @@ export function MortgageSetup({ loan, onDone, onCancel }: Props) {
           Saiva's is wrong.
         </p>
       </fieldset>
+
+      <p className="muted" style={{ fontSize: 13 }}>
+        Saving counts this loan and its offset in Net worth.
+      </p>
 
       {problems.length > 0 && (
         <div role="status" aria-live="polite">

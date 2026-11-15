@@ -25,3 +25,18 @@ export function span(months: number): string {
   if (rest || !years) parts.push(`${rest} ${rest === 1 ? "month" : "months"}`);
   return parts.join(" ");
 }
+
+/** Calendar months from a's month to b's ("2041-01-31" to "2041-02-01" is 1): how far
+ *  apart two pay-off months shown as "Jan 2041" and "Feb 2041" are. */
+export function monthsApart(a: string, b: string): number {
+  const [ay, am] = a.split("-").map(Number);
+  const [by, bm] = b.split("-").map(Number);
+  return (by - ay) * 12 + (bm - am);
+}
+
+/** Today where the person is, as "2026-11-15" (not the UTC date, which in an
+ *  Australian morning is still yesterday). */
+export function localToday(now: Date = new Date()): string {
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}`;
+}

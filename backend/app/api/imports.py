@@ -15,7 +15,7 @@ from .. import models, schemas
 from ..db import get_db
 from ..deps import get_current_user, require_writer
 from ..ratelimit import rate_limit_import
-from ..services import audit, dedup, importers, networth
+from ..services import audit, balances, dedup, importers, networth
 from ..services.categorise import build_categoriser
 from ..services.transfers import classify_transfers
 
@@ -718,6 +718,8 @@ async def commit(
 
     batch.added_count = added
     batch.skipped_count = skipped
+    # A balance the household stated on a day keeps: older rows were already in it.
+    balances.reanchor(db, {t.account_id for t in targets.values() if t.account_id})
     db.commit()
     # Scoped to the dates this file covered. Re-deciding the whole history after every
     # import is how a crafted row could reach back years and pair itself with a real

@@ -3,19 +3,21 @@ what extra repayments, the offset and a change of rate do to that.
 
 Interest is worked out the way Australian lenders do it: each day, on what is owed less
 what is in the offset accounts, at the rate that day; and charged once a month. The
-regular repayment is the one set on the loan's account (0.18.1), on its due dates from
-the last one paid. Extras are on top.
+regular repayment is the one set on the loan's account (0.18.1), on its due dates. Extras
+are on top.
 
 What is owed comes from the loan's account: its balance is what is owed (a loan account
 reads negative). The household says what it is on a date when it sets the loan up, and a
 loan statement imported after that keeps it right. From the last of those to today it is
-an estimate, at the repayments set.
+an estimate: the repayments Saiva has seen go out since, then the regular repayment.
 """
 
 from __future__ import annotations
 
 import calendar
 import datetime as dt
+import statistics
+from collections import Counter
 from collections.abc import Iterator
 from dataclasses import dataclass, field
 
@@ -24,13 +26,17 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from .. import models
+from .balances import balance_through, set_balance
 from .repayments import Period, in_force, loan_repayments, schedule_of
 
-MAX_YEARS = 50  # not paid off by then: it never will be, at these repayments
-USUAL_EXTRA_MONTHS = 6  # the usual extras: what was paid over this many months
+__all__ = ["balance_through", "set_balance"]
+
+MAX_YEARS = 50  # not paid off by then: shown as not within 50 years
+USUAL_EXTRA_MONTHS = 6  # the usual extras: the typical month of the last six
 PAID_MONTHS = 12  # the repayments listed, by month
 PER_YEAR = {"weekly": 52, "fortnightly": 26, "monthly": 12}
 MAX_RATE = 30.0
+USUAL_DAY_FROM = 6  # the usual payment day: the commonest of the last few repayments
 
 
 @dataclass(frozen=True)
@@ -65,24 +71,7 @@ def rate_on(rates: list[Rate], day: dt.date) -> float:
     return current.percent
 
 
-# ------------------------------------------------------------------ balances
-
-
-def balance_through(db: Session, account: models.Account, day: dt.date | None) -> int:
-    """The account's balance at the end of a day (every transaction, without one)."""
-    q = select(func.coalesce(func.sum(models.Transaction.amount_cents), 0)).where(
-        models.Transaction.account_id == account.id,
-        models.Transaction.split_parent_id.is_(None),
-    )
-    if day is not None:
-        q = q.where(models.Transaction.txn_date <= day)
-    return account.opening_balance_cents + int(db.execute(q).scalar() or 0)
-
-
-def set_balance(db: Session, account: models.Account, cents: int, on: dt.date) -> None:
-    """Make the account read `cents` at the end of `on`, by its opening balance."""
-    moved = balance_through(db, account, on) - account.opening_balance_cents
-    account.opening_balance_cents = cents - moved
+# ------------------------------------------------------------------ what is owed
 
 
 def _last_txn_date(db: Session, account: models.Account, today: dt.date) -> dt.date | None:
@@ -95,46 +84,74 @@ def _last_txn_date(db: Session, account: models.Account, today: dt.date) -> dt.d
     ).scalar()
 
 
-def known_owing(
-    db: Session, mortgage: models.Mortgage, loan: models.Account, today: dt.date
-) -> tuple[dt.date, int]:
+def known_owing(db: Session, loan: models.Account, today: dt.date) -> tuple[dt.date, int]:
     """(day, owed): the latest day the books say what is owed -- the day the household
-    said, or the end of the loan's statement after it."""
-    days = [
-        d
-        for d in (mortgage.balance_as_of, _last_txn_date(db, loan, today))
-        if d is not None and d <= today
-    ]
+    said (the loan account's balance anchor), or the end of the loan's statement."""
+    days = [d for d in (loan.balance_anchor_on, _last_txn_date(db, loan, today)) if d]
     day = max(days) if days else today
     return day, max(-balance_through(db, loan, day), 0)
 
 
-# ------------------------------------------------------------------ repayments
+# ------------------------------------------------------------------ due dates
 
 
 def _period(schedule: list[Period], day: dt.date) -> Period:
     return in_force(schedule, day) or schedule[0]
 
 
-def _step(base: dt.date, every: str, k: int) -> dt.date:
+def _on_day(day: dt.date, day_of_month: int) -> dt.date:
+    return day.replace(day=min(day_of_month, calendar.monthrange(day.year, day.month)[1]))
+
+
+def _step(base: dt.date, every: str, k: int, day_of_month: int | None = None) -> dt.date:
     if every == "monthly":
-        return base + relativedelta(months=k)
+        moved = base + relativedelta(months=k)
+        return _on_day(moved, day_of_month) if day_of_month else moved
     return base + dt.timedelta(days=k * (7 if every == "weekly" else 14))
 
 
-def due_dates(schedule: list[Period], anchor: dt.date, after: dt.date) -> Iterator[dt.date]:
+def due_dates(
+    schedule: list[Period], anchor: dt.date, after: dt.date, day_of_month: int | None = None
+) -> Iterator[dt.date]:
     """The regular repayment's due dates after `after`: one period apart from `anchor`
-    (the last one paid). A new repayment at a new pace starts on its own date."""
+    (a due date), monthly ones on `day_of_month` (the 31st is the 30th in a short
+    month, and back to the 31st after). A new repayment at a new pace starts on its own
+    date."""
     base, k, every = anchor, 0, _period(schedule, anchor).every
+    dom = day_of_month or anchor.day
     while True:
         k += 1
-        day = _step(base, every, k)
+        day = _step(base, every, k, dom)
         period = _period(schedule, day)
         since = period.since
-        if period.every != every and since is not None and since > _step(base, every, k - 1):
-            base, k, every, day = since, 0, period.every, since
+        if (
+            period.every != every
+            and since is not None
+            and since > _step(base, every, k - 1, dom)
+        ):
+            base, k, every, day, dom = since, 0, period.every, since, since.day
         if day > after:
             yield day
+
+
+def usual_timing(days: list[dt.date], every: str) -> tuple[dt.date, int | None] | None:
+    """(anchor, day of the month) from the last regular repayments: the last one, moved
+    back to the usual weekday (a repayment held over a weekend is still due on Friday),
+    and for monthly ones the usual day of the month. None without any."""
+    if not days:
+        return None
+    recent = sorted(days)[-USUAL_DAY_FROM:]
+    last = recent[-1]
+    if every == "monthly":
+        counts = Counter(d.day for d in recent)
+        dom = max(counts, key=lambda d: (counts[d], d))
+        # The due date the last one was for: a repayment two days early is next month's.
+        nearest = (_on_day(last + relativedelta(months=m), dom) for m in (-1, 0, 1))
+        return min(nearest, key=lambda d: abs((d - last).days)), dom
+    counts = Counter(d.weekday() for d in recent)
+    weekday = max(counts, key=lambda w: (counts[w], -((last.weekday() - w) % 7)))
+    back = (last.weekday() - weekday) % 7  # Easter holds Friday's over to Tuesday
+    return (last - dt.timedelta(days=back) if back <= 4 else last), None
 
 
 # ------------------------------------------------------------------ simulation
@@ -148,12 +165,14 @@ class Terms:
     schedule: list[Period]
     anchor: dt.date  # a due date: the last regular repayment, or when it began
     charge_day: int  # the day of the month interest is charged
+    day_of_month: int | None = None  # monthly repayments: the usual day
 
 
 @dataclass
 class Scenario:
     offset_cents: float = 0.0  # in the offset accounts
     extra_cents: float = 0.0  # on top of each regular repayment
+    extra_monthly: float = 0.0  # the usual extras, a month, spread over the repayments
     lump_cents: float = 0.0  # paid off at the start
     rate_change: float = 0.0  # percentage points, on every rate
 
@@ -181,32 +200,63 @@ class Run:
     interest_cents: float = 0.0
     points: list[tuple[dt.date, float]] = field(default_factory=list)
     years: list[Year] = field(default_factory=list)
+    # Not paid off because a year's repayments left no less owing: they don't cover the
+    # interest. (Not paid off and not stalled: it takes longer than MAX_YEARS.)
+    stalls: bool = False
 
 
 def _charge_day(day: dt.date, charge_day: int) -> bool:
     return day.day == min(charge_day, calendar.monthrange(day.year, day.month)[1])
 
 
-def simulate(start: State, terms: Terms, scenario: Scenario, stop: dt.date | None = None) -> Run:
+def last_charge(day: dt.date, charge_day: int) -> dt.date:
+    """The last day interest was charged, on or before `day`."""
+    this_month = _on_day(day, charge_day)
+    if this_month <= day:
+        return this_month
+    return _on_day(day.replace(day=1) - dt.timedelta(days=1), charge_day)
+
+
+def accrued_since_charge(
+    day: dt.date, owing: float, offset: float, rates: list[Rate], charge_day: int
+) -> float:
+    """Interest since the last charge, up to the end of `day`: a lender's balance leaves
+    it out until it is charged."""
+    total = 0.0
+    d = last_charge(day, charge_day)
+    while d < day:
+        d += dt.timedelta(days=1)
+        total += max(owing - offset, 0.0) * rate_on(rates, d) / 100 / 365
+    return total
+
+
+def simulate(
+    start: State,
+    terms: Terms,
+    scenario: Scenario,
+    stop: dt.date | None = None,
+    paid: dict[dt.date, tuple[float, float]] | None = None,
+) -> Run:
     """Day by day from `start` to the loan paid off -- or to `stop`, for the state then.
-    Paid off: the day a repayment clears what is owed and the interest so far. Not paid
-    off (`payoff` None): when a year ends owing no less than the one before, or after
-    MAX_YEARS."""
-    owing = max(start.owing - scenario.lump_cents, 0.0)
+    `paid`: repayments already made, by day (regular, extra), applied on their days; the
+    regular repayment is due after the anchor. Paid off: the day a repayment clears what
+    is owed and the interest so far. Not paid off (`payoff` None): when a whole year
+    leaves no less owing, or after MAX_YEARS."""
+    lump = min(scenario.lump_cents, start.owing)
+    owing = start.owing - lump
     accrued = start.accrued if owing > 0 else 0.0
     day = start.day
     run = Run(state=start, points=[(day, owing)])
+    year = Year((day + dt.timedelta(days=1)).year, extra_cents=lump)
     if owing <= 0:
         run.payoff = day
         run.state = State(day, 0.0)
+        run.years.append(year)
         return run
-    dues = due_dates(terms.schedule, terms.anchor, after=day)
+    dues = due_dates(terms.schedule, terms.anchor, day, terms.day_of_month)
     due = next(dues)
     limit = stop or day + relativedelta(years=MAX_YEARS)
-    year = Year(day.year)
-    # Owed at the end of the last year: a whole year of repayments that leaves no less
-    # owing never pays it off. (The first year can be a few days.)
-    last_year_owing: float | None = None
+    last_year_owing: float | None = None  # a whole year's repayments are compared
     while day < limit:
         day += dt.timedelta(days=1)
         rate = max(rate_on(terms.rates, day) + scenario.rate_change, 0.0)
@@ -216,9 +266,16 @@ def simulate(start: State, terms: Terms, scenario: Scenario, stop: dt.date | Non
             run.interest_cents += accrued
             year.interest_cents += accrued
             accrued = 0.0
+        payments: list[tuple[float, float]] = []
+        if paid and day in paid:
+            payments.append(paid[day])
         if day == due:
-            regular = float(_period(terms.schedule, day).cents)
-            if regular + scenario.extra_cents >= owing + accrued:
+            period = _period(terms.schedule, day)
+            extra = scenario.extra_cents + scenario.extra_monthly * 12 / PER_YEAR[period.every]
+            payments.append((float(period.cents), extra))
+            due = next(dues)
+        for regular, extra in payments:
+            if regular + extra >= owing + accrued:
                 # The last repayment: what is left, and the interest to today.
                 run.interest_cents += accrued
                 year.interest_cents += accrued
@@ -227,12 +284,13 @@ def simulate(start: State, terms: Terms, scenario: Scenario, stop: dt.date | Non
                 year.extra_cents += max(left - regular, 0.0)
                 owing = accrued = 0.0
                 run.payoff = day
-                run.points.append((day, 0.0))
                 break
-            owing -= regular + scenario.extra_cents
+            owing -= regular + extra
             year.regular_cents += regular
-            year.extra_cents += scenario.extra_cents
-            due = next(dues)
+            year.extra_cents += extra
+        if run.payoff:
+            run.points.append((day, 0.0))
+            break
         tomorrow = day + dt.timedelta(days=1)
         if tomorrow.month != day.month:
             run.points.append((day, owing))
@@ -241,7 +299,8 @@ def simulate(start: State, terms: Terms, scenario: Scenario, stop: dt.date | Non
             run.years.append(year)
             year = Year(tomorrow.year)
             if stop is None and last_year_owing is not None and owing >= last_year_owing:
-                break  # the repayments don't cover the interest
+                run.stalls = True
+                break
             last_year_owing = owing
     year.owing_cents = owing
     if year.regular_cents or year.extra_cents or year.interest_cents:
@@ -267,7 +326,7 @@ def needed_repayment(owing: float, rate: float, every: str, periods: int) -> int
     return round(owing * r / (1 - (1 + r) ** -periods))
 
 
-# ------------------------------------------------------------------ the page
+# ------------------------------------------------------------------ repayments made
 
 
 @dataclass
@@ -278,9 +337,82 @@ class PaidMonth:
 
 
 @dataclass
+class Repayment:
+    day: dt.date  # when it left the paying account
+    cents: int
+    extra: bool
+    arrived: dt.date | None  # when the loan's statement shows it; None: not imported
+
+
+@dataclass
+class History:
+    paid: list[Repayment]  # oldest first
+    months: list[PaidMonth]  # the last PAID_MONTHS, newest first
+    usual_extra_cents: int  # a month: the typical month of the last few
+    regular_days: list[dt.date]
+
+
+def history(db: Session, loan: models.Account, today: dt.date, since: dt.date) -> History:
+    """The loan's repayments from `since` (and at least the last PAID_MONTHS months)."""
+    first_month = today.replace(day=1) - relativedelta(months=PAID_MONTHS - 1)
+    found, _ = loan_repayments(db, loan.household_id, min(first_month, since), today)
+    mine = found.get(loan.id)
+    legs, flags = (mine.paid, mine.extra) if mine else ([], {})
+    groups = [t.transfer_group_id for t in legs if t.transfer_group_id]
+    arrived: dict[str, dt.date] = {}
+    if groups:
+        for group, day in db.execute(
+            select(models.Transaction.transfer_group_id, models.Transaction.txn_date).where(
+                models.Transaction.account_id == loan.id,
+                models.Transaction.transfer_group_id.in_(groups),
+                models.Transaction.amount_cents > 0,
+            )
+        ).tuples():
+            if group:
+                arrived[group] = day
+    paid = [
+        Repayment(
+            t.txn_date,
+            abs(t.amount_cents),
+            flags[t.id],
+            arrived.get(t.transfer_group_id) if t.transfer_group_id else None,
+        )
+        for t in legs
+    ]
+    months: dict[str, list[int]] = {
+        (first_month + relativedelta(months=k)).strftime("%Y-%m"): [0, 0]
+        for k in range(PAID_MONTHS)
+    }
+    for p in paid:
+        key = p.day.strftime("%Y-%m")
+        if key in months:
+            months[key][1 if p.extra else 0] += p.cents
+    # The usual extra: the typical month's extras over the last whole months there are
+    # repayments for. A one-off lump sum is not usual; one most months is.
+    this_month = today.replace(day=1)
+    whole = [
+        (this_month - relativedelta(months=k)).strftime("%Y-%m")
+        for k in range(1, USUAL_EXTRA_MONTHS + 1)
+    ]
+    first_paid = min((p.day for p in paid), default=None)
+    counted = [m for m in whole if first_paid and m >= first_paid.strftime("%Y-%m")]
+    usual = round(statistics.median(months[m][1] for m in counted)) if counted else 0
+    return History(
+        paid=paid,
+        months=[PaidMonth(m, r, e) for m, (r, e) in sorted(months.items(), reverse=True)],
+        usual_extra_cents=usual,
+        regular_days=[p.day for p in paid if not p.extra],
+    )
+
+
+# ------------------------------------------------------------------ the page
+
+
+@dataclass
 class Outcome:
     payoff: dt.date | None
     interest_cents: int
+    stalls: bool  # never paid off: the repayments don't cover the interest
 
 
 @dataclass
@@ -290,7 +422,7 @@ class Projection:
     known_on: dt.date
     known_cents: int
     offset_cents: int
-    usual_extra_cents: int  # a month, over the last few months
+    usual_extra_cents: int  # a month
     next_due: dt.date
     next_cents: int
     every: str
@@ -300,6 +432,9 @@ class Projection:
     as_you_pay: Outcome
     regular_only: Outcome
     without_offset: Outcome
+    # The extras paid over the last year, and the regular repayments without them.
+    extras_made_cents: int
+    without_extras_made: Outcome | None
     what_if: Outcome | None
     what_if_needed_cents: int | None
     points: list[dict]
@@ -340,44 +475,8 @@ def offset_balance(db: Session, mortgage: models.Mortgage) -> dict[str, int]:
     return found
 
 
-def paid_by_month(
-    db: Session, loan: models.Account, today: dt.date
-) -> tuple[list[PaidMonth], int, dt.date | None]:
-    """The loan's repayments over the last months, regular and extra, newest first; the
-    usual extra a month; and the last regular repayment's date."""
-    first_month = today.replace(day=1) - relativedelta(months=PAID_MONTHS - 1)
-    found, _ = loan_repayments(db, loan.household_id, first_month, today)
-    mine = found.get(loan.id)
-    months: dict[str, list[int]] = {}
-    for k in range(PAID_MONTHS):
-        months[(first_month + relativedelta(months=k)).strftime("%Y-%m")] = [0, 0]
-    last_regular: dt.date | None = None
-    extra_since = today - relativedelta(months=USUAL_EXTRA_MONTHS)
-    extras, first_paid = 0, None
-    paid, flags = (mine.paid, mine.extra) if mine else ([], {})
-    for t in paid:
-        is_extra = flags[t.id]
-        key = t.txn_date.strftime("%Y-%m")
-        if key in months:
-            months[key][1 if is_extra else 0] += abs(t.amount_cents)
-        if not is_extra:
-            last_regular = t.txn_date
-        if t.txn_date >= extra_since:
-            first_paid = first_paid or t.txn_date
-            if is_extra:
-                extras += abs(t.amount_cents)
-    # Over the months there are repayments for: a loan in Saiva for two months isn't
-    # averaged over six.
-    usual = 0
-    if first_paid is not None:
-        span = max(months_between(first_paid, today) + 1, 1)
-        usual = round(extras / min(span, USUAL_EXTRA_MONTHS))
-    rows = [PaidMonth(m, r, e) for m, (r, e) in sorted(months.items(), reverse=True)]
-    return rows, usual, last_regular
-
-
 def _outcome(run: Run) -> Outcome:
-    return Outcome(run.payoff, round(run.interest_cents))
+    return Outcome(run.payoff, round(run.interest_cents), run.stalls)
 
 
 def _rounded(years: list[Year]) -> list[Year]:
@@ -393,13 +492,30 @@ def _rounded(years: list[Year]) -> list[Year]:
     ]
 
 
+def _since_known(paid: list[Repayment], known_on: dt.date, today: dt.date) -> dict:
+    """The repayments made after what the books know (not yet on the loan's statement),
+    by day: they come off the estimate to today."""
+    by_day: dict[dt.date, tuple[float, float]] = {}
+    for p in paid:
+        if p.arrived is not None and p.arrived <= known_on:
+            continue  # in the loan's balance already
+        if p.arrived is None and p.day <= known_on:
+            continue  # before the day the household said what was owed
+        if p.day > today:
+            continue
+        day = max(p.day, known_on + dt.timedelta(days=1))
+        regular, extra = by_day.get(day, (0.0, 0.0))
+        by_day[day] = (regular + (0 if p.extra else p.cents), extra + (p.cents if p.extra else 0))
+    return by_day
+
+
 def project(
     db: Session,
     mortgage: models.Mortgage,
     loan: models.Account,
     what_if: WhatIf | None = None,
     today: dt.date | None = None,
-    paid: tuple[list[PaidMonth], int, dt.date | None] | None = None,
+    past: History | None = None,
 ) -> Projection | None:
     """The loan as it stands, and where it is going: as the household pays (with its
     usual extras), at the regular repayment only, without the offset, and with what the
@@ -409,27 +525,48 @@ def project(
     today = today or dt.date.today()
     what_if = what_if or WhatIf()
     rates, schedule = rates_of(mortgage), schedule_of(loan)
-    known_on, known_cents = known_owing(db, mortgage, loan, today)
+    known_on, known_cents = known_owing(db, loan, today)
     offsets = max(sum(offset_balance(db, mortgage).values()), 0)
-    _, usual_monthly, last_regular = paid or paid_by_month(db, loan, today)
-    every = _period(schedule, today).every
-    usual_each = usual_monthly * 12 / PER_YEAR[every]
-    anchor = last_regular or next(
-        (p.since for p in reversed(schedule) if p.since and p.since <= known_on), known_on
-    )
+    past = past or history(db, loan, today, known_on)
+    every = _period(schedule, max(today, known_on)).every
+    timing = usual_timing(past.regular_days, every)
+    if timing:
+        anchor, day_of_month = timing
+    else:
+        anchor = next(
+            (p.since for p in reversed(schedule) if p.since and p.since <= known_on), known_on
+        )
+        day_of_month = None
     charge_day = (mortgage.start_date or anchor).day
-    terms = Terms(rates, schedule, anchor, charge_day)
-    as_you_pay = Scenario(offset_cents=offsets, extra_cents=usual_each)
+    terms = Terms(rates, schedule, anchor, charge_day, day_of_month)
+    as_you_pay = Scenario(offset_cents=offsets, extra_monthly=past.usual_extra_cents)
 
-    # To today, as the household pays; from today, each way.
-    now = simulate(State(known_on, float(known_cents)), terms, as_you_pay, stop=today).state
-    if now.day < today:  # paid off before today
-        now = State(today, 0.0)
+    # To today: what the books know, the interest since its last charge, and the
+    # repayments made since; then the regular repayment. From today, each way.
+    start = State(
+        known_on,
+        float(known_cents),
+        accrued_since_charge(known_on, known_cents, offsets, rates, charge_day),
+    )
+    to_today = simulate(
+        start, terms, as_you_pay, stop=today, paid=_since_known(past.paid, known_on, today)
+    )
+    now = to_today.state
+    if to_today.payoff or now.day < today:
+        now = State(max(today, now.day), now.owing, now.accrued)
     runs = {
         "as_you_pay": simulate(now, terms, as_you_pay),
         "regular_only": simulate(now, terms, Scenario(offset_cents=offsets)),
-        "without_offset": simulate(now, terms, Scenario(extra_cents=usual_each)),
+        "without_offset": simulate(
+            now, terms, Scenario(extra_monthly=past.usual_extra_cents)
+        ),
     }
+    year_ago = today - relativedelta(years=1)
+    extras_made = sum(p.cents for p in past.paid if p.extra and year_ago < p.day <= today)
+    without_extras = None
+    if extras_made:
+        before = State(now.day, now.owing + extras_made, now.accrued)
+        without_extras = simulate(before, terms, Scenario(offset_cents=offsets))
     trying = None
     if what_if.any():
         trying = simulate(
@@ -437,7 +574,8 @@ def project(
             terms,
             Scenario(
                 offset_cents=max(offsets + what_if.offset_change_cents, 0),
-                extra_cents=usual_each + what_if.extra_cents,
+                extra_cents=what_if.extra_cents,
+                extra_monthly=past.usual_extra_cents,
                 lump_cents=what_if.lump_cents,
                 rate_change=what_if.rate_change,
             ),
@@ -446,22 +584,23 @@ def project(
     contract_end = None
     if mortgage.start_date and mortgage.term_months:
         contract_end = mortgage.start_date + relativedelta(months=mortgage.term_months)
-    rate_today = rate_on(rates, today)
+    rate_today = rate_on(rates, now.day)
 
     def needed(owing: float, change: float) -> int | None:
         if contract_end is None or owing <= 0:
             return None
-        left = sum(1 for _ in _until(due_dates(schedule, anchor, today), contract_end))
+        dues = due_dates(schedule, anchor, now.day, day_of_month)
+        left = sum(1 for _ in _until(dues, contract_end))
         return needed_repayment(owing, max(rate_today + change, 0), every, left)
 
-    next_due = next(due_dates(schedule, anchor, today))
+    next_due = next(due_dates(schedule, anchor, now.day, day_of_month))
     return Projection(
         owing_cents=round(now.owing),
         estimated=known_on < today,
         known_on=known_on,
         known_cents=known_cents,
         offset_cents=offsets,
-        usual_extra_cents=usual_monthly,
+        usual_extra_cents=past.usual_extra_cents,
         next_due=next_due,
         next_cents=_period(schedule, next_due).cents,
         every=every,
@@ -471,10 +610,12 @@ def project(
         as_you_pay=_outcome(runs["as_you_pay"]),
         regular_only=_outcome(runs["regular_only"]),
         without_offset=_outcome(runs["without_offset"]),
+        extras_made_cents=extras_made,
+        without_extras_made=_outcome(without_extras) if without_extras else None,
         what_if=_outcome(trying) if trying else None,
         what_if_needed_cents=(
             needed(max(now.owing - what_if.lump_cents, 0), what_if.rate_change)
-            if trying
+            if trying and what_if.rate_change
             else None
         ),
         points=_points(
@@ -497,15 +638,17 @@ def _until(days: Iterator[dt.date], end: dt.date) -> Iterator[dt.date]:
 
 
 def _points(runs: dict[str, Run]) -> list[dict]:
-    """One row a month for the chart: what each way owes at the month's end (0 once paid
-    off, nothing after the last of them is)."""
+    """One row a month for the chart: what each way owes at the month's end. A loan paid
+    off stays at 0 until the others are; one never paid off just ends."""
     by_month: dict[str, dict] = {}
     for name, run in runs.items():
         for day, owing in run.points:
             row = by_month.setdefault(day.strftime("%Y-%m"), {"month": day.strftime("%Y-%m")})
             row[name] = round(max(owing, 0))
     rows = [by_month[m] for m in sorted(by_month)]
-    for name in runs:  # a line that has ended stays at 0 until the others end
+    for name, run in runs.items():
+        if run.payoff is None:
+            continue
         seen = False
         for row in rows:
             if name in row:

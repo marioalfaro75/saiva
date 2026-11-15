@@ -53,3 +53,13 @@ export function parseDollarsOrZero(text: string): number | null {
   if (/^0+(\.0{1,2})?$/.test(clean)) return 0;
   return parseDollars(clean);
 }
+
+/** Like parseDollarsOrZero, but a balance can be below zero: "-123.45". */
+export function parseSignedDollars(text: string): number | null {
+  const clean = text.trim();
+  if (clean.startsWith("-")) {
+    const cents = parseDollarsOrZero(clean.slice(1));
+    return cents === null ? null : -cents;
+  }
+  return parseDollarsOrZero(clean);
+}

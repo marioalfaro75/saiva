@@ -17,19 +17,23 @@ in your home loan from its statement.
   regular repayment, what you owe now, and your offset accounts. It then shows:
   - what you owe, when it will be paid off, the interest still to pay, and your next
     repayment;
-  - how far ahead of the loan term you are, and what your extra repayments and your
-    offset each save;
+  - how far ahead of the loan term you are, and what your extra repayments (those of the
+    last 12 months, and your usual ones) and your offset each save;
   - a graph of what you'll owe: as you pay (with your usual extras), and with regular
-    repayments only;
-  - **What if…**: an extra amount each repayment, a one-off payment, a rate change, or
-    more in the offset. Nothing is saved;
+    repayments only. Usual extras are what you pay extra in a typical month: a one-off
+    lump sum isn't counted as usual;
+  - **What if…**: an extra amount each repayment, a one-off payment, a rate going up or
+    down, or money put in or taken out of the offset. Nothing is saved;
   - the repayment schedule, year by year: regular, extra, interest and what's owed;
   - the repayments made over the last 12 months, regular and extra apart.
 - **Net worth from your accounts.** Net worth lists your accounts: tick one to count its
   balance (in credit, an asset; owing, a liability). Setting up the Mortgage page counts
-  the loan and its offsets.
-- **Set an account's balance.** The API can set what an account's balance was on a date
-  (the Mortgage page uses it for the loan and the offsets).
+  the loan and its offsets. If you entered your mortgage by hand on Net worth, remove it
+  there so it isn't counted twice (the Mortgage page reminds you).
+- **What you say a balance is, stays.** The balance you enter for the loan (and the
+  offsets) is kept for that day: importing older statements afterwards doesn't change
+  it. Repayments made since, that the loan's statement doesn't show yet, come off what
+  you owe.
 
 ## [0.18.1] — 2026-11-15
 

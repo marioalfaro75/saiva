@@ -330,9 +330,11 @@ export interface MortgageOffset {
 }
 
 export interface MortgageOutcome {
-  /** null: the repayments never pay it off. */
+  /** null: not paid off within 50 years. */
   payoff: string | null;
   interest_cents: number;
+  /** Never paid off: the repayments don't cover the interest. */
+  stalls?: boolean;
 }
 
 export interface MortgageYear {
@@ -373,6 +375,9 @@ export interface MortgageProjection {
   as_you_pay: MortgageOutcome;
   regular_only: MortgageOutcome;
   without_offset: MortgageOutcome;
+  /** The extra repayments over the last year, and the regular repayments without them. */
+  extras_made_cents?: number;
+  without_extras_made?: MortgageOutcome | null;
   what_if: MortgageOutcome | null;
   what_if_needed_cents: number | null;
   points: MortgagePoint[];
@@ -396,6 +401,8 @@ export interface Mortgage extends MortgageLoan {
   repayment_schedule: RepaymentPeriod[];
   repayment_suggestion: RepaymentPeriod | null;
   offset_choices: MortgageOffset[];
+  /** Liabilities entered by hand on Net worth: maybe this loan, counted twice. */
+  manual_liabilities?: string[];
   /** What it still needs: "setup", "rate", "repayment". */
   missing: string[];
   paid: MortgagePaidMonth[];

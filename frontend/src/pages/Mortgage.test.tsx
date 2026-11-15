@@ -4,7 +4,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { api } from "../api/client";
 import type { Mortgage as MortgageData, MortgageProjection, NetWorth as NetWorthData } from "../api/types";
 import { CLUSTERS } from "../components/navItems";
-import { monthsBetween, monthYear, span } from "../components/mortgageText";
+import { localToday, monthsApart, monthsBetween, monthYear, span } from "../components/mortgageText";
 import { PeriodCtx } from "../period/context";
 import { renderApp } from "../testing/harness";
 import { Mortgage } from "./Mortgage";
@@ -128,7 +128,7 @@ describe("Mortgage page", () => {
     expect(input("Repayment ($)")).toHaveValue("700.00");
     type("You owe ($)", "452,000");
     fireEvent.click(screen.getByRole("checkbox", { name: "Offset" }));
-    fireEvent.change(screen.getByRole("textbox", { name: "Balance today ($)" }), {
+    fireEvent.change(screen.getByRole("textbox", { name: "Offset balance today ($)" }), {
       target: { value: "30,000" },
     });
     fireEvent.click(screen.getByRole("button", { name: "Save" }));
@@ -143,7 +143,7 @@ describe("Mortgage page", () => {
         rates: [{ since: null, percent: 6.24 }],
         offsets: [{ account_id: "off", balance_cents: 3_000_000 }],
         owing_cents: 45_200_000,
-        owing_on: new Date().toISOString().slice(0, 10),
+        owing_on: localToday(),
         repayment_schedule: [{ since: "2026-06-05", cents: 70000, every: "weekly" }],
       },
     ]);
@@ -181,10 +181,26 @@ describe("Mortgage page", () => {
     expect(screen.getByText(/You've paid off 25% of the \$600,000\.00 you borrowed/)).toBeInTheDocument();
     expect(screen.getByText(/finish 9 years early/)).toBeInTheDocument();
     expect(
-      screen.getByText(/extra repayments \(about \$2,000\.00 a month\) save \$60,000\.00 in interest and 5 years 5 months/),
+      screen.getByText(/usual extra repayments \(about \$2,000\.00 a month\) save \$60,000\.00 in interest and 5 years 6 months/),
     ).toBeInTheDocument();
-    expect(screen.getByText(/offset \(\$30,000\.00\) saves \$30,000\.00 in interest and 1 year 9 months/)).toBeInTheDocument();
+    expect(screen.getByText(/offset \(\$30,000\.00\) saves \$30,000\.00 in interest and 1 year 10 months/)).toBeInTheDocument();
     expect(screen.getByText(/Regular repayments only:/)).toBeInTheDocument();
+  });
+
+  it("says what the extras made in the last year did", async () => {
+    show({
+      ...SET_UP,
+      projection: {
+        ...PROJECTION,
+        extras_made_cents: 1_000_000,
+        without_extras_made: { payoff: "2047-11-01", interest_cents: 27_500_000, stalls: false },
+      },
+    });
+    expect(
+      await screen.findByText(
+        /extra repayments in the last 12 months \(\$10,000\.00\) bring your pay-off forward 1 year 2 months and save \$15,000\.00 in interest/,
+      ),
+    ).toBeInTheDocument();
   });
 
   it("lists the repayments made, extras apart, and the schedule by year", async () => {
@@ -218,13 +234,96 @@ describe("Mortgage page", () => {
     expect(screen.getByRole("checkbox", { name: "Show the what-if" })).toBeInTheDocument();
   });
 
-  it("an offset can be taken down in a what-if", async () => {
+  it("an offset can be taken down, and a rate cut, without a minus key", async () => {
     const get = show(SET_UP);
     await screen.findByText("$450,000.00");
-    type("Add to offset ($)", "-5,000");
+    fireEvent.change(screen.getByRole("combobox", { name: "Offset" }), { target: { value: "out" } });
+    type("Amount ($)", "5,000");
+    fireEvent.change(screen.getByRole("combobox", { name: "Rate" }), { target: { value: "down" } });
+    type("By (%)", "0.25");
     await waitFor(() =>
-      expect(get).toHaveBeenLastCalledWith("loan", expect.objectContaining({ offset_change_cents: -500000 })),
+      expect(get).toHaveBeenLastCalledWith(
+        "loan",
+        expect.objectContaining({ offset_change_cents: -500000, rate_change: -0.25 }),
+      ),
     );
+  });
+
+  it("says a what-if that's later costs more, and a same-month one is about the same", async () => {
+    const get = show(SET_UP);
+    await screen.findByText("$450,000.00");
+    const later = { payoff: "2041-04-04", interest_cents: 20_250_000, stalls: false };
+    get.mockResolvedValue({ ...SET_UP, projection: { ...PROJECTION, what_if: later } });
+    type("Amount ($)", "1,000");
+    expect(
+      await screen.findByText("Paid off Apr 2041: 1 month later, costing $2,500.00 more in interest."),
+    ).toBeInTheDocument();
+
+    const same = { payoff: "2041-03-28", interest_cents: 19_990_000, stalls: false };
+    get.mockResolvedValue({ ...SET_UP, projection: { ...PROJECTION, what_if: same } });
+    type("Amount ($)", "50");
+    expect(
+      await screen.findByText("Paid off Mar 2041: about the same time, saving $100.00 in interest."),
+    ).toBeInTheDocument();
+  });
+
+  it("says why a what-if is never paid off, and gives the bank's repayment for a rate change", async () => {
+    const get = show(SET_UP);
+    await screen.findByText("$450,000.00");
+    get.mockResolvedValue({
+      ...SET_UP,
+      projection: {
+        ...PROJECTION,
+        what_if: { payoff: null, interest_cents: 1, stalls: true },
+        what_if_needed_cents: 81234,
+      },
+    });
+    type("By (%)", "3");
+    expect(
+      await screen.findByText(/repayments wouldn't cover the interest\. At that rate, your bank may set your repayment to about \$812\.34\./),
+    ).toBeInTheDocument();
+    expect(screen.getByText(/What if:/).parentElement).toHaveTextContent(
+      "never (the repayments don't cover the interest)",
+    );
+  });
+
+  it("keeps the page when a what-if fails", async () => {
+    const get = show(SET_UP);
+    await screen.findByText("$450,000.00");
+    get.mockRejectedValue(new Error("down"));
+    type("Extra each week ($)", "200");
+    expect(await screen.findByText("Couldn't try that. Please try again.")).toBeInTheDocument();
+    expect(screen.getByText("$450,000.00")).toBeInTheDocument();
+    expect(screen.getByRole("textbox", { name: "Extra each week ($)" })).toHaveValue("200");
+  });
+
+  it("warns when net worth has a mortgage entered by hand", async () => {
+    show({ ...SET_UP, manual_liabilities: ["Mortgage"] });
+    expect(await screen.findByText(/Net worth also has “Mortgage” entered by hand/)).toBeInTheDocument();
+  });
+
+  it("keeps an earlier setup without a term without one, and takes a negative offset", async () => {
+    show({
+      ...SET_UP,
+      term_months: null,
+      offset_choices: [{ account_id: "off", name: "Offset", balance_cents: -12345 }],
+    });
+    const save = vi.spyOn(api, "saveMortgage").mockResolvedValue(SET_UP);
+    fireEvent.click(await screen.findByRole("button", { name: "Edit setup" }));
+    expect(input("Loan term (years)")).toHaveValue("");
+    expect(input("Offset balance today ($)")).toHaveValue("-123.45");
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(save).toHaveBeenCalled());
+    expect(save.mock.calls[0][1].term_months).toBeNull();
+  });
+
+  it("asks for the date when what is owed is given without one", async () => {
+    show(SETUP_NEEDED);
+    await screen.findByText("Set up your home loan");
+    type("You owe ($)", "452,000");
+    fireEvent.change(screen.getByLabelText("On"), { target: { value: "" } });
+    expect(screen.getByText("Enter the date for what you owe.")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Save" })).toBeDisabled();
   });
 
   it("asks for the rate when it is missing", async () => {
@@ -243,6 +342,10 @@ describe("how the page says time", () => {
     expect(span(0)).toBe("0 months");
     expect(monthsBetween("2026-01-15", "2026-03-14")).toBe(1);
     expect(monthsBetween("2026-03-15", "2026-01-10")).toBe(-2);
+    // Pay-off months as shown: Jan 2041 to Feb 2041 is a month, whatever the days.
+    expect(monthsApart("2041-01-31", "2041-02-01")).toBe(1);
+    expect(monthsApart("2041-04-04", "2041-03-14")).toBe(-1);
+    expect(localToday(new Date(2026, 10, 16, 7, 30))).toBe("2026-11-16");
   });
 });
 
@@ -271,5 +374,32 @@ describe("Net worth accounts", () => {
     fireEvent.click(await screen.findByRole("checkbox", { name: "Count Savings" }));
 
     await waitFor(() => expect(update).toHaveBeenCalledWith("sav", { in_net_worth: true }));
+  });
+
+  it("adds up the items apart from the counted accounts", async () => {
+    const worth: NetWorthData = {
+      assets_cents: 85_250_000,
+      liabilities_cents: 0,
+      net_cents: 85_250_000,
+      items: [{ id: "h", name: "Family home", kind: "asset", value_cents: 85_000_000 }],
+      history: [],
+      accounts: [
+        { id: "sav", name: "Savings", type: "savings", balance_cents: 250000, in_net_worth: true },
+      ],
+    };
+    vi.spyOn(api, "netWorth").mockResolvedValue(worth);
+    renderApp(
+      <PeriodCtx.Provider
+        value={{ period: "month", setPeriod: () => {}, resolved: null, options: undefined, isPast: false }}
+      >
+        <NetWorth />
+      </PeriodCtx.Provider>,
+    );
+    await screen.findByText("Family home");
+    const assets = screen.getByRole("heading", { name: "Assets" }).closest(".card");
+    expect(assets).toHaveTextContent("$850,000.00");
+    expect(assets).not.toHaveTextContent("$852,500.00");
+    const liabilities = screen.getByRole("heading", { name: "Liabilities" }).closest(".card");
+    expect(liabilities).toHaveTextContent("$0.00");
   });
 });

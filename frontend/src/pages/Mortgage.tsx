@@ -13,11 +13,17 @@ import {
 } from "recharts";
 
 import { api } from "../api/client";
-import type { Mortgage as MortgageData, MortgageProjection, MortgageYear } from "../api/types";
+import type {
+  Mortgage as MortgageData,
+  MortgageOutcome,
+  MortgageProjection,
+  MortgageWhatIf,
+  MortgageYear,
+} from "../api/types";
 import { EVERY_LABELS, parseDollarsOrZero } from "../components/accountTypes";
 import { EmptyState } from "../components/EmptyState";
 import { MortgageSetup } from "../components/MortgageSetup";
-import { monthsBetween, monthYear, span } from "../components/mortgageText";
+import { localToday, monthsApart, monthYear, span } from "../components/mortgageText";
 import { PageHead } from "../components/PageHead";
 import { formatCents, formatDate } from "../format";
 import { TableWrap } from "../table/TableWrap";
@@ -32,12 +38,18 @@ function Stat({ label, value, sub }: { label: string; value: string; sub?: strin
   );
 }
 
-/** How much sooner `better` is paid off than `base`, and the interest it saves. */
-function saving(base: { payoff: string | null; interest_cents: number }, better: typeof base) {
-  if (!better.payoff) return null;
-  if (!base.payoff) return { months: null, interest: null };
+/** "paid off Mar 2041", or why it isn't. */
+function paidOff(o: MortgageOutcome): string {
+  if (o.payoff) return `paid off ${monthYear(o.payoff)}`;
+  return o.stalls ? "never (the repayments don't cover the interest)" : "not within 50 years";
+}
+
+/** How much sooner `better` is paid off than `base` (in the months shown), and the
+ *  interest it saves; null unless both are paid off. */
+function saving(base: MortgageOutcome, better: MortgageOutcome) {
+  if (!better.payoff || !base.payoff) return null;
   return {
-    months: monthsBetween(better.payoff, base.payoff),
+    months: monthsApart(better.payoff, base.payoff),
     interest: base.interest_cents - better.interest_cents,
   };
 }
@@ -53,10 +65,12 @@ function PayoffChart({ p }: { p: MortgageProjection }) {
     "Regular repayments only": row.regular_only !== undefined ? row.regular_only / 100 : undefined,
     "What if": row.what_if !== undefined ? row.what_if / 100 : undefined,
   }));
-  // A tick each January, thinned to about eight, so the years are evenly spaced.
+  // A tick each January, thinned to about eight, so the years are evenly spaced. With
+  // under two years to go, the months are named instead.
   const januaries = data.filter((row) => row.month.endsWith("-01")).map((row) => row.month);
-  const every = Math.max(1, Math.ceil(januaries.length / 8));
-  const ticks = januaries.filter((_, i) => i % every === 0);
+  const yearly = januaries.length > 1;
+  const step = Math.max(1, Math.ceil(januaries.length / 8));
+  const ticks = januaries.filter((_, i) => i % step === 0);
   return (
     <div className="card" style={{ marginTop: 16 }}>
       <h2>What you'll owe</h2>
@@ -67,9 +81,9 @@ function PayoffChart({ p }: { p: MortgageProjection }) {
             dataKey="month"
             stroke="#93a1bd"
             fontSize={12}
-            ticks={ticks.length > 1 ? ticks : undefined}
+            ticks={yearly ? ticks : undefined}
             minTickGap={24}
-            tickFormatter={(m: string) => m.slice(0, 4)}
+            tickFormatter={(m: string) => (yearly ? m.slice(0, 4) : monthYear(`${m}-01`))}
           />
           <YAxis stroke="#93a1bd" fontSize={12} width={64} tickFormatter={shortMoney} />
           <Tooltip
@@ -100,15 +114,14 @@ function PayoffChart({ p }: { p: MortgageProjection }) {
       </ResponsiveContainer>
       <ul className="mortgage-payoffs">
         <li>
-          <strong>As you pay:</strong> paid off {p.as_you_pay.payoff ? monthYear(p.as_you_pay.payoff) : "never"}
+          <strong>As you pay:</strong> {paidOff(p.as_you_pay)}
         </li>
         <li>
-          <strong>Regular repayments only:</strong> paid off{" "}
-          {p.regular_only.payoff ? monthYear(p.regular_only.payoff) : "never"}
+          <strong>Regular repayments only:</strong> {paidOff(p.regular_only)}
         </li>
         {p.what_if && (
           <li>
-            <strong>What if:</strong> paid off {p.what_if.payoff ? monthYear(p.what_if.payoff) : "never"}
+            <strong>What if:</strong> {paidOff(p.what_if)}
           </li>
         )}
       </ul>
@@ -120,27 +133,70 @@ interface WhatIfText {
   extra: string;
   lump: string;
   rate: string;
+  rateUp: boolean;
   offset: string;
+  offsetIn: boolean;
 }
 
-const NO_WHAT_IF: WhatIfText = { extra: "", lump: "", rate: "", offset: "" };
+const NO_WHAT_IF: WhatIfText = {
+  extra: "",
+  lump: "",
+  rate: "",
+  rateUp: true,
+  offset: "",
+  offsetIn: true,
+};
 
-/** The what-if as the API takes it; null while something typed isn't a number. */
-function whatIfValues(w: WhatIfText) {
+/** The what-if as the API takes it; null while something typed isn't a number. Every
+ *  field is a plain number (phones' number pads have no minus key): a rate cut and
+ *  money taken out of the offset are chosen beside them. */
+function whatIfValues(w: WhatIfText): MortgageWhatIf | null {
   const money = (t: string) => (t.trim() ? parseDollarsOrZero(t) : 0);
   const extra = money(w.extra);
   const lump = money(w.lump);
-  // The offset can go down as well as up: "-5,000".
-  const offset = money(w.offset.trim().replace(/^[-+]\s*/, ""));
-  const rate = w.rate.trim() ? Number(w.rate.replace(/%$/, "")) : 0;
-  if (extra === null || lump === null || offset === null || !Number.isFinite(rate)) return null;
-  if (Math.abs(rate) > 10) return null;
+  const offset = money(w.offset);
+  const rateText = w.rate.trim().replace(/%$/, "").trim();
+  const rate = rateText ? Number(rateText) : 0;
+  if (extra === null || lump === null || offset === null) return null;
+  if (!/^(\d+(\.\d*)?|\.\d+)?$/.test(rateText) || rate > 10) return null;
   return {
     extra_cents: extra,
     lump_cents: lump,
-    rate_change: rate,
-    offset_change_cents: w.offset.trim().startsWith("-") ? -offset : offset,
+    rate_change: w.rateUp ? rate : -rate,
+    offset_change_cents: w.offsetIn ? offset : -offset,
   };
+}
+
+function whatIfResult(p: MortgageProjection, tried: MortgageWhatIf): string | null {
+  const w = p.what_if;
+  if (!w) return null;
+  const result = saving(p.as_you_pay, w);
+  let text: string;
+  if (!w.payoff) {
+    text = w.stalls
+      ? "With that, the repayments wouldn't cover the interest."
+      : "With that, it isn't paid off within 50 years.";
+  } else if (!result) {
+    text = `With that, it's paid off ${monthYear(w.payoff)}.`;
+  } else {
+    const when =
+      result.months > 0
+        ? `${span(result.months)} sooner`
+        : result.months < 0
+          ? `${span(-result.months)} later`
+          : "about the same time";
+    const money =
+      result.interest > 0
+        ? `, saving ${formatCents(result.interest)} in interest`
+        : result.interest < 0
+          ? `, costing ${formatCents(-result.interest)} more in interest`
+          : "";
+    text = `Paid off ${monthYear(w.payoff)}: ${when}${money}.`;
+  }
+  if (tried.rate_change && p.what_if_needed_cents !== null) {
+    text += ` At that rate, your bank may set your repayment to about ${formatCents(p.what_if_needed_cents)}.`;
+  }
+  return text;
 }
 
 function WhatIfPanel({
@@ -148,15 +204,18 @@ function WhatIfPanel({
   text,
   setText,
   invalid,
+  tried,
+  failed,
 }: {
   p: MortgageProjection;
   text: WhatIfText;
   setText: (t: WhatIfText) => void;
   invalid: boolean;
+  tried: MortgageWhatIf;
+  failed: boolean;
 }) {
   const fid = useId();
-  const result = p.what_if ? saving(p.as_you_pay, p.what_if) : null;
-  const field = (key: keyof WhatIfText, label: string, placeholder: string) => (
+  const field = (key: "extra" | "lump" | "rate" | "offset", label: string, placeholder: string) => (
     <div className="field">
       <label htmlFor={`${fid}-${key}`}>{label}</label>
       <input
@@ -168,11 +227,13 @@ function WhatIfPanel({
       />
     </div>
   );
+  const result = whatIfResult(p, tried);
+  const period = EVERY_LABELS[p.every].toLowerCase().replace("ly", "");
   return (
     <div className="card" style={{ marginTop: 16 }}>
       <div className="spread">
         <h2>What if…</h2>
-        {p.what_if && (
+        {text !== NO_WHAT_IF && (
           <button type="button" className="btn btn-ghost" onClick={() => setText(NO_WHAT_IF)}>
             Clear
           </button>
@@ -180,24 +241,38 @@ function WhatIfPanel({
       </div>
       <p className="muted" style={{ marginTop: 0 }}>Try a change. Nothing is saved.</p>
       <div className="row">
-        {field("extra", `Extra each ${EVERY_LABELS[p.every].toLowerCase().replace("ly", "")} ($)`, "e.g. 200")}
+        {field("extra", `Extra each ${period} ($)`, "e.g. 200")}
         {field("lump", "One-off payment now ($)", "e.g. 10,000")}
-        {field("rate", "Rate change (%)", "e.g. 0.5 or -0.25")}
-        {field("offset", "Add to offset ($)", "e.g. 20,000")}
+        <div className="field">
+          <label htmlFor={`${fid}-rate-dir`}>Rate</label>
+          <select
+            id={`${fid}-rate-dir`}
+            value={text.rateUp ? "up" : "down"}
+            onChange={(e) => setText({ ...text, rateUp: e.target.value === "up" })}
+          >
+            <option value="up">Goes up</option>
+            <option value="down">Goes down</option>
+          </select>
+        </div>
+        {field("rate", "By (%)", "e.g. 0.5")}
+        <div className="field">
+          <label htmlFor={`${fid}-offset-dir`}>Offset</label>
+          <select
+            id={`${fid}-offset-dir`}
+            value={text.offsetIn ? "in" : "out"}
+            onChange={(e) => setText({ ...text, offsetIn: e.target.value === "in" })}
+          >
+            <option value="in">Put in</option>
+            <option value="out">Take out</option>
+          </select>
+        </div>
+        {field("offset", "Amount ($)", "e.g. 20,000")}
       </div>
       {invalid && <div className="error">Enter numbers only, e.g. 200.</div>}
-      {p.what_if && (
+      {failed && <div className="error">Couldn't try that. Please try again.</div>}
+      {result && !failed && (
         <p className="notice" role="status">
-          {!p.what_if.payoff
-            ? "With that, the repayments wouldn't cover the interest."
-            : result?.months == null
-              ? `With that, it's paid off in ${monthYear(p.what_if.payoff)}.`
-              : result.months >= 0
-                ? `Paid off ${monthYear(p.what_if.payoff)}: ${span(result.months)} sooner, saving ${formatCents(result.interest ?? 0)} in interest.`
-                : `Paid off ${monthYear(p.what_if.payoff)}: ${span(result.months)} later, costing ${formatCents(-(result.interest ?? 0))} more in interest.`}
-          {p.what_if_needed_cents !== null &&
-            text.rate.trim() &&
-            ` Your bank may change your repayment to about ${formatCents(p.what_if_needed_cents)}.`}
+          {result}
         </p>
       )}
     </div>
@@ -235,18 +310,19 @@ function ScheduleTable({ rows }: { rows: MortgageYear[] }) {
 
 function Summary({ loan, p }: { loan: MortgageData; p: MortgageProjection }) {
   const extras = saving(p.regular_only, p.as_you_pay);
+  const made = p.without_extras_made ? saving(p.without_extras_made, p.regular_only) : null;
   const offset = saving(p.without_offset, p.as_you_pay);
   const early =
-    p.contract_end && p.as_you_pay.payoff ? monthsBetween(p.as_you_pay.payoff, p.contract_end) : null;
-  const paidOff =
+    p.contract_end && p.as_you_pay.payoff ? monthsApart(p.as_you_pay.payoff, p.contract_end) : null;
+  const paidOffShare =
     loan.original_cents && loan.original_cents > 0
       ? Math.max(0, Math.min(100, Math.round((1 - p.owing_cents / loan.original_cents) * 100)))
       : null;
   return (
     <ul className="mortgage-summary">
-      {paidOff !== null && (
+      {paidOffShare !== null && (
         <li>
-          You've paid off {paidOff}% of the {formatCents(loan.original_cents ?? 0)} you borrowed.
+          You've paid off {paidOffShare}% of the {formatCents(loan.original_cents ?? 0)} you borrowed.
         </li>
       )}
       {early !== null && p.contract_end && (
@@ -255,24 +331,34 @@ function Summary({ loan, p }: { loan: MortgageData; p: MortgageProjection }) {
           {early > 0
             ? `You're on track to finish ${span(early)} early.`
             : early < 0
-              ? `At this rate you'll finish ${span(early)} late.`
+              ? `At this rate you'll finish ${span(-early)} late.`
               : "You're on track to finish on time."}
         </li>
       )}
-      {p.usual_extra_cents > 0 && extras?.months != null && (
+      {made && (p.extras_made_cents ?? 0) > 0 && (
         <li>
-          Your extra repayments (about {formatCents(p.usual_extra_cents)} a month) save{" "}
-          {formatCents(extras.interest ?? 0)} in interest and {span(extras.months)}.
+          Your extra repayments in the last 12 months ({formatCents(p.extras_made_cents ?? 0)}) bring
+          your pay-off forward {span(made.months)} and save {formatCents(made.interest)} in interest.
         </li>
       )}
-      {p.offset_cents > 0 && offset?.months != null && (
+      {p.usual_extra_cents > 0 && extras && (
         <li>
-          Your offset ({formatCents(p.offset_cents)}) saves {formatCents(offset.interest ?? 0)} in
+          Your usual extra repayments (about {formatCents(p.usual_extra_cents)} a month) save{" "}
+          {formatCents(extras.interest)} in interest and {span(extras.months)}.
+        </li>
+      )}
+      {p.offset_cents > 0 && offset && (
+        <li>
+          Your offset ({formatCents(p.offset_cents)}) saves {formatCents(offset.interest)} in
           interest and {span(offset.months)}.
         </li>
       )}
       {!p.as_you_pay.payoff && (
-        <li className="negative">Your repayments don't cover the interest. Check the rate and repayment.</li>
+        <li className="negative">
+          {p.as_you_pay.stalls
+            ? "Your repayments don't cover the interest. Check the rate and repayment."
+            : "At these repayments it isn't paid off within 50 years. Check the rate and repayment."}
+        </li>
       )}
     </ul>
   );
@@ -290,36 +376,53 @@ function LoanView({ accountId }: { accountId: string }) {
     return () => clearTimeout(t);
   }, [text]);
   const values = whatIfValues(applied);
-  const loan = useQuery({
+  const trying =
+    values !== null &&
+    Boolean(values.extra_cents || values.lump_cents || values.rate_change || values.offset_change_cents);
+  // The loan as it is; and, apart, the what-if. A what-if that fails leaves the page.
+  const base = useQuery({ queryKey: ["mortgage", accountId], queryFn: () => api.mortgage(accountId) });
+  const whatIf = useQuery({
     queryKey: ["mortgage", accountId, values],
     queryFn: () => api.mortgage(accountId, values ?? {}),
+    enabled: trying,
     placeholderData: keepPreviousData,
   });
 
-  if (loan.isLoading) return <p className="muted">Loading…</p>;
-  if (loan.isError || !loan.data) return <div className="error">Couldn't load your home loan.</div>;
-  const data = loan.data;
+  if (base.isLoading) return <p className="muted">Loading…</p>;
+  if (base.isError || !base.data) return <div className="error">Couldn't load your home loan.</div>;
+  const data = (trying && whatIf.data) || base.data;
   const p = data.projection;
+  const notice = message && (
+    <p className="notice" role="status">
+      {message}
+    </p>
+  );
 
   if (!data.set_up || editing) {
     return (
-      <MortgageSetup
-        key={`${data.account_id}-${editing}`}
-        loan={data}
-        onDone={(m) => {
-          setMessage(m);
-          setEditing(false);
-        }}
-        onCancel={data.set_up ? () => setEditing(false) : undefined}
-      />
+      <>
+        {notice}
+        <MortgageSetup
+          key={`${data.account_id}-${editing}`}
+          loan={base.data}
+          onDone={(m) => {
+            setMessage(m);
+            setEditing(false);
+          }}
+          onCancel={data.set_up ? () => setEditing(false) : undefined}
+        />
+      </>
     );
   }
 
+  const doubled = data.manual_liabilities ?? [];
   return (
     <div>
-      {message && (
-        <p className="notice" role="status">
-          {message}
+      {notice}
+      {doubled.length > 0 && (
+        <p className="notice notice-warn" role="status">
+          Net worth also has {doubled.map((n) => `“${n}”`).join(", ")} entered by hand. If that's
+          this loan, remove it there so it isn't counted twice.
         </p>
       )}
       <div className="spread" style={{ marginBottom: 12 }}>
@@ -349,10 +452,10 @@ function LoanView({ accountId }: { accountId: string }) {
             />
             <Stat
               label="Paid off"
-              value={p.as_you_pay.payoff ? monthYear(p.as_you_pay.payoff) : "Never"}
+              value={p.as_you_pay.payoff ? monthYear(p.as_you_pay.payoff) : p.as_you_pay.stalls ? "Never" : "50+ years"}
               sub={
                 p.as_you_pay.payoff
-                  ? `in ${span(monthsBetween(new Date().toISOString().slice(0, 10), p.as_you_pay.payoff))}`
+                  ? `in ${span(monthsApart(localToday(), p.as_you_pay.payoff))}`
                   : "at this repayment"
               }
             />
@@ -373,7 +476,14 @@ function LoanView({ accountId }: { accountId: string }) {
 
           <PayoffChart p={p} />
 
-          <WhatIfPanel p={p} text={text} setText={setText} invalid={values === null} />
+          <WhatIfPanel
+            p={p}
+            text={text}
+            setText={setText}
+            invalid={values === null}
+            tried={values ?? {}}
+            failed={trying && whatIf.isError}
+          />
 
           <div className="card" style={{ marginTop: 16 }}>
             <div className="spread">

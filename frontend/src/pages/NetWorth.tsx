@@ -314,7 +314,7 @@ export function NetWorth() {
           title="Assets"
           tableId="networth-assets"
           items={assets}
-          total={data?.assets_cents ?? 0}
+          total={assets.reduce((sum, i) => sum + i.value_cents, 0)}
           onSave={onSave}
           onRemove={onRemove}
           busy={busy}
@@ -323,7 +323,7 @@ export function NetWorth() {
           title="Liabilities"
           tableId="networth-liabilities"
           items={liabilities}
-          total={data?.liabilities_cents ?? 0}
+          total={liabilities.reduce((sum, i) => sum + i.value_cents, 0)}
           onSave={onSave}
           onRemove={onRemove}
           busy={busy}

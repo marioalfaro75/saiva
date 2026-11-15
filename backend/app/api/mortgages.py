@@ -19,7 +19,7 @@ from ..db import get_db
 from ..deps import get_current_user, require_writer
 from ..services import mortgage as mortgage_service
 from ..services import networth, repayments
-from .accounts import clean_schedule
+from .accounts import clean_schedule, latest_today
 
 router = APIRouter(prefix="/mortgages", tags=["mortgages"])
 
@@ -76,7 +76,8 @@ def _detail(
 ) -> schemas.MortgageOut:
     today = dt.date.today()
     setup = _setup(db, loan)
-    paid = mortgage_service.paid_by_month(db, loan, today)
+    known_on, _ = mortgage_service.known_owing(db, loan, today)
+    past = mortgage_service.history(db, loan, today, known_on)
     suggestion = repayments.suggestion_for(db, loan, today)
     out = schemas.MortgageOut(
         account_id=loan.id,
@@ -96,7 +97,15 @@ def _detail(
             )
             for a in _offset_choices(db, loan.household_id)
         ],
-        paid=[schemas.MortgagePaidMonth(**dataclasses.asdict(m)) for m in paid[0]],
+        paid=[schemas.MortgagePaidMonth(**dataclasses.asdict(m)) for m in past.months],
+        manual_liabilities=list(
+            db.execute(
+                select(models.NetWorthItem.name).where(
+                    models.NetWorthItem.household_id == loan.household_id,
+                    models.NetWorthItem.kind == "liability",
+                )
+            ).scalars()
+        ),
     )
     if setup is None:
         out.missing = ["setup"]
@@ -113,9 +122,9 @@ def _detail(
         schemas.MortgageOffsetOut(account_id=i, name=names.get(i, "An account"), balance_cents=b)
         for i, b in mortgage_service.offset_balance(db, setup).items()
     ]
-    out.balance_as_of = setup.balance_as_of
+    out.balance_as_of = loan.balance_anchor_on
     out.missing = mortgage_service.missing(setup, loan)
-    projection = mortgage_service.project(db, setup, loan, what_if, today, paid)
+    projection = mortgage_service.project(db, setup, loan, what_if, today, past)
     if projection is not None:
         out.projection = schemas.MortgageProjectionOut(**dataclasses.asdict(projection))
     return out
@@ -166,7 +175,7 @@ def save_mortgage(
 ) -> schemas.MortgageOut:
     loan = _loan(db, account_id, user.household_id)
     today = dt.date.today()
-    if payload.owing_on is not None and payload.owing_on > today:
+    if payload.owing_on is not None and payload.owing_on > latest_today():
         raise HTTPException(
             status.HTTP_422_UNPROCESSABLE_ENTITY,
             "The date for what you owe can't be in the future.",
@@ -193,9 +202,7 @@ def save_mortgage(
     setup.offset_account_ids = [a.id for a in offsets] or None
     db.flush()
     if payload.owing_cents is not None:
-        on = payload.owing_on or today
-        mortgage_service.set_balance(db, loan, -payload.owing_cents, on)
-        setup.balance_as_of = on
+        mortgage_service.set_balance(db, loan, -payload.owing_cents, payload.owing_on or today)
     for o in payload.offsets:
         if o.balance_cents is not None:
             mortgage_service.set_balance(db, choices[o.account_id], o.balance_cents, today)

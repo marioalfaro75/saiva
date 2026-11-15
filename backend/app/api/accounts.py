@@ -11,8 +11,7 @@ from sqlalchemy.orm import Session
 from .. import models, schemas
 from ..db import get_db
 from ..deps import get_current_user, require_owner, require_writer
-from ..services import networth, repayments, transfers
-from ..services.mortgage import set_balance
+from ..services import balances, networth, repayments, transfers
 from ..services.transfers import wording_of
 
 router = APIRouter(prefix="/accounts", tags=["accounts"])
@@ -97,6 +96,12 @@ def clean_schedule(periods: list[dict]) -> list[dict] | None:
     return sorted(by_since.values(), key=lambda p: p.get("since") or "") or None
 
 
+def latest_today() -> dt.date:
+    """The latest date that is today somewhere: the server's clock is UTC, and in an
+    Australian morning the household's today is already tomorrow there."""
+    return dt.date.today() + dt.timedelta(days=1)
+
+
 def _get_owned(db: Session, account_id: str, household_id: str) -> models.Account:
     account = db.get(models.Account, account_id)
     if account is None or account.household_id != household_id:
@@ -151,7 +156,7 @@ def update_account(
 ) -> schemas.AccountUpdateOut:
     account = _get_owned(db, account_id, user.household_id)
     balance_on = payload.balance_on or dt.date.today()
-    if payload.balance_cents is not None and balance_on > dt.date.today():
+    if payload.balance_cents is not None and balance_on > latest_today():
         raise HTTPException(
             status.HTTP_422_UNPROCESSABLE_ENTITY, "The balance's date can't be in the future."
         )
@@ -163,8 +168,10 @@ def update_account(
             value = _clean_wording(value or [])
         elif key == "repayment_schedule":
             value = clean_schedule(value or [])
-        elif value is None and key in ("name", "type", "in_net_worth"):
+        elif value is None and key in ("name", "type", "in_net_worth", "opening_balance_cents"):
             continue  # an explicit null is "leave it": these columns are not nullable
+        elif key == "opening_balance_cents":
+            balances.clear_anchor(account)  # what the household sets now
         setattr(account, key, value)
     # The type decides what money into the account is: what was linked under the old
     # one is counted by the new one.
@@ -176,8 +183,7 @@ def update_account(
         db.flush()
         repayments.sort_repayments(db, user.household_id)
     if payload.balance_cents is not None:
-        db.flush()
-        set_balance(db, account, payload.balance_cents, balance_on)
+        balances.set_balance(db, account, payload.balance_cents, balance_on)
     db.commit()
     networth.record_snapshot_if_used(db, user.household_id)
     db.refresh(account)
@@ -200,6 +206,17 @@ def delete_account(
         raise HTTPException(
             status.HTTP_409_CONFLICT, "Account has transactions; delete those first."
         )
+    # Its Mortgage setup goes with it, and it stops offsetting any other loan.
+    for setup in db.execute(
+        select(models.Mortgage).where(models.Mortgage.household_id == user.household_id)
+    ).scalars():
+        if setup.account_id == account.id:
+            db.delete(setup)
+        elif account.id in (setup.offset_account_ids or []):
+            setup.offset_account_ids = [
+                i for i in setup.offset_account_ids or [] if i != account.id
+            ] or None
+    db.flush()
     db.delete(account)
     db.commit()
     return Response(status_code=status.HTTP_204_NO_CONTENT)
