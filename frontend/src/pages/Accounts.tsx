@@ -12,17 +12,8 @@ import { useTable } from "../table/useTable";
 import { TABLE_MIN, TableWrap } from "../table/TableWrap";
 import { formatCents } from "../format";
 import { PageHead } from "../components/PageHead";
-
-const ACCOUNT_TYPES = [
-  "everyday",
-  "savings",
-  "credit_card",
-  "home_loan",
-  "offset",
-  "personal_loan",
-  "cash",
-  "investment",
-];
+import { AccountDialog } from "../components/AccountDialog";
+import { ACCOUNT_TYPES, accountTypeLabel } from "../components/accountTypes";
 
 const ACCOUNT_LABELS = {
   name: "Name",
@@ -48,6 +39,8 @@ export function Accounts() {
   const [name, setName] = useState("");
   const [type, setType] = useState("everyday");
   const [institution, setInstitution] = useState("");
+  const [editing, setEditing] = useState<Account | null>(null);
+  const [flash, setFlash] = useState<string | null>(null);
 
   const create = useMutation({
     mutationFn: () => api.createAccount({ name, type, institution: institution || null }),
@@ -66,6 +59,11 @@ export function Accounts() {
   return (
     <div>
       <PageHead title="Accounts" />
+      {flash && (
+        <div className="notice" role="status">
+          {flash}
+        </div>
+      )}
 
       <div className="grid">
         <div className="card">
@@ -94,11 +92,12 @@ export function Accounts() {
                       <SortHeader table={table} col="txns" numeric>
                         Txns
                       </SortHeader>
+                      <th className="actions"></th>
                     </tr>
                     <FilterRow
                       table={table}
                       labels={ACCOUNT_LABELS}
-                      columns={["name", "type", "institution", "balance", "txns"]}
+                      columns={["name", "type", "institution", "balance", "txns", null]}
                     />
                   </thead>
                   <tbody>
@@ -108,13 +107,22 @@ export function Accounts() {
                           <Link to={`/transactions?account_id=${a.id}`}>{a.name}</Link>
                         </td>
                         <td>
-                          <span className="tag">{a.type.replace(/_/g, " ")}</span>
+                          <span className="tag">{accountTypeLabel(a.type)}</span>
                         </td>
                         <td className="muted">{a.institution ?? "—"}</td>
                         <td className={`num ${a.balance_cents < 0 ? "negative" : ""}`}>
                           {formatCents(a.balance_cents)}
                         </td>
                         <td className="num muted">{a.txn_count}</td>
+                        <td className="actions">
+                          <button
+                            className="btn btn-ghost"
+                            aria-label={`Edit ${a.name}`}
+                            onClick={() => setEditing(a)}
+                          >
+                            Edit
+                          </button>
+                        </td>
                       </tr>
                     ))}
                   </tbody>
@@ -144,7 +152,7 @@ export function Accounts() {
                 <select id={`${fid}-type`} value={type} onChange={(e) => setType(e.target.value)}>
                   {ACCOUNT_TYPES.map((t) => (
                     <option key={t} value={t}>
-                      {t.replace(/_/g, " ")}
+                      {accountTypeLabel(t)}
                     </option>
                   ))}
                 </select>
@@ -165,6 +173,9 @@ export function Accounts() {
           </form>
         </div>
       </div>
+      {editing && (
+        <AccountDialog account={editing} onClose={() => setEditing(null)} onDone={setFlash} />
+      )}
     </div>
   );
 }

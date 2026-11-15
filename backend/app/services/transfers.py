@@ -39,7 +39,7 @@ from ..constants import (
     OWN_ACCOUNTS,
     TRANSFER_CATEGORY,
 )
-from .categorise import ML_MAX_CONFIDENCE, set_by_person
+from .categorise import ML_MAX_CONFIDENCE, RULE_CONFIDENCE, set_by_person
 
 WINDOW_DAYS = 3
 
@@ -216,6 +216,17 @@ def _accounts(db: Session, household_id: str) -> dict[str, models.Account]:
     }
 
 
+def _income_ids(db: Session, household_id: str) -> set[str]:
+    return {
+        cid
+        for (cid,) in db.execute(
+            select(models.Category.id).where(
+                models.Category.household_id == household_id, models.Category.kind == "income"
+            )
+        ).tuples()
+    }
+
+
 def _income_already(t: models.Transaction, income_ids: set[str]) -> bool:
     """An arriving amount a person or a rule already filed as income: a salary that
     happens to equal a payment out of another account is not worth asking about."""
@@ -248,14 +259,7 @@ def find_pairs(
     rows = db.execute(select(models.Transaction).where(*conditions)).scalars().all()
     accounts = _accounts(db, household_id)
     dismissed = _dismissed(db, household_id)
-    income_ids = {
-        cid
-        for (cid,) in db.execute(
-            select(models.Category.id).where(
-                models.Category.household_id == household_id, models.Category.kind == "income"
-            )
-        ).tuples()
-    }
+    income_ids = _income_ids(db, household_id)
 
     # Bucketed on (amount, date) rather than amount alone. Only a few days either
     # side can ever pair, so scanning every same-amount inflow for every outflow did
@@ -376,13 +380,23 @@ def _file_cash_deposits(
     accounts: dict[str, models.Account],
     categories: dict[str, str],
     waiting: set[str],
+    income_ids: set[str],
 ) -> int:
     """File money arriving in savings from none of the household's accounts as a cash
-    deposit -- only what nothing else has placed: no category yet, not a person's
-    choice (a blank they made), not locked, and not waiting in a suggested pair."""
+    deposit -- only what nothing better has placed: no category yet, or only the
+    learner's guess of a spending category (money arriving in savings is not a
+    homewares purchase). Never a person's choice (a blank they made included), a rule's
+    category, a guessed income category, a locked row, or one waiting in a suggestion."""
     cash = categories.get(CASH_DEPOSIT_CATEGORY)
     if cash is None:
         return 0
+
+    def unplaced(t: models.Transaction) -> bool:
+        if t.category_id is None:
+            return not set_by_person(t)
+        guessed = t.confidence is not None and t.confidence < RULE_CONFIDENCE
+        return guessed and t.category_id not in income_ids and t.category_id != cash
+
     filed = 0
     for t in rows:
         account = accounts.get(t.account_id)
@@ -393,9 +407,8 @@ def _file_cash_deposits(
             and t.transfer_group_id is None
             and t.split_parent_id is None
             and not t.is_transfer
-            and t.category_id is None
             and not t.category_locked
-            and not set_by_person(t)
+            and unplaced(t)
             and t.id not in waiting
         ):
             t.category_id = cash
@@ -427,7 +440,7 @@ def classify_transfers(
     conditions = [
         models.Transaction.household_id == household_id,
         models.Transaction.amount_cents > 0,
-        models.Transaction.category_id.is_(None),
+        models.Transaction.transfer_group_id.is_(None),
     ]
     if since is not None:
         conditions.append(models.Transaction.txn_date >= since - dt.timedelta(days=window_days))
@@ -439,6 +452,7 @@ def classify_transfers(
         accounts,
         categories,
         waiting,
+        _income_ids(db, household_id),
     )
     db.commit()
     return scan

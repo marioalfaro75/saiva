@@ -125,4 +125,47 @@ describe("CategoriseDialog", () => {
     fireEvent.keyDown(document, { key: "Tab" });
     expect(dialog.contains(document.activeElement)).toBe(true);
   });
+
+  describe("the note", () => {
+    const submit = (txn: Transaction) => {
+      const onSubmit = vi.fn();
+      render(<CategoriseDialog txn={txn} categories={CATEGORIES} onClose={vi.fn()} onSubmit={onSubmit} />);
+      return onSubmit;
+    };
+    const apply = () => fireEvent.click(screen.getByRole("button", { name: "Apply" }));
+    const note = () => screen.getByRole("textbox", { name: "Note" });
+
+    it("offers the note the description suggests, and uses it when asked", () => {
+      const onSubmit = submit({ ...TXN, note_suggestion: "From Mum · Birthday" });
+      fireEvent.click(screen.getByRole("button", { name: "Use “From Mum · Birthday”" }));
+      expect(note()).toHaveValue("From Mum · Birthday");
+      // Offered only while the note is empty.
+      expect(screen.queryByRole("button", { name: /^Use/ })).toBeNull();
+      apply();
+      expect(onSubmit).toHaveBeenCalledWith(
+        expect.objectContaining({ notes: "From Mum · Birthday" }),
+      );
+    });
+
+    it("sends no note when it was not changed", () => {
+      const onSubmit = submit({ ...TXN, notes: "Gift" });
+      expect(note()).toHaveValue("Gift");
+      apply();
+      expect(onSubmit.mock.calls[0][0]).not.toHaveProperty("notes");
+    });
+
+    it("sends a note typed in, trimmed", () => {
+      const onSubmit = submit(TXN);
+      fireEvent.change(note(), { target: { value: "  School fees  " } });
+      apply();
+      expect(onSubmit).toHaveBeenCalledWith(expect.objectContaining({ notes: "School fees" }));
+    });
+
+    it("clears a note emptied", () => {
+      const onSubmit = submit({ ...TXN, notes: "Gift" });
+      fireEvent.change(note(), { target: { value: "   " } });
+      apply();
+      expect(onSubmit).toHaveBeenCalledWith(expect.objectContaining({ notes: null }));
+    });
+  });
 });

@@ -580,3 +580,23 @@ def test_rules_may_not_change_either_side_of_a_linked_pair() -> None:
     assert not rules_may_change(paying_side)
     paying_side.transfer_group_id = None
     assert rules_may_change(paying_side)
+
+
+def test_a_guessed_spending_category_on_a_savings_deposit_becomes_a_cash_deposit(
+    auth_client: TestClient,
+) -> None:
+    # Seen in the browser: "OSKO PAYMENT FROM MUM" into savings, guessed as Homewares.
+    savings = create_account(auth_client, "Savings", "savings")["id"]
+    homewares, salary = _cat(auth_client, "Homewares"), _cat(auth_client, "Salary/Wages")
+    guessed_spend = _add(auth_client, savings, "2026-06-12", 50000, "OSKO PAYMENT FROM MUM")
+    guessed_income = _add(auth_client, savings, "2026-06-13", 60000, "ACME PAYROLL")
+    rule_made = _add(auth_client, savings, "2026-06-14", 70000, "EBAY SALE")
+    _set(guessed_spend, category_id=homewares, confidence=0.71)
+    _set(guessed_income, category_id=salary, confidence=0.71)
+    _set(rule_made, category_id=homewares, confidence=0.99)
+
+    _scan(auth_client)
+
+    assert _row(guessed_spend).category_id == _cat(auth_client, "Cash deposit")
+    assert _row(guessed_income).category_id == salary
+    assert _row(rule_made).category_id == homewares

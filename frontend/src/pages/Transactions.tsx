@@ -12,6 +12,9 @@ import { useTable } from "../table/useTable";
 import { CategoriseDialog } from "../components/CategoriseDialog";
 import { CategoryPicker } from "../components/CategoryPicker";
 import { RulesManager } from "../components/RulesManager";
+import { TransferDialog } from "../components/TransferDialog";
+import { TransfersPanel } from "../components/TransfersPanel";
+import { transferLabel } from "../components/transferLabels";
 import { matchesAtMount, PHONE, useMediaQuery } from "../hooks/useMediaQuery";
 import { FilterFields, SortChips } from "../table/MobileControls";
 import { TABLE_MIN, TableWrap } from "../table/TableWrap";
@@ -36,13 +39,18 @@ const GROUP_COLUMNS: ColumnSpec<TxnGroup>[] = [
   { key: "total", sort: (g) => g.total_cents, text: (g) => formatCents(g.total_cents) },
 ];
 
-type Tab = "transactions" | "groups" | "rules";
+type Tab = "transactions" | "transfers" | "groups" | "rules";
+const TABS: Tab[] = ["transactions", "transfers", "groups", "rules"];
 type GroupBy = "merchant" | "description";
 
 export function Transactions() {
   const qc = useQueryClient();
   const [searchParams] = useSearchParams();
-  const [tab, setTab] = useState<Tab>("transactions");
+  // Deep-linkable: the import result links straight to the transfers waiting for review.
+  const [tab, setTab] = useState<Tab>(() => {
+    const asked = searchParams.get("tab");
+    return TABS.find((t) => t === asked) ?? "transactions";
+  });
   // Group review is a third view of the same data, not a mode within the list.
   const view = tab === "groups" ? "groups" : "list";
   const [groupBy, setGroupBy] = useState<GroupBy>("merchant");
@@ -50,10 +58,12 @@ export function Transactions() {
   const [accountId, setAccountId] = useState(searchParams.get("account_id") ?? "");
   const [categoryId, setCategoryId] = useState(searchParams.get("category_id") ?? "");
   const [uncategorised, setUncategorised] = useState(searchParams.get("uncategorised") === "true");
+  const [hideTransfers, setHideTransfers] = useState(false);
   const [page, setPage] = useState(1);
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [bulkCat, setBulkCat] = useState("");
   const [dialogTxn, setDialogTxn] = useState<Transaction | null>(null);
+  const [transferTxn, setTransferTxn] = useState<Transaction | null>(null);
   const [flash, setFlash] = useState<string | null>(null);
 
   const showFlash = (message: string) => {
@@ -79,6 +89,7 @@ export function Transactions() {
       accountId,
       categoryId,
       uncategorised,
+      hideTransfers,
       page,
       pageSize,
       period,
@@ -90,6 +101,7 @@ export function Transactions() {
         account_id: accountId || undefined,
         category_id: categoryId || undefined,
         uncategorised: uncategorised || undefined,
+        include_transfers: hideTransfers ? false : undefined,
         period,
         page,
         page_size: pageSize,
@@ -97,6 +109,12 @@ export function Transactions() {
       }),
     enabled: tab === "transactions",
   });
+  // Counted on the tab, so pairs waiting for a decision are seen from the list.
+  const suggestions = useQuery({
+    queryKey: ["transfer-suggestions"],
+    queryFn: api.transferSuggestions,
+  });
+  const toReview = suggestions.data?.length ?? 0;
   const groups = useQuery({
     queryKey: ["txn-groups", groupBy],
     queryFn: () => api.transactionGroups(groupBy, true),
@@ -121,8 +139,14 @@ export function Transactions() {
     onSuccess: invalidate,
   });
   const dialogApply = useMutation({
-    mutationFn: (v: { id: string; body: Parameters<typeof api.recategorise>[1] }) =>
-      api.recategorise(v.id, v.body),
+    mutationFn: async (v: {
+      id: string;
+      body: Parameters<typeof api.recategorise>[1] & { notes?: string | null };
+    }) => {
+      const { notes, ...body } = v.body;
+      if (notes !== undefined) await api.updateTransaction(v.id, { notes });
+      return api.recategorise(v.id, body);
+    },
     onSuccess: (r) => {
       invalidate();
       setDialogTxn(null);
@@ -219,8 +243,16 @@ export function Transactions() {
         {t.category_locked ? "🔒" : "🔓"}
       </button>
       <button
+        className={`icon-btn ${t.transfer_group_id ? "on" : ""}`}
+        title={t.transfer_group_id ? "Linked transfer: change or unlink" : "Link as a transfer…"}
+        aria-label={t.transfer_group_id ? "Transfer link" : "Link as a transfer"}
+        onClick={() => setTransferTxn(t)}
+      >
+        ⇄
+      </button>
+      <button
         className="icon-btn"
-        title="Apply to similar, make a rule…"
+        title="Apply to similar, make a rule, add a note…"
         aria-label="More actions"
         onClick={() => setDialogTxn(t)}
       >
@@ -228,8 +260,11 @@ export function Transactions() {
       </button>
     </>
   );
-  const transferTag = (t: Transaction) =>
-    t.is_transfer ? <span className="tag transfer">transfer</span> : null;
+  const transferTag = (t: Transaction) => {
+    const label = transferLabel(t);
+    return label ? <span className="tag transfer">{label}</span> : null;
+  };
+  const note = (t: Transaction) => (t.notes ? <div className="txn-note muted">{t.notes}</div> : null);
 
   return (
     <div>
@@ -241,6 +276,20 @@ export function Transactions() {
           onClick={() => setTab("transactions")}
         >
           Transactions
+        </button>
+        <button
+          className={`tab ${tab === "transfers" ? "active" : ""}`}
+          onClick={() => {
+            setTab("transfers");
+            setSelected(new Set());
+          }}
+        >
+          Transfers
+          {toReview > 0 && (
+            <span className="tab-count" aria-label={`${toReview} to review`}>
+              {toReview}
+            </span>
+          )}
         </button>
         <button
           className={`tab ${tab === "groups" ? "active" : ""}`}
@@ -260,6 +309,8 @@ export function Transactions() {
 
       {tab === "rules" ? (
         <RulesManager categories={categories.data ?? []} onFlash={showFlash} />
+      ) : tab === "transfers" ? (
+        <TransfersPanel onFlash={showFlash} />
       ) : (
         <>
           <div className="toolbar">
@@ -315,6 +366,21 @@ export function Transactions() {
                   />
                   Needs review
                 </label>
+                <label
+                  className="muted"
+                  style={{ display: "flex", alignItems: "center", gap: 6, margin: 0 }}
+                >
+                  <input
+                    type="checkbox"
+                    style={{ width: "auto" }}
+                    checked={hideTransfers}
+                    onChange={(e) => {
+                      setPage(1);
+                      setHideTransfers(e.target.checked);
+                    }}
+                  />
+                  Hide transfers
+                </label>
               </>
             ) : (
               <>
@@ -365,7 +431,10 @@ export function Transactions() {
                       <li key={t.id} className={selected.has(t.id) ? "txn-card picked" : "txn-card"}>
                         <div className="txn-card-head">
                           {pickBox(t)}
-                          <span className="txn-card-desc">{t.merchant ?? t.raw_description}</span>
+                          <span className="txn-card-desc">
+                            {t.merchant ?? t.raw_description}
+                            {note(t)}
+                          </span>
                           <span
                             className={`num ${t.amount_cents < 0 ? "negative" : "positive"}`}
                           >
@@ -439,6 +508,7 @@ export function Transactions() {
                           <td className="muted">{formatDate(t.txn_date)}</td>
                           <td>
                             {t.merchant ?? t.raw_description} {transferTag(t)}
+                            {note(t)}
                           </td>
                           <td className="muted">{t.account_name}</td>
                           <td>{categoryPicker(t)}</td>
@@ -569,6 +639,14 @@ export function Transactions() {
             </div>
           )}
         </>
+      )}
+
+      {transferTxn && (
+        <TransferDialog
+          txn={transferTxn}
+          onClose={() => setTransferTxn(null)}
+          onDone={showFlash}
+        />
       )}
 
       {dialogTxn && (

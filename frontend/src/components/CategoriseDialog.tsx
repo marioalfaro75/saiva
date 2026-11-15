@@ -16,6 +16,8 @@ interface Props {
     pattern?: string | null;
     make_rule: boolean;
     lock: boolean;
+    /** What it was for; null clears it. Absent when unchanged. */
+    notes?: string | null;
   }) => void;
 }
 
@@ -33,6 +35,7 @@ export function CategoriseDialog({ txn, categories, busy, onClose, onSubmit }: P
   const [pattern, setPattern] = useState(txn.merchant ?? txn.raw_description);
   const [makeRule, setMakeRule] = useState(false);
   const [lock, setLock] = useState(txn.category_locked);
+  const [note, setNote] = useState(txn.notes ?? "");
   // Escape, a focus trap, focus return, and dismissal only when the gesture began
   // outside — so drag-selecting the pattern field no longer discards the edit.
   const panel = useDismissable<HTMLDivElement>(true, onClose);
@@ -88,6 +91,26 @@ export function CategoriseDialog({ txn, categories, busy, onClose, onSubmit }: P
           </div>
         )}
 
+        <div className="field">
+          <label htmlFor={`${fid}-note`}>Note</label>
+          <input
+            id={`${fid}-note`}
+            value={note}
+            onChange={(e) => setNote(e.target.value)}
+            placeholder="What it was for (optional)"
+            maxLength={500}
+          />
+          {!note && txn.note_suggestion && (
+            <button
+              type="button"
+              className="btn btn-ghost note-suggestion"
+              onClick={() => setNote(txn.note_suggestion ?? "")}
+            >
+              Use “{txn.note_suggestion}”
+            </button>
+          )}
+        </div>
+
         <div className="check-row">
           <input
             id="make-rule"
@@ -121,6 +144,7 @@ export function CategoriseDialog({ txn, categories, busy, onClose, onSubmit }: P
                 pattern: scope === "contains" ? pattern : null,
                 make_rule: makeRule,
                 lock,
+                ...(note.trim() !== (txn.notes ?? "") ? { notes: note.trim() || null } : {}),
               })
             }
           >

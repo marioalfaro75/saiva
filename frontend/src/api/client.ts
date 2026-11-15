@@ -1,4 +1,9 @@
 import type {
+  TransferAccept,
+  TransferGroup,
+  TransferKind,
+  TransferScan,
+  TransferSuggestion,
   Account,
   AccountAssignment,
   AccountScanRow,
@@ -178,6 +183,40 @@ export const api = {
   accounts: () => request<Account[]>("/accounts"),
   createAccount: (body: { name: string; type: string; institution?: string | null }) =>
     request<Account>("/accounts", { method: "POST", body: JSON.stringify(body) }),
+  updateAccount: (
+    id: string,
+    patch: {
+      name?: string;
+      type?: string;
+      institution?: string | null;
+      transfer_wording?: string[];
+    },
+  ) =>
+    request<Account>(`/accounts/${id}`, { method: "PATCH", body: JSON.stringify(patch) }),
+
+  detectTransfers: () =>
+    request<TransferScan>("/transactions/detect-transfers", { method: "POST" }),
+  transferSuggestions: () => request<TransferSuggestion[]>("/transfers/suggestions"),
+  recentTransfers: (limit = 30) => request<TransferGroup[]>(`/transfers/recent${qs({ limit })}`),
+  acceptTransfer: (body: {
+    outflow_id: string;
+    inflow_id: string;
+    kind?: TransferKind;
+    learn?: boolean;
+  }) =>
+    request<TransferAccept>("/transfers/accept", { method: "POST", body: JSON.stringify(body) }),
+  dismissTransfer: (body: { outflow_id: string; inflow_id: string }) =>
+    request<void>("/transfers/dismiss", { method: "POST", body: JSON.stringify(body) }),
+  linkTransfer: (body: { first_id: string; second_id: string; kind?: TransferKind }) =>
+    request<TransferGroup>("/transfers/link", { method: "POST", body: JSON.stringify(body) }),
+  linkCandidates: (txnId: string) => request<Transaction[]>(`/transfers/candidates/${txnId}`),
+  unlinkTransfer: (groupId: string) =>
+    request<{ updated: number }>(`/transfers/${groupId}/unlink`, { method: "POST" }),
+  changeTransferKind: (groupId: string, kind: TransferKind) =>
+    request<TransferGroup>(`/transfers/${groupId}/kind`, {
+      method: "POST",
+      body: JSON.stringify({ kind }),
+    }),
 
   categories: () => request<Category[]>("/categories"),
   createCategory: (body: { name: string; parent_id?: string | null; kind?: string }) =>
